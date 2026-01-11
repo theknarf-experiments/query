@@ -5,6 +5,7 @@ members = [
     "crates/sql-parser",
     "crates/sql-planner",
     "crates/sql-storage",
+    "crates/sql-wal",
     "crates/sql-engine",
 ]
 
@@ -24,6 +25,7 @@ sql-lexer = { path = "crates/sql-lexer" }
 sql-parser = { path = "crates/sql-parser" }
 sql-planner = { path = "crates/sql-planner" }
 sql-storage = { path = "crates/sql-storage" }
+sql-wal = { path = "crates/sql-wal" }
 sql-engine = { path = "crates/sql-engine" }
 
 # Testing

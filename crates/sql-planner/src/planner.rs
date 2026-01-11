@@ -1,8 +1,8 @@
 //! Query planner - converts AST statements to logical plans
 
 use sql_parser::{
-    CreateTableStatement, DeleteStatement, Expr, InsertStatement, SelectColumn, SelectStatement,
-    Statement, UpdateStatement,
+    CreateTableStatement, CreateTriggerStatement, DeleteStatement, Expr, InsertStatement,
+    SelectColumn, SelectStatement, Statement, UpdateStatement,
 };
 
 use crate::plan::LogicalPlan;
@@ -29,6 +29,8 @@ pub fn plan(statement: Statement) -> PlanResult {
         Statement::Update(update) => plan_update(update),
         Statement::Delete(delete) => plan_delete(delete),
         Statement::CreateTable(create) => plan_create_table(create),
+        Statement::CreateTrigger(create) => plan_create_trigger(create),
+        Statement::DropTrigger(name) => Ok(LogicalPlan::DropTrigger { name }),
         Statement::Begin => Ok(LogicalPlan::Begin),
         Statement::Commit => Ok(LogicalPlan::Commit),
         Statement::Rollback => Ok(LogicalPlan::Rollback),
@@ -161,6 +163,17 @@ fn plan_delete(delete: DeleteStatement) -> PlanResult {
     Ok(LogicalPlan::Delete {
         table: delete.table,
         where_clause: delete.where_clause,
+    })
+}
+
+/// Plan a CREATE TRIGGER statement
+fn plan_create_trigger(create: CreateTriggerStatement) -> PlanResult {
+    Ok(LogicalPlan::CreateTrigger {
+        name: create.name,
+        timing: create.timing,
+        event: create.event,
+        table: create.table,
+        body: create.body,
     })
 }
 

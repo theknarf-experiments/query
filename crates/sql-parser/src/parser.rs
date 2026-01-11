@@ -61,6 +61,8 @@ fn statement_parser() -> impl Parser<Token, Statement, Error = Simple<Token>> {
         .or(update_parser().map(Statement::Update))
         .or(delete_parser().map(Statement::Delete))
         .or(create_table_parser().map(Statement::CreateTable))
+        .or(create_trigger_parser().map(Statement::CreateTrigger))
+        .or(drop_trigger_parser().map(Statement::DropTrigger))
         .or(begin_parser())
         .or(commit_parser())
         .or(rollback_parser())
@@ -113,6 +115,68 @@ fn release_savepoint_parser() -> impl Parser<Token, Statement, Error = Simple<To
         .ignore_then(just(Token::Keyword(Keyword::Savepoint)).or_not())
         .ignore_then(identifier())
         .map(Statement::ReleaseSavepoint)
+}
+
+/// Parse CREATE TRIGGER
+/// CREATE TRIGGER name (BEFORE|AFTER) (INSERT|UPDATE|DELETE) ON table
+/// FOR EACH ROW (SET column = value | RAISE ERROR 'message'), ...
+fn create_trigger_parser() -> impl Parser<Token, CreateTriggerStatement, Error = Simple<Token>> {
+    let timing = just(Token::Keyword(Keyword::Before))
+        .to(TriggerTiming::Before)
+        .or(just(Token::Keyword(Keyword::After)).to(TriggerTiming::After));
+
+    let event = just(Token::Keyword(Keyword::Insert))
+        .to(TriggerEvent::Insert)
+        .or(just(Token::Keyword(Keyword::Update)).to(TriggerEvent::Update))
+        .or(just(Token::Keyword(Keyword::Delete)).to(TriggerEvent::Delete));
+
+    let set_action = just(Token::Keyword(Keyword::Set))
+        .ignore_then(identifier())
+        .then_ignore(just(Token::Eq))
+        .then(expr_parser())
+        .map(|(column, value)| TriggerAction::SetColumn { column, value });
+
+    let raise_action = just(Token::Keyword(Keyword::Raise))
+        .ignore_then(just(Token::Keyword(Keyword::Error)))
+        .ignore_then(string_literal())
+        .map(TriggerAction::RaiseError);
+
+    let action = set_action.or(raise_action);
+
+    just(Token::Keyword(Keyword::Create))
+        .ignore_then(just(Token::Keyword(Keyword::Trigger)))
+        .ignore_then(identifier())
+        .then(timing)
+        .then(event)
+        .then_ignore(just(Token::Keyword(Keyword::On)))
+        .then(identifier())
+        .then_ignore(just(Token::Keyword(Keyword::For)))
+        .then_ignore(just(Token::Keyword(Keyword::Each)))
+        .then_ignore(just(Token::Keyword(Keyword::Row)))
+        .then(action.separated_by(just(Token::Comma)).at_least(1))
+        .map(
+            |((((name, timing), event), table), body)| CreateTriggerStatement {
+                name,
+                timing,
+                event,
+                table,
+                body,
+            },
+        )
+}
+
+/// Parse DROP TRIGGER name
+fn drop_trigger_parser() -> impl Parser<Token, String, Error = Simple<Token>> {
+    just(Token::Keyword(Keyword::Drop))
+        .ignore_then(just(Token::Keyword(Keyword::Trigger)))
+        .ignore_then(identifier())
+}
+
+/// Parse a string literal
+fn string_literal() -> impl Parser<Token, String, Error = Simple<Token>> + Clone {
+    select! {
+        Token::String(s) => s,
+    }
 }
 
 /// Parse a SELECT statement

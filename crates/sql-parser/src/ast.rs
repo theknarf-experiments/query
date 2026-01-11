@@ -13,6 +13,10 @@ pub enum Statement {
     Delete(DeleteStatement),
     /// CREATE TABLE statement
     CreateTable(CreateTableStatement),
+    /// CREATE TRIGGER statement
+    CreateTrigger(CreateTriggerStatement),
+    /// DROP TRIGGER statement
+    DropTrigger(String),
     /// BEGIN TRANSACTION
     Begin,
     /// COMMIT TRANSACTION
@@ -247,4 +251,38 @@ pub enum DataType {
     Float,
     Text,
     Bool,
+}
+
+/// CREATE TRIGGER statement
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateTriggerStatement {
+    pub name: String,
+    pub timing: TriggerTiming,
+    pub event: TriggerEvent,
+    pub table: String,
+    pub body: Vec<TriggerAction>,
+}
+
+/// When the trigger fires (BEFORE or AFTER)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerTiming {
+    Before,
+    After,
+}
+
+/// Event that fires the trigger
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerEvent {
+    Insert,
+    Update,
+    Delete,
+}
+
+/// Action to take when trigger fires
+#[derive(Debug, Clone, PartialEq)]
+pub enum TriggerAction {
+    /// Set a column to an expression
+    SetColumn { column: String, value: Expr },
+    /// Prevent the operation (for BEFORE triggers)
+    RaiseError(String),
 }

@@ -135,6 +135,16 @@ pub enum Keyword {
     Avg,
     Min,
     Max,
+
+    // Triggers
+    Trigger,
+    Before,
+    After,
+    For,
+    Each,
+    Row,
+    Raise,
+    Error,
 }
 
 /// Error when parsing a keyword fails
@@ -227,6 +237,14 @@ impl std::str::FromStr for Keyword {
             "AVG" => Ok(Self::Avg),
             "MIN" => Ok(Self::Min),
             "MAX" => Ok(Self::Max),
+            "TRIGGER" => Ok(Self::Trigger),
+            "BEFORE" => Ok(Self::Before),
+            "AFTER" => Ok(Self::After),
+            "FOR" => Ok(Self::For),
+            "EACH" => Ok(Self::Each),
+            "ROW" => Ok(Self::Row),
+            "RAISE" => Ok(Self::Raise),
+            "ERROR" => Ok(Self::Error),
             _ => Err(ParseKeywordError),
         }
     }

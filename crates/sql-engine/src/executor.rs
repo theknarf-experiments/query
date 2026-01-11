@@ -2,7 +2,8 @@
 
 use sql_parser::{
     AggregateFunc, Assignment, BinaryOp, ColumnDef, DataType, Expr, ForeignKeyRef as ParserFKRef,
-    JoinType, ReferentialAction as ParserRefAction, UnaryOp,
+    JoinType, ReferentialAction as ParserRefAction, TriggerAction, TriggerEvent, TriggerTiming,
+    UnaryOp,
 };
 use sql_planner::LogicalPlan;
 use sql_storage::{
@@ -39,6 +40,12 @@ pub enum ExecError {
         references_table: String,
         references_column: String,
     },
+    /// Trigger error (RAISE ERROR)
+    TriggerError(String),
+    /// Trigger not found
+    TriggerNotFound(String),
+    /// Trigger already exists
+    TriggerAlreadyExists(String),
 }
 
 impl From<StorageError> for ExecError {
@@ -84,10 +91,21 @@ struct TransactionState {
     snapshots: Vec<MemoryEngine>,
 }
 
+/// Stored trigger definition
+#[derive(Debug, Clone)]
+struct Trigger {
+    name: String,
+    timing: TriggerTiming,
+    event: TriggerEvent,
+    table: String,
+    body: Vec<TriggerAction>,
+}
+
 /// Database engine that executes queries
 pub struct Engine {
     storage: MemoryEngine,
     transaction: TransactionState,
+    triggers: Vec<Trigger>,
 }
 
 impl Default for Engine {
@@ -102,6 +120,7 @@ impl Engine {
         Self {
             storage: MemoryEngine::new(),
             transaction: TransactionState::default(),
+            triggers: Vec::new(),
         }
     }
 
@@ -141,6 +160,15 @@ impl Engine {
             LogicalPlan::Savepoint { name } => self.create_savepoint(&name),
             LogicalPlan::ReleaseSavepoint { name } => self.release_savepoint(&name),
             LogicalPlan::RollbackTo { name } => self.rollback_to_savepoint(&name),
+            // Trigger operations
+            LogicalPlan::CreateTrigger {
+                name,
+                timing,
+                event,
+                table,
+                body,
+            } => self.create_trigger(&name, timing, event, &table, body),
+            LogicalPlan::DropTrigger { name } => self.drop_trigger(&name),
             _ => self.execute_query(plan),
         }
     }
@@ -174,10 +202,33 @@ impl Engine {
         _columns: Option<&[String]>,
         values: &[Vec<Expr>],
     ) -> ExecResult {
+        let schema = self.storage.get_schema(table)?.clone();
+        let column_names: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
+
         let mut count = 0;
         for value_row in values {
-            let row: Row = value_row.iter().map(eval_literal).collect();
-            self.storage.insert(table, row)?;
+            let mut row: Row = value_row.iter().map(eval_literal).collect();
+
+            // Fire BEFORE INSERT triggers
+            self.fire_triggers(
+                table,
+                &TriggerEvent::Insert,
+                &TriggerTiming::Before,
+                &mut row,
+                &column_names,
+            )?;
+
+            self.storage.insert(table, row.clone())?;
+
+            // Fire AFTER INSERT triggers
+            self.fire_triggers(
+                table,
+                &TriggerEvent::Insert,
+                &TriggerTiming::After,
+                &mut row,
+                &column_names,
+            )?;
+
             count += 1;
         }
         Ok(QueryResult::RowsAffected(count))
@@ -497,6 +548,71 @@ impl Engine {
             }
             None => Err(ExecError::SavepointNotFound(name.to_string())),
         }
+    }
+
+    /// Create a trigger
+    fn create_trigger(
+        &mut self,
+        name: &str,
+        timing: TriggerTiming,
+        event: TriggerEvent,
+        table: &str,
+        body: Vec<TriggerAction>,
+    ) -> ExecResult {
+        // Check if trigger already exists
+        if self.triggers.iter().any(|t| t.name == name) {
+            return Err(ExecError::TriggerAlreadyExists(name.to_string()));
+        }
+
+        self.triggers.push(Trigger {
+            name: name.to_string(),
+            timing,
+            event,
+            table: table.to_string(),
+            body,
+        });
+
+        Ok(QueryResult::Success)
+    }
+
+    /// Drop a trigger
+    fn drop_trigger(&mut self, name: &str) -> ExecResult {
+        let pos = self.triggers.iter().position(|t| t.name == name);
+        match pos {
+            Some(idx) => {
+                self.triggers.remove(idx);
+                Ok(QueryResult::Success)
+            }
+            None => Err(ExecError::TriggerNotFound(name.to_string())),
+        }
+    }
+
+    /// Fire triggers for a table and event
+    fn fire_triggers(
+        &self,
+        table: &str,
+        event: &TriggerEvent,
+        timing: &TriggerTiming,
+        row: &mut Row,
+        column_names: &[String],
+    ) -> Result<(), ExecError> {
+        for trigger in &self.triggers {
+            if trigger.table == table && &trigger.event == event && &trigger.timing == timing {
+                for action in &trigger.body {
+                    match action {
+                        TriggerAction::SetColumn { column, value } => {
+                            if let Some(idx) = column_names.iter().position(|c| c == column) {
+                                row[idx] = eval_expr(value, row, column_names);
+                            }
+                        }
+                        TriggerAction::RaiseError(msg) => {
+                            return Err(ExecError::TriggerError(msg.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Execute a SELECT query
@@ -2001,6 +2117,137 @@ mod tests {
         match result.unwrap() {
             QueryResult::Select { rows, .. } => {
                 assert_eq!(rows[0][0], Value::Int(1));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_create_and_drop_trigger() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE t (id INT, name TEXT)")
+            .unwrap();
+
+        // Create a trigger
+        let result = engine.execute(
+            "CREATE TRIGGER set_name BEFORE INSERT ON t FOR EACH ROW SET name = 'default'",
+        );
+        assert_eq!(result.unwrap(), QueryResult::Success);
+
+        // Try to create duplicate trigger
+        let result = engine
+            .execute("CREATE TRIGGER set_name BEFORE INSERT ON t FOR EACH ROW SET name = 'other'");
+        assert_eq!(
+            result.unwrap_err(),
+            ExecError::TriggerAlreadyExists("set_name".to_string())
+        );
+
+        // Drop the trigger
+        let result = engine.execute("DROP TRIGGER set_name");
+        assert_eq!(result.unwrap(), QueryResult::Success);
+
+        // Try to drop non-existent trigger
+        let result = engine.execute("DROP TRIGGER nonexistent");
+        assert_eq!(
+            result.unwrap_err(),
+            ExecError::TriggerNotFound("nonexistent".to_string())
+        );
+    }
+
+    #[test]
+    fn test_before_insert_trigger_set_column() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE users (id INT, name TEXT, status TEXT)")
+            .unwrap();
+
+        // Create a BEFORE INSERT trigger that sets a default status
+        engine
+            .execute(
+                "CREATE TRIGGER set_status BEFORE INSERT ON users FOR EACH ROW SET status = 'active'",
+            )
+            .unwrap();
+
+        // Insert without status - trigger should set it
+        engine
+            .execute("INSERT INTO users (id, name, status) VALUES (1, 'alice', 'pending')")
+            .unwrap();
+
+        // The status should be overwritten by the trigger
+        let result = engine.execute("SELECT status FROM users WHERE id = 1");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Text("active".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_before_insert_trigger_raise_error() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE orders (id INT, amount INT)")
+            .unwrap();
+
+        // Create a trigger that prevents inserts (for testing RAISE ERROR)
+        engine
+            .execute(
+                "CREATE TRIGGER no_inserts BEFORE INSERT ON orders FOR EACH ROW RAISE ERROR 'Inserts not allowed'",
+            )
+            .unwrap();
+
+        // Try to insert - should fail
+        let result = engine.execute("INSERT INTO orders (id, amount) VALUES (1, 100)");
+        assert_eq!(
+            result.unwrap_err(),
+            ExecError::TriggerError("Inserts not allowed".to_string())
+        );
+
+        // Verify no data was inserted
+        let result = engine.execute("SELECT COUNT(*) FROM orders");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Int(0));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_multiple_triggers_same_table() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE items (id INT, name TEXT, created TEXT)")
+            .unwrap();
+
+        // Create multiple triggers
+        engine
+            .execute(
+                "CREATE TRIGGER set_name BEFORE INSERT ON items FOR EACH ROW SET name = 'item'",
+            )
+            .unwrap();
+        engine
+            .execute(
+                "CREATE TRIGGER set_created BEFORE INSERT ON items FOR EACH ROW SET created = 'now'",
+            )
+            .unwrap();
+
+        // Insert - both triggers should fire
+        engine
+            .execute("INSERT INTO items (id, name, created) VALUES (1, 'original', 'old')")
+            .unwrap();
+
+        let result = engine.execute("SELECT name, created FROM items WHERE id = 1");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Text("item".to_string()));
+                assert_eq!(rows[0][1], Value::Text("now".to_string()));
             }
             _ => panic!("Expected Select result"),
         }

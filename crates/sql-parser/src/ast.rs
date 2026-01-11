@@ -17,6 +17,10 @@ pub enum Statement {
     CreateTrigger(CreateTriggerStatement),
     /// DROP TRIGGER statement
     DropTrigger(String),
+    /// DROP TABLE statement
+    DropTable(String),
+    /// ALTER TABLE statement
+    AlterTable(AlterTableStatement),
     /// BEGIN TRANSACTION
     Begin,
     /// COMMIT TRANSACTION
@@ -285,4 +289,24 @@ pub enum TriggerAction {
     SetColumn { column: String, value: Expr },
     /// Prevent the operation (for BEFORE triggers)
     RaiseError(String),
+}
+
+/// ALTER TABLE statement
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlterTableStatement {
+    pub table: String,
+    pub action: AlterAction,
+}
+
+/// ALTER TABLE action
+#[derive(Debug, Clone, PartialEq)]
+pub enum AlterAction {
+    /// ADD COLUMN
+    AddColumn(ColumnDef),
+    /// DROP COLUMN
+    DropColumn(String),
+    /// RENAME COLUMN
+    RenameColumn { old_name: String, new_name: String },
+    /// RENAME TABLE
+    RenameTable(String),
 }

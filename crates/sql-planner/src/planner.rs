@@ -31,6 +31,11 @@ pub fn plan(statement: Statement) -> PlanResult {
         Statement::CreateTable(create) => plan_create_table(create),
         Statement::CreateTrigger(create) => plan_create_trigger(create),
         Statement::DropTrigger(name) => Ok(LogicalPlan::DropTrigger { name }),
+        Statement::DropTable(name) => Ok(LogicalPlan::DropTable { name }),
+        Statement::AlterTable(alter) => Ok(LogicalPlan::AlterTable {
+            table: alter.table,
+            action: alter.action,
+        }),
         Statement::Begin => Ok(LogicalPlan::Begin),
         Statement::Commit => Ok(LogicalPlan::Commit),
         Statement::Rollback => Ok(LogicalPlan::Rollback),

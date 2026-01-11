@@ -1,9 +1,9 @@
 //! Query executor - executes logical plans against storage
 
 use sql_parser::{
-    AggregateFunc, Assignment, BinaryOp, ColumnDef, DataType, Expr, ForeignKeyRef as ParserFKRef,
-    JoinType, ReferentialAction as ParserRefAction, TriggerAction, TriggerEvent, TriggerTiming,
-    UnaryOp,
+    AggregateFunc, AlterAction, Assignment, BinaryOp, ColumnDef, DataType, Expr,
+    ForeignKeyRef as ParserFKRef, JoinType, ReferentialAction as ParserRefAction, TriggerAction,
+    TriggerEvent, TriggerTiming, UnaryOp,
 };
 use sql_planner::LogicalPlan;
 use sql_storage::{
@@ -234,7 +234,49 @@ impl Engine {
                 body,
             } => self.create_trigger(&name, timing, event, &table, body),
             LogicalPlan::DropTrigger { name } => self.drop_trigger(&name),
+            // DDL operations
+            LogicalPlan::DropTable { name } => {
+                self.storage.drop_table(&name)?;
+                Ok(QueryResult::Success)
+            }
+            LogicalPlan::AlterTable { table, action } => self.execute_alter_table(&table, action),
             _ => self.execute_query(plan),
+        }
+    }
+
+    /// Execute an ALTER TABLE statement
+    fn execute_alter_table(&mut self, table: &str, action: AlterAction) -> ExecResult {
+        match action {
+            AlterAction::AddColumn(col_def) => {
+                let default_val = col_def
+                    .default
+                    .as_ref()
+                    .map(eval_literal)
+                    .unwrap_or(Value::Null);
+                let col_schema = ColumnSchema {
+                    name: col_def.name.clone(),
+                    data_type: convert_data_type(&col_def.data_type),
+                    nullable: col_def.nullable,
+                    primary_key: col_def.primary_key,
+                    unique: col_def.unique,
+                    default: col_def.default.as_ref().map(eval_literal),
+                    references: col_def.references.as_ref().map(convert_fk_ref),
+                };
+                self.storage.add_column(table, col_schema, default_val)?;
+                Ok(QueryResult::Success)
+            }
+            AlterAction::DropColumn(col_name) => {
+                self.storage.drop_column(table, &col_name)?;
+                Ok(QueryResult::Success)
+            }
+            AlterAction::RenameColumn { old_name, new_name } => {
+                self.storage.rename_column(table, &old_name, &new_name)?;
+                Ok(QueryResult::Success)
+            }
+            AlterAction::RenameTable(new_name) => {
+                self.storage.rename_table(table, &new_name)?;
+                Ok(QueryResult::Success)
+            }
         }
     }
 
@@ -2313,6 +2355,125 @@ mod tests {
             QueryResult::Select { rows, .. } => {
                 assert_eq!(rows[0][0], Value::Text("item".to_string()));
                 assert_eq!(rows[0][1], Value::Text("now".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_drop_table() {
+        let mut engine = Engine::new();
+
+        engine.execute("CREATE TABLE t (x INT)").unwrap();
+        engine.execute("INSERT INTO t (x) VALUES (1)").unwrap();
+
+        let result = engine.execute("DROP TABLE t");
+        assert_eq!(result.unwrap(), QueryResult::Success);
+
+        // Table should no longer exist
+        let result = engine.execute("SELECT * FROM t");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_alter_table_add_column() {
+        let mut engine = Engine::new();
+
+        engine.execute("CREATE TABLE users (id INT)").unwrap();
+        engine.execute("INSERT INTO users (id) VALUES (1)").unwrap();
+        engine.execute("INSERT INTO users (id) VALUES (2)").unwrap();
+
+        // Add a new column
+        let result = engine.execute("ALTER TABLE users ADD COLUMN name TEXT");
+        assert_eq!(result.unwrap(), QueryResult::Success);
+
+        // Existing rows should have NULL for the new column
+        let result = engine.execute("SELECT id, name FROM users WHERE id = 1");
+        match result.unwrap() {
+            QueryResult::Select { rows, columns } => {
+                assert_eq!(columns, vec!["id", "name"]);
+                assert_eq!(rows[0][0], Value::Int(1));
+                assert_eq!(rows[0][1], Value::Null);
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_alter_table_drop_column() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE users (id INT, name TEXT, email TEXT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (id, name, email) VALUES (1, 'alice', 'a@example.com')")
+            .unwrap();
+
+        // Drop a column
+        let result = engine.execute("ALTER TABLE users DROP COLUMN email");
+        assert_eq!(result.unwrap(), QueryResult::Success);
+
+        // Column should no longer exist
+        let result = engine.execute("SELECT * FROM users WHERE id = 1");
+        match result.unwrap() {
+            QueryResult::Select { rows, columns } => {
+                assert_eq!(columns.len(), 2);
+                assert!(!columns.contains(&"email".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_alter_table_rename_column() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE users (id INT, name TEXT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (id, name) VALUES (1, 'alice')")
+            .unwrap();
+
+        // Rename column
+        let result = engine.execute("ALTER TABLE users RENAME COLUMN name TO full_name");
+        assert_eq!(result.unwrap(), QueryResult::Success);
+
+        // Column should have new name
+        let result = engine.execute("SELECT * FROM users WHERE id = 1");
+        match result.unwrap() {
+            QueryResult::Select { columns, rows } => {
+                assert!(columns.contains(&"full_name".to_string()));
+                assert!(!columns.contains(&"name".to_string()));
+                assert_eq!(rows[0][1], Value::Text("alice".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_alter_table_rename_table() {
+        let mut engine = Engine::new();
+
+        engine.execute("CREATE TABLE old_name (id INT)").unwrap();
+        engine
+            .execute("INSERT INTO old_name (id) VALUES (1)")
+            .unwrap();
+
+        // Rename table
+        let result = engine.execute("ALTER TABLE old_name RENAME TO new_name");
+        assert_eq!(result.unwrap(), QueryResult::Success);
+
+        // Old name should not work
+        let result = engine.execute("SELECT * FROM old_name");
+        assert!(result.is_err());
+
+        // New name should work
+        let result = engine.execute("SELECT * FROM new_name");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Int(1));
             }
             _ => panic!("Expected Select result"),
         }

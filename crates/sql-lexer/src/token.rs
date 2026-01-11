@@ -145,6 +145,11 @@ pub enum Keyword {
     Row,
     Raise,
     Error,
+
+    // Alter table
+    Add,
+    Column,
+    Rename,
 }
 
 /// Error when parsing a keyword fails
@@ -245,6 +250,9 @@ impl std::str::FromStr for Keyword {
             "ROW" => Ok(Self::Row),
             "RAISE" => Ok(Self::Raise),
             "ERROR" => Ok(Self::Error),
+            "ADD" => Ok(Self::Add),
+            "COLUMN" => Ok(Self::Column),
+            "RENAME" => Ok(Self::Rename),
             _ => Err(ParseKeywordError),
         }
     }

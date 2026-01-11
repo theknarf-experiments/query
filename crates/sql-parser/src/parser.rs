@@ -63,6 +63,8 @@ fn statement_parser() -> impl Parser<Token, Statement, Error = Simple<Token>> {
         .or(create_table_parser().map(Statement::CreateTable))
         .or(create_trigger_parser().map(Statement::CreateTrigger))
         .or(drop_trigger_parser().map(Statement::DropTrigger))
+        .or(drop_table_parser().map(Statement::DropTable))
+        .or(alter_table_parser().map(Statement::AlterTable))
         .or(begin_parser())
         .or(commit_parser())
         .or(rollback_parser())
@@ -170,6 +172,49 @@ fn drop_trigger_parser() -> impl Parser<Token, String, Error = Simple<Token>> {
     just(Token::Keyword(Keyword::Drop))
         .ignore_then(just(Token::Keyword(Keyword::Trigger)))
         .ignore_then(identifier())
+}
+
+/// Parse DROP TABLE name
+fn drop_table_parser() -> impl Parser<Token, String, Error = Simple<Token>> {
+    just(Token::Keyword(Keyword::Drop))
+        .ignore_then(just(Token::Keyword(Keyword::Table)))
+        .ignore_then(identifier())
+}
+
+/// Parse ALTER TABLE statement
+fn alter_table_parser() -> impl Parser<Token, AlterTableStatement, Error = Simple<Token>> {
+    let add_column = just(Token::Keyword(Keyword::Add))
+        .ignore_then(just(Token::Keyword(Keyword::Column)).or_not())
+        .ignore_then(column_def_parser())
+        .map(AlterAction::AddColumn);
+
+    let drop_column = just(Token::Keyword(Keyword::Drop))
+        .ignore_then(just(Token::Keyword(Keyword::Column)).or_not())
+        .ignore_then(identifier())
+        .map(AlterAction::DropColumn);
+
+    let rename_column = just(Token::Keyword(Keyword::Rename))
+        .ignore_then(just(Token::Keyword(Keyword::Column)).or_not())
+        .ignore_then(identifier())
+        .then_ignore(just(Token::Keyword(Keyword::To)))
+        .then(identifier())
+        .map(|(old_name, new_name)| AlterAction::RenameColumn { old_name, new_name });
+
+    let rename_table = just(Token::Keyword(Keyword::Rename))
+        .ignore_then(just(Token::Keyword(Keyword::To)))
+        .ignore_then(identifier())
+        .map(AlterAction::RenameTable);
+
+    let action = add_column
+        .or(drop_column)
+        .or(rename_column)
+        .or(rename_table);
+
+    just(Token::Keyword(Keyword::Alter))
+        .ignore_then(just(Token::Keyword(Keyword::Table)))
+        .ignore_then(identifier())
+        .then(action)
+        .map(|(table, action)| AlterTableStatement { table, action })
 }
 
 /// Parse a string literal

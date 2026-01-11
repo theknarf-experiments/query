@@ -115,4 +115,21 @@ pub trait StorageEngine: Send + Sync {
     where
         F: Fn(&Row) -> bool,
         U: Fn(&mut Row);
+
+    /// Add a column to a table
+    fn add_column(
+        &mut self,
+        table: &str,
+        column: ColumnSchema,
+        default: Value,
+    ) -> StorageResult<()>;
+
+    /// Drop a column from a table
+    fn drop_column(&mut self, table: &str, column: &str) -> StorageResult<()>;
+
+    /// Rename a column
+    fn rename_column(&mut self, table: &str, old_name: &str, new_name: &str) -> StorageResult<()>;
+
+    /// Rename a table
+    fn rename_table(&mut self, old_name: &str, new_name: &str) -> StorageResult<()>;
 }

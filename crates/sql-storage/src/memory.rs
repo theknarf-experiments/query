@@ -1,6 +1,6 @@
 //! In-memory storage engine implementation
 
-use crate::engine::{Row, StorageEngine, StorageError, StorageResult, TableSchema};
+use crate::engine::{ColumnSchema, Row, StorageEngine, StorageError, StorageResult, TableSchema};
 use std::collections::HashMap;
 
 /// In-memory storage engine
@@ -104,6 +104,88 @@ impl StorageEngine for MemoryEngine {
             }
         }
         Ok(count)
+    }
+
+    fn add_column(
+        &mut self,
+        table: &str,
+        column: ColumnSchema,
+        default: crate::Value,
+    ) -> StorageResult<()> {
+        let table_data = self
+            .tables
+            .get_mut(table)
+            .ok_or_else(|| StorageError::TableNotFound(table.to_string()))?;
+
+        // Add column to schema
+        table_data.schema.columns.push(column);
+
+        // Add default value to all existing rows
+        for row in &mut table_data.rows {
+            row.push(default.clone());
+        }
+
+        Ok(())
+    }
+
+    fn drop_column(&mut self, table: &str, column: &str) -> StorageResult<()> {
+        let table_data = self
+            .tables
+            .get_mut(table)
+            .ok_or_else(|| StorageError::TableNotFound(table.to_string()))?;
+
+        // Find column index
+        let col_idx = table_data
+            .schema
+            .columns
+            .iter()
+            .position(|c| c.name == column)
+            .ok_or_else(|| StorageError::ColumnNotFound(column.to_string()))?;
+
+        // Remove column from schema
+        table_data.schema.columns.remove(col_idx);
+
+        // Remove value from all existing rows
+        for row in &mut table_data.rows {
+            row.remove(col_idx);
+        }
+
+        Ok(())
+    }
+
+    fn rename_column(&mut self, table: &str, old_name: &str, new_name: &str) -> StorageResult<()> {
+        let table_data = self
+            .tables
+            .get_mut(table)
+            .ok_or_else(|| StorageError::TableNotFound(table.to_string()))?;
+
+        // Find column and rename
+        let col = table_data
+            .schema
+            .columns
+            .iter_mut()
+            .find(|c| c.name == old_name)
+            .ok_or_else(|| StorageError::ColumnNotFound(old_name.to_string()))?;
+
+        col.name = new_name.to_string();
+        Ok(())
+    }
+
+    fn rename_table(&mut self, old_name: &str, new_name: &str) -> StorageResult<()> {
+        let mut table_data = self
+            .tables
+            .remove(old_name)
+            .ok_or_else(|| StorageError::TableNotFound(old_name.to_string()))?;
+
+        if self.tables.contains_key(new_name) {
+            // Restore old table and return error
+            self.tables.insert(old_name.to_string(), table_data);
+            return Err(StorageError::TableAlreadyExists(new_name.to_string()));
+        }
+
+        table_data.schema.name = new_name.to_string();
+        self.tables.insert(new_name.to_string(), table_data);
+        Ok(())
     }
 }
 

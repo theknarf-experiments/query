@@ -79,4 +79,11 @@ pub enum LogicalPlan {
     },
     /// Drop a trigger
     DropTrigger { name: String },
+    /// Drop a table
+    DropTable { name: String },
+    /// Alter a table
+    AlterTable {
+        table: String,
+        action: sql_parser::AlterAction,
+    },
 }

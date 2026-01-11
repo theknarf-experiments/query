@@ -8,6 +8,9 @@ sql-lexer = { workspace = true }
 sql-parser = { workspace = true }
 sql-planner = { workspace = true }
 sql-storage = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+csv = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

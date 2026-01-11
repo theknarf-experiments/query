@@ -1,7 +1,9 @@
 //! SQL Value types
 
+use serde::{Deserialize, Serialize};
+
 /// A runtime SQL value
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {
     Null,
     Bool(bool),

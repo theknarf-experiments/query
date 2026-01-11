@@ -124,6 +124,71 @@ impl Engine {
         }
     }
 
+    /// Export a table to ExportData format for CSV/JSON export
+    pub fn export_table(&self, table: &str) -> Result<crate::io::ExportData, ExecError> {
+        let schema = self.storage.get_schema(table)?;
+        let columns: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
+        let rows = self.storage.scan(table)?;
+
+        Ok(crate::io::ExportData { columns, rows })
+    }
+
+    /// Import data into a table from ImportData
+    pub fn import_into_table(
+        &mut self,
+        table: &str,
+        data: &crate::io::ImportData,
+    ) -> Result<usize, ExecError> {
+        let schema = self.storage.get_schema(table)?.clone();
+        let table_columns: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
+
+        // Map import columns to table columns
+        let column_mapping: Vec<Option<usize>> = if data.columns.is_empty() {
+            // If no headers, assume columns are in order
+            (0..table_columns.len()).map(Some).collect()
+        } else {
+            data.columns
+                .iter()
+                .map(|c| table_columns.iter().position(|tc| tc == c))
+                .collect()
+        };
+
+        let mut count = 0;
+        for row in &data.rows {
+            // Build a row matching the table schema
+            let mut new_row: Row = vec![Value::Null; table_columns.len()];
+            for (i, value) in row.iter().enumerate() {
+                if let Some(Some(target_idx)) = column_mapping.get(i) {
+                    new_row[*target_idx] = value.clone();
+                }
+            }
+
+            // Fire BEFORE INSERT triggers
+            self.fire_triggers(
+                table,
+                &TriggerEvent::Insert,
+                &TriggerTiming::Before,
+                &mut new_row,
+                &table_columns,
+            )?;
+
+            self.storage.insert(table, new_row.clone())?;
+
+            // Fire AFTER INSERT triggers
+            self.fire_triggers(
+                table,
+                &TriggerEvent::Insert,
+                &TriggerTiming::After,
+                &mut new_row,
+                &table_columns,
+            )?;
+
+            count += 1;
+        }
+
+        Ok(count)
+    }
+
     /// Execute a SQL string
     pub fn execute(&mut self, sql: &str) -> ExecResult {
         let stmt = sql_parser::parse(sql)

@@ -1,0 +1,10 @@
+[package]
+name = "sql-planner"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sql-parser = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

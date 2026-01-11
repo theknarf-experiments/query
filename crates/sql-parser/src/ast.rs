@@ -1,0 +1,132 @@
+//! SQL Abstract Syntax Tree types
+
+/// A SQL statement
+#[derive(Debug, Clone, PartialEq)]
+pub enum Statement {
+    /// SELECT statement
+    Select(SelectStatement),
+    /// INSERT statement
+    Insert(InsertStatement),
+    /// CREATE TABLE statement
+    CreateTable(CreateTableStatement),
+}
+
+/// A SELECT statement
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectStatement {
+    pub columns: Vec<SelectColumn>,
+    pub from: Option<TableRef>,
+    pub where_clause: Option<Expr>,
+    pub order_by: Vec<OrderBy>,
+    pub limit: Option<Expr>,
+    pub offset: Option<Expr>,
+}
+
+/// A column in a SELECT statement
+#[derive(Debug, Clone, PartialEq)]
+pub enum SelectColumn {
+    /// All columns (*)
+    Star,
+    /// A single expression with optional alias
+    Expr { expr: Expr, alias: Option<String> },
+}
+
+/// A table reference
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableRef {
+    pub name: String,
+    pub alias: Option<String>,
+}
+
+/// An expression
+#[derive(Debug, Clone, PartialEq)]
+pub enum Expr {
+    /// Column reference
+    Column(String),
+    /// Integer literal
+    Integer(i64),
+    /// Float literal
+    Float(f64),
+    /// String literal
+    String(String),
+    /// Boolean literal
+    Boolean(bool),
+    /// NULL literal
+    Null,
+    /// Binary operation
+    BinaryOp {
+        left: Box<Expr>,
+        op: BinaryOp,
+        right: Box<Expr>,
+    },
+    /// Unary operation
+    UnaryOp { op: UnaryOp, expr: Box<Expr> },
+}
+
+/// Binary operators
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BinaryOp {
+    // Arithmetic
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    // Comparison
+    Eq,
+    NotEq,
+    Lt,
+    Gt,
+    LtEq,
+    GtEq,
+    // Logical
+    And,
+    Or,
+}
+
+/// Unary operators
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnaryOp {
+    Neg,
+    Not,
+}
+
+/// ORDER BY clause element
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrderBy {
+    pub expr: Expr,
+    pub desc: bool,
+}
+
+/// INSERT statement
+#[derive(Debug, Clone, PartialEq)]
+pub struct InsertStatement {
+    pub table: String,
+    pub columns: Option<Vec<String>>,
+    pub values: Vec<Vec<Expr>>,
+}
+
+/// CREATE TABLE statement
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateTableStatement {
+    pub name: String,
+    pub columns: Vec<ColumnDef>,
+}
+
+/// Column definition
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnDef {
+    pub name: String,
+    pub data_type: DataType,
+    pub nullable: bool,
+    pub primary_key: bool,
+}
+
+/// Data types
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DataType {
+    Int,
+    Float,
+    Text,
+    Bool,
+}

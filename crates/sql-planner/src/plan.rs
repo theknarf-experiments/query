@@ -1,32 +1,42 @@
 //! Query plan types
 
+use sql_parser::{Expr, OrderBy};
+
 /// A logical query plan node
 #[derive(Debug, Clone, PartialEq)]
 pub enum LogicalPlan {
     /// Scan a table
-    Scan {
-        table: String,
-        projection: Option<Vec<String>>,
-    },
+    Scan { table: String },
     /// Filter rows
     Filter {
         input: Box<LogicalPlan>,
-        predicate: sql_parser::Expr,
+        predicate: Expr,
     },
-    /// Project columns
+    /// Project columns/expressions
     Projection {
         input: Box<LogicalPlan>,
-        exprs: Vec<sql_parser::Expr>,
+        exprs: Vec<(Expr, Option<String>)>,
     },
     /// Sort rows
     Sort {
         input: Box<LogicalPlan>,
-        order_by: Vec<sql_parser::OrderBy>,
+        order_by: Vec<OrderBy>,
     },
     /// Limit rows
     Limit {
         input: Box<LogicalPlan>,
         limit: usize,
         offset: usize,
+    },
+    /// Insert rows into a table
+    Insert {
+        table: String,
+        columns: Option<Vec<String>>,
+        values: Vec<Vec<Expr>>,
+    },
+    /// Create a new table
+    CreateTable {
+        name: String,
+        columns: Vec<sql_parser::ColumnDef>,
     },
 }

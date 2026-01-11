@@ -2,8 +2,8 @@
 
 use sql_parser::{
     AggregateFunc, AlterAction, Assignment, BinaryOp, ColumnDef, DataType, Expr,
-    ForeignKeyRef as ParserFKRef, JoinType, ReferentialAction as ParserRefAction, TriggerAction,
-    TriggerEvent, TriggerTiming, UnaryOp,
+    ForeignKeyRef as ParserFKRef, JoinType, ReferentialAction as ParserRefAction, Statement,
+    TriggerAction, TriggerEvent, TriggerTiming, UnaryOp,
 };
 use sql_planner::LogicalPlan;
 use sql_storage::{
@@ -875,7 +875,9 @@ impl Engine {
                     QueryResult::Select { columns, rows } => {
                         let filtered: Vec<Vec<Value>> = rows
                             .into_iter()
-                            .filter(|row| eval_predicate(&predicate, row, &columns))
+                            .filter(|row| {
+                                self.eval_predicate_with_subquery(&predicate, row, &columns)
+                            })
                             .collect();
                         Ok(QueryResult::Select {
                             columns,
@@ -1057,6 +1059,106 @@ impl Engine {
             _ => Err(ExecError::InvalidExpression("Unsupported plan".to_string())),
         }
     }
+
+    /// Evaluate a predicate with subquery support
+    fn eval_predicate_with_subquery(&self, expr: &Expr, row: &[Value], columns: &[String]) -> bool {
+        match self.eval_expr_with_subquery(expr, row, columns) {
+            Value::Bool(b) => b,
+            _ => false,
+        }
+    }
+
+    /// Evaluate an expression with subquery support
+    fn eval_expr_with_subquery(&self, expr: &Expr, row: &[Value], columns: &[String]) -> Value {
+        match expr {
+            Expr::Column(name) => {
+                if let Some(idx) = columns.iter().position(|c| c == name) {
+                    row.get(idx).cloned().unwrap_or(Value::Null)
+                } else {
+                    Value::Null
+                }
+            }
+            Expr::Integer(n) => Value::Int(*n),
+            Expr::Float(f) => Value::Float(*f),
+            Expr::String(s) => Value::Text(s.clone()),
+            Expr::Boolean(b) => Value::Bool(*b),
+            Expr::Null => Value::Null,
+            Expr::UnaryOp { op, expr: inner } => {
+                let val = self.eval_expr_with_subquery(inner, row, columns);
+                match op {
+                    UnaryOp::Neg => match val {
+                        Value::Int(n) => Value::Int(-n),
+                        Value::Float(f) => Value::Float(-f),
+                        _ => Value::Null,
+                    },
+                    UnaryOp::Not => match val {
+                        Value::Bool(b) => Value::Bool(!b),
+                        _ => Value::Null,
+                    },
+                }
+            }
+            Expr::BinaryOp { left, op, right } => {
+                let l = self.eval_expr_with_subquery(left, row, columns);
+                let r = self.eval_expr_with_subquery(right, row, columns);
+                eval_binary_op(&l, op, &r)
+            }
+            Expr::Aggregate { .. } => Value::Null,
+            Expr::Subquery(select) => {
+                // Execute the subquery and return the first value
+                if let Ok(plan) = sql_planner::plan(Statement::Select(*select.clone())) {
+                    // Clone self to avoid borrow issues - subqueries use same storage
+                    if let Ok(QueryResult::Select { rows, .. }) = self.execute_subquery(&plan) {
+                        if let Some(first_row) = rows.first() {
+                            if let Some(first_val) = first_row.first() {
+                                return first_val.clone();
+                            }
+                        }
+                    }
+                }
+                Value::Null
+            }
+            Expr::InSubquery {
+                expr,
+                subquery,
+                negated,
+            } => {
+                let val = self.eval_expr_with_subquery(expr, row, columns);
+                if let Ok(plan) = sql_planner::plan(Statement::Select(*subquery.clone())) {
+                    if let Ok(QueryResult::Select { rows, .. }) = self.execute_subquery(&plan) {
+                        // Check if val is in any of the subquery result rows
+                        let found = rows
+                            .iter()
+                            .any(|r| r.first().map(|v| values_equal(v, &val)).unwrap_or(false));
+                        return Value::Bool(if *negated { !found } else { found });
+                    }
+                }
+                Value::Bool(false)
+            }
+            Expr::Exists(select) => {
+                if let Ok(plan) = sql_planner::plan(Statement::Select(*select.clone())) {
+                    if let Ok(QueryResult::Select { rows, .. }) = self.execute_subquery(&plan) {
+                        return Value::Bool(!rows.is_empty());
+                    }
+                }
+                Value::Bool(false)
+            }
+        }
+    }
+
+    /// Execute a subquery (read-only)
+    fn execute_subquery(&self, plan: &LogicalPlan) -> ExecResult {
+        // Clone the plan to avoid borrow issues
+        let plan = plan.clone();
+
+        // Create a temporary mutable self for query execution
+        // Note: subqueries are read-only, so this is safe
+        let temp_engine = Engine {
+            storage: self.storage.clone(),
+            transaction: TransactionState::default(),
+            triggers: self.triggers.clone(),
+        };
+        temp_engine.execute_query(plan)
+    }
 }
 
 /// Group rows by the GROUP BY expressions
@@ -1186,6 +1288,8 @@ fn eval_having_expr(expr: &Expr, group_rows: &[Vec<Value>], columns: &[String]) 
         Expr::String(s) => Value::Text(s.clone()),
         Expr::Boolean(b) => Value::Bool(*b),
         Expr::Null => Value::Null,
+        // Subquery expressions need to be evaluated with context
+        Expr::Subquery(_) | Expr::InSubquery { .. } | Expr::Exists(_) => Value::Null,
     }
 }
 
@@ -1276,6 +1380,8 @@ fn eval_expr(expr: &Expr, row: &[Value], columns: &[String]) -> Value {
         }
         // Aggregates should not be evaluated per-row; they're handled by eval_aggregate
         Expr::Aggregate { .. } => Value::Null,
+        // Subquery expressions need to be evaluated with engine context
+        Expr::Subquery(_) | Expr::InSubquery { .. } | Expr::Exists(_) => Value::Null,
     }
 }
 
@@ -2909,6 +3015,169 @@ mod tests {
                         _ => {}
                     }
                 }
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_in_subquery() {
+        let mut engine = Engine::new();
+
+        // Create and populate parent table
+        engine
+            .execute("CREATE TABLE departments (id INT, name TEXT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO departments (id, name) VALUES (1, 'Engineering')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO departments (id, name) VALUES (2, 'Sales')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO departments (id, name) VALUES (3, 'Marketing')")
+            .unwrap();
+
+        // Create and populate child table
+        engine
+            .execute("CREATE TABLE employees (id INT, name TEXT, dept_id INT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO employees (id, name, dept_id) VALUES (1, 'Alice', 1)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO employees (id, name, dept_id) VALUES (2, 'Bob', 2)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO employees (id, name, dept_id) VALUES (3, 'Charlie', 4)")
+            .unwrap(); // dept_id 4 doesn't exist
+
+        // Select employees in existing departments using IN subquery
+        let result = engine
+            .execute("SELECT name FROM employees WHERE dept_id IN (SELECT id FROM departments)");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                // Alice (dept 1) and Bob (dept 2) should be returned, not Charlie (dept 4)
+                assert_eq!(rows.len(), 2);
+                let names: Vec<&str> = rows
+                    .iter()
+                    .filter_map(|r| match &r[0] {
+                        Value::Text(s) => Some(s.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(names.contains(&"Alice"));
+                assert!(names.contains(&"Bob"));
+                assert!(!names.contains(&"Charlie"));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_not_in_subquery() {
+        let mut engine = Engine::new();
+
+        // Create tables
+        engine.execute("CREATE TABLE active_ids (id INT)").unwrap();
+        engine
+            .execute("INSERT INTO active_ids (id) VALUES (1)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO active_ids (id) VALUES (3)")
+            .unwrap();
+
+        engine
+            .execute("CREATE TABLE items (id INT, name TEXT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO items (id, name) VALUES (1, 'A')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO items (id, name) VALUES (2, 'B')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO items (id, name) VALUES (3, 'C')")
+            .unwrap();
+
+        // Select items NOT IN active_ids
+        let result =
+            engine.execute("SELECT name FROM items WHERE id NOT IN (SELECT id FROM active_ids)");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                // Only item 2 ('B') should be returned
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][0], Value::Text("B".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_exists_subquery() {
+        let mut engine = Engine::new();
+
+        // Create tables
+        engine
+            .execute("CREATE TABLE orders (id INT, customer_id INT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO orders (id, customer_id) VALUES (1, 100)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO orders (id, customer_id) VALUES (2, 101)")
+            .unwrap();
+
+        engine
+            .execute("CREATE TABLE customers (id INT, name TEXT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO customers (id, name) VALUES (100, 'Alice')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO customers (id, name) VALUES (101, 'Bob')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO customers (id, name) VALUES (102, 'Charlie')")
+            .unwrap();
+
+        // EXISTS with subquery that returns results
+        let result =
+            engine.execute("SELECT name FROM customers WHERE EXISTS (SELECT * FROM orders)");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                // EXISTS returns true for all rows since orders has data
+                assert_eq!(rows.len(), 3);
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_exists_empty_subquery() {
+        let mut engine = Engine::new();
+
+        // Create tables
+        engine.execute("CREATE TABLE empty_table (id INT)").unwrap();
+
+        engine
+            .execute("CREATE TABLE data (id INT, name TEXT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO data (id, name) VALUES (1, 'Test')")
+            .unwrap();
+
+        // EXISTS with empty subquery
+        let result =
+            engine.execute("SELECT name FROM data WHERE EXISTS (SELECT * FROM empty_table)");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                // EXISTS returns false since empty_table has no data
+                assert_eq!(rows.len(), 0);
             }
             _ => panic!("Expected Select result"),
         }

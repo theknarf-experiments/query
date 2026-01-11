@@ -108,6 +108,16 @@ pub enum Expr {
     UnaryOp { op: UnaryOp, expr: Box<Expr> },
     /// Aggregate function call
     Aggregate { func: AggregateFunc, arg: Box<Expr> },
+    /// Subquery - a SELECT statement used as an expression
+    Subquery(Box<SelectStatement>),
+    /// IN expression with subquery
+    InSubquery {
+        expr: Box<Expr>,
+        subquery: Box<SelectStatement>,
+        negated: bool,
+    },
+    /// EXISTS subquery
+    Exists(Box<SelectStatement>),
 }
 
 /// Aggregate functions

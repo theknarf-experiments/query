@@ -150,6 +150,9 @@ pub enum Keyword {
     Add,
     Column,
     Rename,
+
+    // Subqueries
+    Exists,
 }
 
 /// Error when parsing a keyword fails
@@ -253,6 +256,7 @@ impl std::str::FromStr for Keyword {
             "ADD" => Ok(Self::Add),
             "COLUMN" => Ok(Self::Column),
             "RENAME" => Ok(Self::Rename),
+            "EXISTS" => Ok(Self::Exists),
             _ => Err(ParseKeywordError),
         }
     }

@@ -412,11 +412,28 @@ fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone {
                 arg: Box::new(arg),
             });
 
+        // EXISTS (SELECT ...)
+        let exists_subquery = just(Token::Keyword(Keyword::Exists))
+            .ignore_then(
+                subquery_select_parser().delimited_by(just(Token::LParen), just(Token::RParen)),
+            )
+            .map(|select| Expr::Exists(Box::new(select)));
+
+        // Scalar subquery: (SELECT ...)
+        let scalar_subquery = subquery_select_parser()
+            .delimited_by(just(Token::LParen), just(Token::RParen))
+            .map(|select| Expr::Subquery(Box::new(select)));
+
         let paren_expr = expr
             .clone()
             .delimited_by(just(Token::LParen), just(Token::RParen));
 
-        let atom = literal.or(aggregate).or(column).or(paren_expr);
+        let atom = literal
+            .or(aggregate)
+            .or(exists_subquery)
+            .or(column)
+            .or(scalar_subquery)
+            .or(paren_expr);
 
         // Unary operators
         let unary = just(Token::Minus)
@@ -462,8 +479,30 @@ fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone {
                 right: Box::new(right),
             });
 
+        // IN subquery: expr [NOT] IN (SELECT ...)
+        let in_subquery = add_sub
+            .clone()
+            .then(
+                just(Token::Keyword(Keyword::Not))
+                    .or_not()
+                    .then_ignore(just(Token::Keyword(Keyword::In)))
+                    .then(
+                        subquery_select_parser()
+                            .delimited_by(just(Token::LParen), just(Token::RParen)),
+                    )
+                    .or_not(),
+            )
+            .map(|(left, in_clause)| match in_clause {
+                Some((negated, subquery)) => Expr::InSubquery {
+                    expr: Box::new(left),
+                    subquery: Box::new(subquery),
+                    negated: negated.is_some(),
+                },
+                None => left,
+            });
+
         // Comparison operators
-        let comparison = add_sub
+        let comparison = in_subquery
             .clone()
             .then(
                 just(Token::Eq)
@@ -473,7 +512,7 @@ fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone {
                     .or(just(Token::Gt).to(BinaryOp::Gt))
                     .or(just(Token::LtEq).to(BinaryOp::LtEq))
                     .or(just(Token::GtEq).to(BinaryOp::GtEq))
-                    .then(add_sub)
+                    .then(in_subquery)
                     .or_not(),
             )
             .map(|(left, right)| match right {
@@ -513,6 +552,113 @@ fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone {
                 right: Box::new(right),
             })
     })
+}
+
+/// Parse a simplified SELECT statement for use in subqueries
+/// This avoids infinite recursion by using simple_expr_parser instead of expr_parser
+fn subquery_select_parser() -> impl Parser<Token, SelectStatement, Error = Simple<Token>> + Clone {
+    let select_kw = just(Token::Keyword(Keyword::Select));
+    let from_kw = just(Token::Keyword(Keyword::From));
+    let where_kw = just(Token::Keyword(Keyword::Where));
+
+    // Simple expression parser that doesn't allow nested subqueries
+    let simple_literal = select! {
+        Token::Integer(n) => Expr::Integer(n),
+        Token::Float(f) => Expr::Float(f.value()),
+        Token::String(s) => Expr::String(s),
+        Token::Keyword(Keyword::True) => Expr::Boolean(true),
+        Token::Keyword(Keyword::False) => Expr::Boolean(false),
+        Token::Keyword(Keyword::Null) => Expr::Null,
+    };
+
+    let simple_column = identifier()
+        .then(just(Token::Dot).ignore_then(identifier()).or_not())
+        .map(|(first, second)| match second {
+            Some(col) => Expr::Column(format!("{}.{}", first, col)),
+            None => Expr::Column(first),
+        });
+
+    let simple_atom = simple_literal.or(simple_column.clone());
+
+    // Comparison for WHERE clause in subquery
+    let simple_comparison = simple_atom
+        .clone()
+        .then(
+            just(Token::Eq)
+                .to(BinaryOp::Eq)
+                .or(just(Token::NotEq).to(BinaryOp::NotEq))
+                .or(just(Token::Lt).to(BinaryOp::Lt))
+                .or(just(Token::Gt).to(BinaryOp::Gt))
+                .or(just(Token::LtEq).to(BinaryOp::LtEq))
+                .or(just(Token::GtEq).to(BinaryOp::GtEq))
+                .then(simple_atom.clone())
+                .or_not(),
+        )
+        .map(|(left, right)| match right {
+            Some((op, right)) => Expr::BinaryOp {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            },
+            None => left,
+        });
+
+    // AND/OR for WHERE clause in subquery
+    let simple_and = simple_comparison
+        .clone()
+        .then(
+            just(Token::Keyword(Keyword::And))
+                .ignore_then(simple_comparison)
+                .repeated(),
+        )
+        .foldl(|left, right| Expr::BinaryOp {
+            left: Box::new(left),
+            op: BinaryOp::And,
+            right: Box::new(right),
+        });
+
+    let simple_expr = simple_and
+        .clone()
+        .then(
+            just(Token::Keyword(Keyword::Or))
+                .ignore_then(simple_and)
+                .repeated(),
+        )
+        .foldl(|left, right| Expr::BinaryOp {
+            left: Box::new(left),
+            op: BinaryOp::Or,
+            right: Box::new(right),
+        });
+
+    let columns = just(Token::Star)
+        .map(|_| vec![SelectColumn::Star])
+        .or(simple_column
+            .map(|e| SelectColumn::Expr {
+                expr: e,
+                alias: None,
+            })
+            .separated_by(just(Token::Comma))
+            .at_least(1));
+
+    let from_clause = from_kw.ignore_then(table_ref_parser()).or_not();
+
+    let where_clause = where_kw.ignore_then(simple_expr).or_not();
+
+    select_kw
+        .ignore_then(columns)
+        .then(from_clause)
+        .then(where_clause)
+        .map(|((columns, from), where_clause)| SelectStatement {
+            columns,
+            from,
+            joins: Vec::new(),
+            where_clause,
+            group_by: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+        })
 }
 
 /// Parse an identifier
@@ -1533,6 +1679,63 @@ mod tests {
                 assert_eq!(s.order_by.len(), 1);
                 assert!(matches!(s.limit, Some(Expr::Integer(10))));
             }
+            _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_in_subquery() {
+        let result = parse("SELECT name FROM users WHERE id IN (SELECT user_id FROM orders)");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Select(s) => {
+                assert!(s.where_clause.is_some());
+                match s.where_clause.unwrap() {
+                    Expr::InSubquery {
+                        expr,
+                        subquery,
+                        negated,
+                    } => {
+                        assert!(!negated);
+                        assert!(matches!(*expr, Expr::Column(c) if c == "id"));
+                        assert_eq!(subquery.columns.len(), 1);
+                    }
+                    _ => panic!("Expected InSubquery"),
+                }
+            }
+            _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_not_in_subquery() {
+        let result = parse("SELECT name FROM users WHERE id NOT IN (SELECT banned_id FROM bans)");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Select(s) => match s.where_clause.unwrap() {
+                Expr::InSubquery { negated, .. } => {
+                    assert!(negated);
+                }
+                _ => panic!("Expected InSubquery"),
+            },
+            _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_exists_subquery() {
+        let result = parse("SELECT name FROM customers WHERE EXISTS (SELECT * FROM orders)");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Select(s) => match s.where_clause.unwrap() {
+                Expr::Exists(subquery) => {
+                    assert!(subquery.from.is_some());
+                }
+                _ => panic!("Expected Exists"),
+            },
             _ => panic!("Expected SELECT statement"),
         }
     }

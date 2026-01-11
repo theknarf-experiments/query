@@ -1,6 +1,6 @@
 //! Query plan types
 
-use sql_parser::{Expr, OrderBy};
+use sql_parser::{Assignment, Expr, OrderBy};
 
 /// A logical query plan node
 #[derive(Debug, Clone, PartialEq)]
@@ -38,5 +38,16 @@ pub enum LogicalPlan {
     CreateTable {
         name: String,
         columns: Vec<sql_parser::ColumnDef>,
+    },
+    /// Update rows in a table
+    Update {
+        table: String,
+        assignments: Vec<Assignment>,
+        where_clause: Option<Expr>,
+    },
+    /// Delete rows from a table
+    Delete {
+        table: String,
+        where_clause: Option<Expr>,
     },
 }

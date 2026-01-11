@@ -1,6 +1,6 @@
 //! Query executor - executes logical plans against storage
 
-use sql_parser::{BinaryOp, ColumnDef, DataType, Expr, UnaryOp};
+use sql_parser::{Assignment, BinaryOp, ColumnDef, DataType, Expr, UnaryOp};
 use sql_planner::LogicalPlan;
 use sql_storage::{
     ColumnSchema, DataType as StorageDataType, MemoryEngine, Row, StorageEngine, StorageError,
@@ -84,6 +84,15 @@ impl Engine {
                 columns,
                 values,
             } => self.execute_insert(&table, columns.as_deref(), &values),
+            LogicalPlan::Update {
+                table,
+                assignments,
+                where_clause,
+            } => self.execute_update(&table, &assignments, where_clause.as_ref()),
+            LogicalPlan::Delete {
+                table,
+                where_clause,
+            } => self.execute_delete(&table, where_clause.as_ref()),
             _ => self.execute_query(plan),
         }
     }
@@ -120,6 +129,71 @@ impl Engine {
             count += 1;
         }
         Ok(QueryResult::RowsAffected(count))
+    }
+
+    /// Execute an UPDATE
+    fn execute_update(
+        &mut self,
+        table: &str,
+        assignments: &[Assignment],
+        where_clause: Option<&Expr>,
+    ) -> ExecResult {
+        let schema = self.storage.get_schema(table)?;
+        let column_names: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
+
+        // Get all rows
+        let rows = self.storage.scan(table)?;
+
+        // Find rows to update and their new values
+        let mut updates: Vec<(usize, Row)> = Vec::new();
+        for (idx, row) in rows.iter().enumerate() {
+            let should_update = match where_clause {
+                Some(predicate) => eval_predicate(predicate, row, &column_names),
+                None => true,
+            };
+            if should_update {
+                // Apply assignments to create new row
+                let mut new_row = row.clone();
+                for assignment in assignments {
+                    if let Some(col_idx) = column_names.iter().position(|c| c == &assignment.column)
+                    {
+                        new_row[col_idx] = eval_expr(&assignment.value, row, &column_names);
+                    }
+                }
+                updates.push((idx, new_row));
+            }
+        }
+
+        // Delete old rows and insert new ones
+        // For simplicity, delete all matching rows then insert updated versions
+        let count = updates.len();
+        if count > 0 {
+            // Delete matching rows
+            let _ = self.storage.delete(table, |row| match where_clause {
+                Some(predicate) => eval_predicate(predicate, row, &column_names),
+                None => true,
+            })?;
+
+            // Insert updated rows
+            for (_, new_row) in updates {
+                self.storage.insert(table, new_row)?;
+            }
+        }
+
+        Ok(QueryResult::RowsAffected(count))
+    }
+
+    /// Execute a DELETE
+    fn execute_delete(&mut self, table: &str, where_clause: Option<&Expr>) -> ExecResult {
+        let schema = self.storage.get_schema(table)?;
+        let column_names: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
+
+        let deleted = self.storage.delete(table, |row| match where_clause {
+            Some(predicate) => eval_predicate(predicate, row, &column_names),
+            None => true,
+        })?;
+
+        Ok(QueryResult::RowsAffected(deleted))
     }
 
     /// Execute a SELECT query
@@ -580,6 +654,107 @@ mod tests {
         match result.unwrap() {
             QueryResult::Select { rows, .. } => {
                 assert_eq!(rows.len(), 2);
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_update() {
+        let mut engine = Engine::new();
+        engine
+            .execute("CREATE TABLE users (id INT, name TEXT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (id, name) VALUES (1, 'alice')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (id, name) VALUES (2, 'bob')")
+            .unwrap();
+
+        let result = engine.execute("UPDATE users SET name = 'alicia' WHERE id = 1");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), QueryResult::RowsAffected(1));
+
+        // Verify the update
+        let result = engine.execute("SELECT name FROM users WHERE id = 1");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][0], Value::Text("alicia".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_update_multiple_rows() {
+        let mut engine = Engine::new();
+        engine.execute("CREATE TABLE t (x INT, y INT)").unwrap();
+        engine
+            .execute("INSERT INTO t (x, y) VALUES (1, 10)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO t (x, y) VALUES (2, 20)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO t (x, y) VALUES (3, 30)")
+            .unwrap();
+
+        let result = engine.execute("UPDATE t SET y = 100 WHERE x > 1");
+        assert_eq!(result.unwrap(), QueryResult::RowsAffected(2));
+
+        let result = engine.execute("SELECT * FROM t WHERE y = 100");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 2);
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_delete() {
+        let mut engine = Engine::new();
+        engine
+            .execute("CREATE TABLE users (id INT, name TEXT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (id, name) VALUES (1, 'alice')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (id, name) VALUES (2, 'bob')")
+            .unwrap();
+
+        let result = engine.execute("DELETE FROM users WHERE id = 1");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), QueryResult::RowsAffected(1));
+
+        // Verify the delete
+        let result = engine.execute("SELECT * FROM users");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 1);
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_delete_all() {
+        let mut engine = Engine::new();
+        engine.execute("CREATE TABLE t (x INT)").unwrap();
+        engine.execute("INSERT INTO t (x) VALUES (1)").unwrap();
+        engine.execute("INSERT INTO t (x) VALUES (2)").unwrap();
+        engine.execute("INSERT INTO t (x) VALUES (3)").unwrap();
+
+        let result = engine.execute("DELETE FROM t");
+        assert_eq!(result.unwrap(), QueryResult::RowsAffected(3));
+
+        let result = engine.execute("SELECT * FROM t");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 0);
             }
             _ => panic!("Expected Select result"),
         }

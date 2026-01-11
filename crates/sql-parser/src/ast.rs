@@ -7,6 +7,10 @@ pub enum Statement {
     Select(SelectStatement),
     /// INSERT statement
     Insert(InsertStatement),
+    /// UPDATE statement
+    Update(UpdateStatement),
+    /// DELETE statement
+    Delete(DeleteStatement),
     /// CREATE TABLE statement
     CreateTable(CreateTableStatement),
 }
@@ -104,6 +108,28 @@ pub struct InsertStatement {
     pub table: String,
     pub columns: Option<Vec<String>>,
     pub values: Vec<Vec<Expr>>,
+}
+
+/// UPDATE statement
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpdateStatement {
+    pub table: String,
+    pub assignments: Vec<Assignment>,
+    pub where_clause: Option<Expr>,
+}
+
+/// Column assignment (SET column = value)
+#[derive(Debug, Clone, PartialEq)]
+pub struct Assignment {
+    pub column: String,
+    pub value: Expr,
+}
+
+/// DELETE statement
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeleteStatement {
+    pub table: String,
+    pub where_clause: Option<Expr>,
 }
 
 /// CREATE TABLE statement

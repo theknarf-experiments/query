@@ -1,7 +1,8 @@
 //! Query planner - converts AST statements to logical plans
 
 use sql_parser::{
-    CreateTableStatement, Expr, InsertStatement, SelectColumn, SelectStatement, Statement,
+    CreateTableStatement, DeleteStatement, Expr, InsertStatement, SelectColumn, SelectStatement,
+    Statement, UpdateStatement,
 };
 
 use crate::plan::LogicalPlan;
@@ -25,6 +26,8 @@ pub fn plan(statement: Statement) -> PlanResult {
     match statement {
         Statement::Select(select) => plan_select(select),
         Statement::Insert(insert) => plan_insert(insert),
+        Statement::Update(update) => plan_update(update),
+        Statement::Delete(delete) => plan_delete(delete),
         Statement::CreateTable(create) => plan_create_table(create),
     }
 }
@@ -123,6 +126,23 @@ fn plan_create_table(create: CreateTableStatement) -> PlanResult {
     Ok(LogicalPlan::CreateTable {
         name: create.name,
         columns: create.columns,
+    })
+}
+
+/// Plan an UPDATE statement
+fn plan_update(update: UpdateStatement) -> PlanResult {
+    Ok(LogicalPlan::Update {
+        table: update.table,
+        assignments: update.assignments,
+        where_clause: update.where_clause,
+    })
+}
+
+/// Plan a DELETE statement
+fn plan_delete(delete: DeleteStatement) -> PlanResult {
+    Ok(LogicalPlan::Delete {
+        table: delete.table,
+        where_clause: delete.where_clause,
     })
 }
 
@@ -270,6 +290,43 @@ mod tests {
                 }
             }
             _ => panic!("Expected Limit"),
+        }
+    }
+
+    #[test]
+    fn test_plan_update() {
+        let result = plan_sql("UPDATE users SET name = 'bob' WHERE id = 1");
+        assert!(result.is_ok());
+        let plan = result.unwrap();
+        match plan {
+            LogicalPlan::Update {
+                table,
+                assignments,
+                where_clause,
+            } => {
+                assert_eq!(table, "users");
+                assert_eq!(assignments.len(), 1);
+                assert_eq!(assignments[0].column, "name");
+                assert!(where_clause.is_some());
+            }
+            _ => panic!("Expected Update"),
+        }
+    }
+
+    #[test]
+    fn test_plan_delete() {
+        let result = plan_sql("DELETE FROM users WHERE id = 1");
+        assert!(result.is_ok());
+        let plan = result.unwrap();
+        match plan {
+            LogicalPlan::Delete {
+                table,
+                where_clause,
+            } => {
+                assert_eq!(table, "users");
+                assert!(where_clause.is_some());
+            }
+            _ => panic!("Expected Delete"),
         }
     }
 }

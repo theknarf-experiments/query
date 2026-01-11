@@ -41,7 +41,7 @@ fn lexer_parser() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>>
 
     // Identifier or keyword
     let ident_or_keyword = text::ident().map(|s: String| {
-        if let Some(kw) = Keyword::from_str(&s) {
+        if let Ok(kw) = s.parse::<Keyword>() {
             Token::Keyword(kw)
         } else {
             Token::Identifier(s)

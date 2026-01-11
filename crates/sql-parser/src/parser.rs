@@ -58,6 +58,8 @@ fn statement_parser() -> impl Parser<Token, Statement, Error = Simple<Token>> {
     select_parser()
         .map(Statement::Select)
         .or(insert_parser().map(Statement::Insert))
+        .or(update_parser().map(Statement::Update))
+        .or(delete_parser().map(Statement::Delete))
         .or(create_table_parser().map(Statement::CreateTable))
         .then_ignore(just(Token::Semicolon).or_not())
 }
@@ -302,6 +304,51 @@ fn insert_parser() -> impl Parser<Token, InsertStatement, Error = Simple<Token>>
             table,
             columns,
             values,
+        })
+}
+
+/// Parse an UPDATE statement
+fn update_parser() -> impl Parser<Token, UpdateStatement, Error = Simple<Token>> {
+    let update_kw = just(Token::Keyword(Keyword::Update));
+    let set_kw = just(Token::Keyword(Keyword::Set));
+    let where_kw = just(Token::Keyword(Keyword::Where));
+
+    let assignment = identifier()
+        .then_ignore(just(Token::Eq))
+        .then(expr_parser())
+        .map(|(column, value)| Assignment { column, value });
+
+    let assignments = assignment.separated_by(just(Token::Comma)).at_least(1);
+
+    let where_clause = where_kw.ignore_then(expr_parser()).or_not();
+
+    update_kw
+        .ignore_then(identifier())
+        .then_ignore(set_kw)
+        .then(assignments)
+        .then(where_clause)
+        .map(|((table, assignments), where_clause)| UpdateStatement {
+            table,
+            assignments,
+            where_clause,
+        })
+}
+
+/// Parse a DELETE statement
+fn delete_parser() -> impl Parser<Token, DeleteStatement, Error = Simple<Token>> {
+    let delete_kw = just(Token::Keyword(Keyword::Delete));
+    let from_kw = just(Token::Keyword(Keyword::From));
+    let where_kw = just(Token::Keyword(Keyword::Where));
+
+    let where_clause = where_kw.ignore_then(expr_parser()).or_not();
+
+    delete_kw
+        .ignore_then(from_kw)
+        .ignore_then(identifier())
+        .then(where_clause)
+        .map(|(table, where_clause)| DeleteStatement {
+            table,
+            where_clause,
         })
 }
 
@@ -619,6 +666,67 @@ mod tests {
                 _ => panic!("Expected expression"),
             },
             _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_update() {
+        let result = parse("UPDATE users SET name = 'bob' WHERE id = 1");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Update(u) => {
+                assert_eq!(u.table, "users");
+                assert_eq!(u.assignments.len(), 1);
+                assert_eq!(u.assignments[0].column, "name");
+                assert!(u.where_clause.is_some());
+            }
+            _ => panic!("Expected UPDATE statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_update_multiple_columns() {
+        let result = parse("UPDATE users SET name = 'bob', age = 30");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Update(u) => {
+                assert_eq!(u.table, "users");
+                assert_eq!(u.assignments.len(), 2);
+                assert_eq!(u.assignments[0].column, "name");
+                assert_eq!(u.assignments[1].column, "age");
+                assert!(u.where_clause.is_none());
+            }
+            _ => panic!("Expected UPDATE statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_delete() {
+        let result = parse("DELETE FROM users WHERE id = 1");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Delete(d) => {
+                assert_eq!(d.table, "users");
+                assert!(d.where_clause.is_some());
+            }
+            _ => panic!("Expected DELETE statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_delete_all() {
+        let result = parse("DELETE FROM users");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Delete(d) => {
+                assert_eq!(d.table, "users");
+                assert!(d.where_clause.is_none());
+            }
+            _ => panic!("Expected DELETE statement"),
         }
     }
 }

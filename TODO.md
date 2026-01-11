@@ -7,4 +7,3 @@
 - [ ] Subqueries
 - [ ] More data types (DATE, TIMESTAMP, etc.)
 - [ ] Indexes for faster queries
-- [ ] Transaction support

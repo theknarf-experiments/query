@@ -24,6 +24,13 @@ pub enum LogicalPlan {
         input: Box<LogicalPlan>,
         exprs: Vec<(Expr, Option<String>)>,
     },
+    /// Aggregate rows by grouping
+    Aggregate {
+        input: Box<LogicalPlan>,
+        group_by: Vec<Expr>,
+        aggregates: Vec<(Expr, Option<String>)>,
+        having: Option<Expr>,
+    },
     /// Sort rows
     Sort {
         input: Box<LogicalPlan>,

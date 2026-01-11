@@ -85,12 +85,26 @@ fn plan_select(select: SelectStatement) -> PlanResult {
         };
     }
 
-    // Apply projection
+    // Check if we have GROUP BY or aggregates
+    let has_group_by = !select.group_by.is_empty();
     let exprs = extract_select_columns(&select.columns);
-    plan = LogicalPlan::Projection {
-        input: Box::new(plan),
-        exprs,
-    };
+    let has_aggregates = exprs.iter().any(|(e, _)| contains_aggregate(e));
+
+    if has_group_by || has_aggregates {
+        // Apply aggregation
+        plan = LogicalPlan::Aggregate {
+            input: Box::new(plan),
+            group_by: select.group_by,
+            aggregates: exprs,
+            having: select.having,
+        };
+    } else {
+        // Apply projection
+        plan = LogicalPlan::Projection {
+            input: Box::new(plan),
+            exprs,
+        };
+    }
 
     // Apply ORDER BY
     if !select.order_by.is_empty() {
@@ -124,6 +138,16 @@ fn plan_select(select: SelectStatement) -> PlanResult {
     }
 
     Ok(plan)
+}
+
+/// Check if an expression contains an aggregate function
+fn contains_aggregate(expr: &Expr) -> bool {
+    match expr {
+        Expr::Aggregate { .. } => true,
+        Expr::BinaryOp { left, right, .. } => contains_aggregate(left) || contains_aggregate(right),
+        Expr::UnaryOp { expr, .. } => contains_aggregate(expr),
+        _ => false,
+    }
 }
 
 /// Extract expressions from SELECT columns

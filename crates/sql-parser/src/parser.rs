@@ -229,6 +229,8 @@ fn select_parser() -> impl Parser<Token, SelectStatement, Error = Simple<Token>>
     let select_kw = just(Token::Keyword(Keyword::Select));
     let from_kw = just(Token::Keyword(Keyword::From));
     let where_kw = just(Token::Keyword(Keyword::Where));
+    let group_kw = just(Token::Keyword(Keyword::Group));
+    let having_kw = just(Token::Keyword(Keyword::Having));
     let order_kw = just(Token::Keyword(Keyword::Order));
     let by_kw = just(Token::Keyword(Keyword::By));
     let limit_kw = just(Token::Keyword(Keyword::Limit));
@@ -243,6 +245,14 @@ fn select_parser() -> impl Parser<Token, SelectStatement, Error = Simple<Token>>
     let joins = join_parser().repeated();
 
     let where_clause = where_kw.ignore_then(expr_parser()).or_not();
+
+    let group_by_clause = group_kw
+        .ignore_then(by_kw.clone())
+        .ignore_then(expr_parser().separated_by(just(Token::Comma)).at_least(1))
+        .or_not()
+        .map(|g| g.unwrap_or_default());
+
+    let having_clause = having_kw.ignore_then(expr_parser()).or_not();
 
     let order_by_clause = order_kw
         .ignore_then(by_kw)
@@ -263,16 +273,23 @@ fn select_parser() -> impl Parser<Token, SelectStatement, Error = Simple<Token>>
         .then(from_clause)
         .then(joins)
         .then(where_clause)
+        .then(group_by_clause)
+        .then(having_clause)
         .then(order_by_clause)
         .then(limit_clause)
         .then(offset_clause)
         .map(
-            |((((((columns, from), joins), where_clause), order_by), limit), offset)| {
+            |(
+                (((((((columns, from), joins), where_clause), group_by), having), order_by), limit),
+                offset,
+            )| {
                 SelectStatement {
                     columns,
                     from,
                     joins,
                     where_clause,
+                    group_by,
+                    having,
                     order_by,
                     limit,
                     offset,
@@ -1444,6 +1461,79 @@ mod tests {
                 }
             }
             _ => panic!("Expected CREATE TABLE statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_group_by() {
+        let result = parse("SELECT category, COUNT(*) FROM orders GROUP BY category");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Select(s) => {
+                assert_eq!(s.group_by.len(), 1);
+                assert!(matches!(&s.group_by[0], Expr::Column(c) if c == "category"));
+            }
+            _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_group_by_multiple_columns() {
+        let result = parse("SELECT a, b, SUM(c) FROM t GROUP BY a, b");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Select(s) => {
+                assert_eq!(s.group_by.len(), 2);
+                assert!(matches!(&s.group_by[0], Expr::Column(c) if c == "a"));
+                assert!(matches!(&s.group_by[1], Expr::Column(c) if c == "b"));
+            }
+            _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_having() {
+        let result = parse(
+            "SELECT category, SUM(amount) FROM orders GROUP BY category HAVING SUM(amount) > 100",
+        );
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Select(s) => {
+                assert_eq!(s.group_by.len(), 1);
+                assert!(s.having.is_some());
+                // HAVING should be a comparison expression
+                match s.having.unwrap() {
+                    Expr::BinaryOp { op, left, .. } => {
+                        assert_eq!(op, BinaryOp::Gt);
+                        assert!(matches!(*left, Expr::Aggregate { .. }));
+                    }
+                    _ => panic!("Expected binary op in HAVING"),
+                }
+            }
+            _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_full_query_with_group_by() {
+        let result = parse(
+            "SELECT category, SUM(amount) AS total FROM orders WHERE active = 1 GROUP BY category HAVING SUM(amount) > 100 ORDER BY total DESC LIMIT 10"
+        );
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Select(s) => {
+                assert!(s.from.is_some());
+                assert!(s.where_clause.is_some());
+                assert_eq!(s.group_by.len(), 1);
+                assert!(s.having.is_some());
+                assert_eq!(s.order_by.len(), 1);
+                assert!(matches!(s.limit, Some(Expr::Integer(10))));
+            }
+            _ => panic!("Expected SELECT statement"),
         }
     }
 }

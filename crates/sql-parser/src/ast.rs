@@ -42,6 +42,8 @@ pub struct SelectStatement {
     pub from: Option<TableRef>,
     pub joins: Vec<Join>,
     pub where_clause: Option<Expr>,
+    pub group_by: Vec<Expr>,
+    pub having: Option<Expr>,
     pub order_by: Vec<OrderBy>,
     pub limit: Option<Expr>,
     pub offset: Option<Expr>,

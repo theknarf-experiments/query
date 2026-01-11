@@ -986,8 +986,206 @@ impl Engine {
                     other => Ok(other),
                 }
             }
+            LogicalPlan::Aggregate {
+                input,
+                group_by,
+                aggregates,
+                having,
+            } => {
+                let result = self.execute_query(*input)?;
+                match result {
+                    QueryResult::Select { columns, rows } => {
+                        // Group the rows
+                        let groups = group_rows(&rows, &group_by, &columns);
+
+                        // Compute aggregates for each group
+                        let new_columns: Vec<String> = aggregates
+                            .iter()
+                            .enumerate()
+                            .map(|(i, (expr, alias))| {
+                                alias.clone().unwrap_or_else(|| match expr {
+                                    Expr::Column(c) => c.clone(),
+                                    Expr::Aggregate { func, .. } => {
+                                        format!("{:?}", func).to_lowercase()
+                                    }
+                                    _ => format!("col{}", i),
+                                })
+                            })
+                            .collect();
+
+                        let mut result_rows: Vec<Vec<Value>> = Vec::new();
+
+                        for (_key, group_rows) in &groups {
+                            // Compute aggregates for this group
+                            let row_values: Vec<Value> = aggregates
+                                .iter()
+                                .map(|(expr, _)| {
+                                    if is_aggregate(expr) {
+                                        eval_aggregate(expr, group_rows, &columns)
+                                    } else {
+                                        // For non-aggregate columns in GROUP BY,
+                                        // just take the first row's value
+                                        group_rows
+                                            .first()
+                                            .map(|r| eval_expr(expr, r, &columns))
+                                            .unwrap_or(Value::Null)
+                                    }
+                                })
+                                .collect();
+
+                            // Apply HAVING filter if present
+                            if let Some(ref having_expr) = having {
+                                // Evaluate having with aggregate values
+                                let having_result =
+                                    eval_having(having_expr, group_rows, &columns, &new_columns);
+                                if !having_result {
+                                    continue;
+                                }
+                            }
+
+                            result_rows.push(row_values);
+                        }
+
+                        Ok(QueryResult::Select {
+                            columns: new_columns,
+                            rows: result_rows,
+                        })
+                    }
+                    other => Ok(other),
+                }
+            }
             _ => Err(ExecError::InvalidExpression("Unsupported plan".to_string())),
         }
+    }
+}
+
+/// Group rows by the GROUP BY expressions
+fn group_rows(
+    rows: &[Vec<Value>],
+    group_by: &[Expr],
+    columns: &[String],
+) -> Vec<(Vec<Value>, Vec<Vec<Value>>)> {
+    use std::collections::HashMap;
+
+    if group_by.is_empty() {
+        // No GROUP BY - all rows are one group
+        return vec![(Vec::new(), rows.to_vec())];
+    }
+
+    let mut groups: HashMap<Vec<u64>, Vec<Vec<Value>>> = HashMap::new();
+
+    for row in rows {
+        // Compute the group key
+        let key: Vec<Value> = group_by
+            .iter()
+            .map(|e| eval_expr(e, row, columns))
+            .collect();
+
+        // Hash the key for the HashMap
+        let hash_key: Vec<u64> = key.iter().map(value_hash).collect();
+
+        groups.entry(hash_key).or_default().push(row.clone());
+    }
+
+    // Convert to Vec to maintain iteration order
+    groups
+        .into_values()
+        .map(|v| {
+            // Reconstruct the actual key values from the first row
+            let key: Vec<Value> = if v.is_empty() {
+                Vec::new()
+            } else {
+                group_by
+                    .iter()
+                    .map(|e| eval_expr(e, &v[0], columns))
+                    .collect()
+            };
+            (key, v)
+        })
+        .collect()
+}
+
+/// Hash a Value for grouping
+fn value_hash(v: &Value) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    match v {
+        Value::Null => 0u8.hash(&mut hasher),
+        Value::Bool(b) => {
+            1u8.hash(&mut hasher);
+            b.hash(&mut hasher);
+        }
+        Value::Int(i) => {
+            2u8.hash(&mut hasher);
+            i.hash(&mut hasher);
+        }
+        Value::Float(f) => {
+            3u8.hash(&mut hasher);
+            f.to_bits().hash(&mut hasher);
+        }
+        Value::Text(s) => {
+            4u8.hash(&mut hasher);
+            s.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+/// Evaluate HAVING clause with aggregate support
+fn eval_having(
+    expr: &Expr,
+    group_rows: &[Vec<Value>],
+    input_columns: &[String],
+    _output_columns: &[String],
+) -> bool {
+    match eval_having_expr(expr, group_rows, input_columns) {
+        Value::Bool(b) => b,
+        _ => false,
+    }
+}
+
+/// Evaluate an expression in HAVING context (where aggregates are computed over the group)
+fn eval_having_expr(expr: &Expr, group_rows: &[Vec<Value>], columns: &[String]) -> Value {
+    match expr {
+        Expr::Aggregate { .. } => eval_aggregate(expr, group_rows, columns),
+        Expr::BinaryOp { left, op, right } => {
+            let l = eval_having_expr(left, group_rows, columns);
+            let r = eval_having_expr(right, group_rows, columns);
+            eval_binary_op(&l, op, &r)
+        }
+        Expr::UnaryOp { op, expr: inner } => {
+            let val = eval_having_expr(inner, group_rows, columns);
+            match op {
+                UnaryOp::Neg => match val {
+                    Value::Int(n) => Value::Int(-n),
+                    Value::Float(f) => Value::Float(-f),
+                    _ => Value::Null,
+                },
+                UnaryOp::Not => match val {
+                    Value::Bool(b) => Value::Bool(!b),
+                    _ => Value::Null,
+                },
+            }
+        }
+        Expr::Column(name) => {
+            // For non-aggregate columns in HAVING, use the first row's value
+            group_rows
+                .first()
+                .and_then(|row| {
+                    columns
+                        .iter()
+                        .position(|c| c == name)
+                        .map(|idx| row.get(idx).cloned().unwrap_or(Value::Null))
+                })
+                .unwrap_or(Value::Null)
+        }
+        Expr::Integer(n) => Value::Int(*n),
+        Expr::Float(f) => Value::Float(*f),
+        Expr::String(s) => Value::Text(s.clone()),
+        Expr::Boolean(b) => Value::Bool(*b),
+        Expr::Null => Value::Null,
     }
 }
 
@@ -2474,6 +2672,243 @@ mod tests {
         match result.unwrap() {
             QueryResult::Select { rows, .. } => {
                 assert_eq!(rows[0][0], Value::Int(1));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_group_by_single_column() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE orders (id INT, category TEXT, amount INT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO orders (id, category, amount) VALUES (1, 'electronics', 100)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO orders (id, category, amount) VALUES (2, 'electronics', 200)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO orders (id, category, amount) VALUES (3, 'books', 50)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO orders (id, category, amount) VALUES (4, 'books', 75)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO orders (id, category, amount) VALUES (5, 'clothing', 150)")
+            .unwrap();
+
+        // Group by category and sum amounts
+        let result = engine.execute("SELECT category, SUM(amount) FROM orders GROUP BY category");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            QueryResult::Select { columns, rows } => {
+                assert_eq!(columns, vec!["category", "sum"]);
+                assert_eq!(rows.len(), 3); // 3 categories
+
+                // Find each category's total
+                for row in &rows {
+                    match &row[0] {
+                        Value::Text(cat) if cat == "electronics" => {
+                            assert_eq!(row[1], Value::Int(300));
+                        }
+                        Value::Text(cat) if cat == "books" => {
+                            assert_eq!(row[1], Value::Int(125));
+                        }
+                        Value::Text(cat) if cat == "clothing" => {
+                            assert_eq!(row[1], Value::Int(150));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_group_by_with_count() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE users (id INT, country TEXT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (id, country) VALUES (1, 'USA')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (id, country) VALUES (2, 'USA')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (id, country) VALUES (3, 'UK')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (id, country) VALUES (4, 'Germany')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (id, country) VALUES (5, 'USA')")
+            .unwrap();
+
+        // Count users per country
+        let result = engine.execute("SELECT country, COUNT(*) FROM users GROUP BY country");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 3); // 3 countries
+
+                for row in &rows {
+                    match &row[0] {
+                        Value::Text(country) if country == "USA" => {
+                            assert_eq!(row[1], Value::Int(3));
+                        }
+                        Value::Text(country) if country == "UK" => {
+                            assert_eq!(row[1], Value::Int(1));
+                        }
+                        Value::Text(country) if country == "Germany" => {
+                            assert_eq!(row[1], Value::Int(1));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_group_by_with_having() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE sales (id INT, product TEXT, amount INT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO sales (id, product, amount) VALUES (1, 'A', 100)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO sales (id, product, amount) VALUES (2, 'A', 200)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO sales (id, product, amount) VALUES (3, 'B', 50)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO sales (id, product, amount) VALUES (4, 'C', 300)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO sales (id, product, amount) VALUES (5, 'C', 400)")
+            .unwrap();
+
+        // Only return products with total > 200
+        let result = engine.execute(
+            "SELECT product, SUM(amount) FROM sales GROUP BY product HAVING SUM(amount) > 200",
+        );
+        assert!(result.is_ok());
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                // A = 300, B = 50, C = 700 -> A and C should be returned
+                assert_eq!(rows.len(), 2);
+
+                let products: Vec<&str> = rows
+                    .iter()
+                    .filter_map(|r| match &r[0] {
+                        Value::Text(s) => Some(s.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(products.contains(&"A"));
+                assert!(products.contains(&"C"));
+                assert!(!products.contains(&"B"));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_group_by_with_avg() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE scores (id INT, subject TEXT, score INT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO scores (id, subject, score) VALUES (1, 'Math', 90)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO scores (id, subject, score) VALUES (2, 'Math', 80)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO scores (id, subject, score) VALUES (3, 'Science', 70)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO scores (id, subject, score) VALUES (4, 'Science', 90)")
+            .unwrap();
+
+        // Average score per subject
+        let result = engine.execute("SELECT subject, AVG(score) FROM scores GROUP BY subject");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 2);
+
+                for row in &rows {
+                    match &row[0] {
+                        Value::Text(subject) if subject == "Math" => {
+                            assert_eq!(row[1], Value::Float(85.0));
+                        }
+                        Value::Text(subject) if subject == "Science" => {
+                            assert_eq!(row[1], Value::Float(80.0));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_group_by_with_min_max() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE products (id INT, category TEXT, price INT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO products (id, category, price) VALUES (1, 'A', 100)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO products (id, category, price) VALUES (2, 'A', 200)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO products (id, category, price) VALUES (3, 'B', 50)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO products (id, category, price) VALUES (4, 'B', 150)")
+            .unwrap();
+
+        // Min and max price per category
+        let result = engine
+            .execute("SELECT category, MIN(price), MAX(price) FROM products GROUP BY category");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 2);
+
+                for row in &rows {
+                    match &row[0] {
+                        Value::Text(cat) if cat == "A" => {
+                            assert_eq!(row[1], Value::Int(100)); // MIN
+                            assert_eq!(row[2], Value::Int(200)); // MAX
+                        }
+                        Value::Text(cat) if cat == "B" => {
+                            assert_eq!(row[1], Value::Int(50)); // MIN
+                            assert_eq!(row[2], Value::Int(150)); // MAX
+                        }
+                        _ => {}
+                    }
+                }
             }
             _ => panic!("Expected Select result"),
         }

@@ -67,6 +67,9 @@ pub enum Keyword {
     Float,
     Double,
     Null,
+    Date,
+    Timestamp,
+    Time,
 
     // Constraints
     Primary,
@@ -195,6 +198,9 @@ impl std::str::FromStr for Keyword {
             "FLOAT" => Ok(Self::Float),
             "DOUBLE" => Ok(Self::Double),
             "NULL" => Ok(Self::Null),
+            "DATE" => Ok(Self::Date),
+            "TIMESTAMP" => Ok(Self::Timestamp),
+            "TIME" => Ok(Self::Time),
             "PRIMARY" => Ok(Self::Primary),
             "KEY" => Ok(Self::Key),
             "FOREIGN" => Ok(Self::Foreign),

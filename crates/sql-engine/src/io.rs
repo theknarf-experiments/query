@@ -142,6 +142,9 @@ fn value_to_string(value: &Value) -> String {
         Value::Int(i) => i.to_string(),
         Value::Float(f) => f.to_string(),
         Value::Text(s) => s.clone(),
+        Value::Date(d) => d.to_string(),
+        Value::Time(t) => t.to_string(),
+        Value::Timestamp(ts) => ts.to_string(),
     }
 }
 
@@ -155,6 +158,9 @@ fn value_to_json(value: &Value) -> serde_json::Value {
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null),
         Value::Text(s) => serde_json::Value::String(s.clone()),
+        Value::Date(d) => serde_json::Value::String(d.to_string()),
+        Value::Time(t) => serde_json::Value::String(t.to_string()),
+        Value::Timestamp(ts) => serde_json::Value::String(ts.to_string()),
     }
 }
 

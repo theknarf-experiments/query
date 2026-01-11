@@ -54,6 +54,9 @@ pub enum DataType {
     Float,
     Text,
     Bool,
+    Date,
+    Time,
+    Timestamp,
 }
 
 /// Table constraint

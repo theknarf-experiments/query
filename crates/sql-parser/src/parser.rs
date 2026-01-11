@@ -798,6 +798,9 @@ fn column_def_parser() -> impl Parser<Token, ColumnDef, Error = Simple<Token>> +
         Token::Keyword(Keyword::Double) => DataType::Float,
         Token::Keyword(Keyword::Bool) => DataType::Bool,
         Token::Keyword(Keyword::Boolean) => DataType::Bool,
+        Token::Keyword(Keyword::Date) => DataType::Date,
+        Token::Keyword(Keyword::Time) => DataType::Time,
+        Token::Keyword(Keyword::Timestamp) => DataType::Timestamp,
     };
 
     // Column constraints can appear in any order after the data type

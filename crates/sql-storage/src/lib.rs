@@ -11,4 +11,4 @@ pub use engine::{
     StorageResult, TableConstraint, TableSchema,
 };
 pub use memory::MemoryEngine;
-pub use value::Value;
+pub use value::{DateValue, TimeValue, TimestampValue, Value};

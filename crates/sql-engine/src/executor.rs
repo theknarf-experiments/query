@@ -1231,6 +1231,29 @@ fn value_hash(v: &Value) -> u64 {
             4u8.hash(&mut hasher);
             s.hash(&mut hasher);
         }
+        Value::Date(d) => {
+            5u8.hash(&mut hasher);
+            d.year.hash(&mut hasher);
+            d.month.hash(&mut hasher);
+            d.day.hash(&mut hasher);
+        }
+        Value::Time(t) => {
+            6u8.hash(&mut hasher);
+            t.hour.hash(&mut hasher);
+            t.minute.hash(&mut hasher);
+            t.second.hash(&mut hasher);
+            t.microsecond.hash(&mut hasher);
+        }
+        Value::Timestamp(ts) => {
+            7u8.hash(&mut hasher);
+            ts.date.year.hash(&mut hasher);
+            ts.date.month.hash(&mut hasher);
+            ts.date.day.hash(&mut hasher);
+            ts.time.hour.hash(&mut hasher);
+            ts.time.minute.hash(&mut hasher);
+            ts.time.second.hash(&mut hasher);
+            ts.time.microsecond.hash(&mut hasher);
+        }
     }
     hasher.finish()
 }
@@ -1300,6 +1323,9 @@ fn convert_data_type(dt: &DataType) -> StorageDataType {
         DataType::Float => StorageDataType::Float,
         DataType::Text => StorageDataType::Text,
         DataType::Bool => StorageDataType::Bool,
+        DataType::Date => StorageDataType::Date,
+        DataType::Time => StorageDataType::Time,
+        DataType::Timestamp => StorageDataType::Timestamp,
     }
 }
 
@@ -3181,5 +3207,47 @@ mod tests {
             }
             _ => panic!("Expected Select result"),
         }
+    }
+
+    #[test]
+    fn test_date_type() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE events (id INT, event_date DATE, name TEXT)")
+            .unwrap();
+
+        // Get schema and verify DATE type
+        let schema = engine.storage.get_schema("events").unwrap();
+        assert_eq!(schema.columns[1].data_type, sql_storage::DataType::Date);
+    }
+
+    #[test]
+    fn test_timestamp_type() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE logs (id INT, created_at TIMESTAMP, message TEXT)")
+            .unwrap();
+
+        // Get schema and verify TIMESTAMP type
+        let schema = engine.storage.get_schema("logs").unwrap();
+        assert_eq!(
+            schema.columns[1].data_type,
+            sql_storage::DataType::Timestamp
+        );
+    }
+
+    #[test]
+    fn test_time_type() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE schedules (id INT, start_time TIME)")
+            .unwrap();
+
+        // Get schema and verify TIME type
+        let schema = engine.storage.get_schema("schedules").unwrap();
+        assert_eq!(schema.columns[1].data_type, sql_storage::DataType::Time);
     }
 }

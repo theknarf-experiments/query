@@ -48,6 +48,13 @@ pub enum LogicalPlan {
         limit: usize,
         offset: usize,
     },
+    /// Union of two queries (combines result sets)
+    Union {
+        left: Box<LogicalPlan>,
+        right: Box<LogicalPlan>,
+        /// If true, keep duplicates (UNION ALL)
+        all: bool,
+    },
     /// Remove duplicate rows
     Distinct { input: Box<LogicalPlan> },
     /// Insert rows into a table

@@ -55,8 +55,7 @@ fn parse_tokens(tokens: Vec<(Token, Span)>) -> ParseResult {
 
 /// Build the statement parser
 fn statement_parser() -> impl Parser<Token, Statement, Error = Simple<Token>> {
-    select_parser()
-        .map(Statement::Select)
+    select_or_union_parser()
         .or(insert_parser().map(Statement::Insert))
         .or(update_parser().map(Statement::Update))
         .or(delete_parser().map(Statement::Delete))
@@ -73,6 +72,36 @@ fn statement_parser() -> impl Parser<Token, Statement, Error = Simple<Token>> {
         .or(savepoint_parser())
         .or(release_savepoint_parser())
         .then_ignore(just(Token::Semicolon).or_not())
+}
+
+/// Parse SELECT possibly followed by UNION
+fn select_or_union_parser() -> impl Parser<Token, Statement, Error = Simple<Token>> {
+    select_parser()
+        .then(
+            just(Token::Keyword(Keyword::Union))
+                .ignore_then(just(Token::Keyword(Keyword::All)).or_not())
+                .then(select_parser())
+                .repeated(),
+        )
+        .map(|(first, unions)| {
+            if unions.is_empty() {
+                Statement::Select(first)
+            } else {
+                // Build the union chain
+                let mut current = SelectOrUnion::Select(Box::new(first));
+                for (all, select) in unions {
+                    current = SelectOrUnion::Union(UnionStatement {
+                        left: Box::new(current),
+                        right: Box::new(SelectOrUnion::Select(Box::new(select))),
+                        all: all.is_some(),
+                    });
+                }
+                match current {
+                    SelectOrUnion::Select(s) => Statement::Select(*s),
+                    SelectOrUnion::Union(u) => Statement::Union(u),
+                }
+            }
+        })
 }
 
 /// Parse BEGIN [TRANSACTION]
@@ -2062,6 +2091,43 @@ mod tests {
                 _ => panic!("Expected BETWEEN expression"),
             },
             _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_union() {
+        let result = parse("SELECT id FROM t1 UNION SELECT id FROM t2");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Union(u) => {
+                assert!(!u.all);
+            }
+            _ => panic!("Expected UNION statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_union_all() {
+        let result = parse("SELECT id FROM t1 UNION ALL SELECT id FROM t2");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Union(u) => {
+                assert!(u.all);
+            }
+            _ => panic!("Expected UNION statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_chained_union() {
+        let result = parse("SELECT a FROM t1 UNION SELECT b FROM t2 UNION SELECT c FROM t3");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Union(_) => {}
+            _ => panic!("Expected UNION statement"),
         }
     }
 }

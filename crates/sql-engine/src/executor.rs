@@ -1075,6 +1075,46 @@ impl Engine {
                     other => Ok(other),
                 }
             }
+            LogicalPlan::Union { left, right, all } => {
+                let left_result = self.execute_query(*left)?;
+                let right_result = self.execute_query(*right)?;
+
+                match (left_result, right_result) {
+                    (
+                        QueryResult::Select {
+                            columns: left_cols,
+                            rows: left_rows,
+                        },
+                        QueryResult::Select {
+                            columns: _right_cols,
+                            rows: right_rows,
+                        },
+                    ) => {
+                        // Combine the rows
+                        let mut combined_rows = left_rows;
+                        combined_rows.extend(right_rows);
+
+                        // If not UNION ALL, remove duplicates
+                        if !all {
+                            let mut unique_rows: Vec<Vec<Value>> = Vec::new();
+                            for row in combined_rows {
+                                if !unique_rows.iter().any(|r| r == &row) {
+                                    unique_rows.push(row);
+                                }
+                            }
+                            combined_rows = unique_rows;
+                        }
+
+                        Ok(QueryResult::Select {
+                            columns: left_cols,
+                            rows: combined_rows,
+                        })
+                    }
+                    _ => Err(ExecError::InvalidExpression(
+                        "UNION requires SELECT inputs".to_string(),
+                    )),
+                }
+            }
             LogicalPlan::Aggregate {
                 input,
                 group_by,
@@ -4111,6 +4151,108 @@ mod tests {
                 assert_eq!(rows.len(), 2);
                 assert_eq!(rows[0][0], Value::Text("cheap".to_string()));
                 assert_eq!(rows[1][0], Value::Text("medium".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_union() {
+        let mut engine = Engine::new();
+
+        engine.execute("CREATE TABLE cats (name TEXT)").unwrap();
+        engine.execute("CREATE TABLE dogs (name TEXT)").unwrap();
+
+        engine
+            .execute("INSERT INTO cats (name) VALUES ('whiskers')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO cats (name) VALUES ('fluffy')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO dogs (name) VALUES ('rex')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO dogs (name) VALUES ('buddy')")
+            .unwrap();
+
+        // Basic UNION
+        let result = engine.execute("SELECT name FROM cats UNION SELECT name FROM dogs");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 4);
+                let names: Vec<_> = rows.iter().map(|r| r[0].clone()).collect();
+                assert!(names.contains(&Value::Text("whiskers".to_string())));
+                assert!(names.contains(&Value::Text("fluffy".to_string())));
+                assert!(names.contains(&Value::Text("rex".to_string())));
+                assert!(names.contains(&Value::Text("buddy".to_string())));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_union_removes_duplicates() {
+        let mut engine = Engine::new();
+
+        engine.execute("CREATE TABLE t1 (val INT)").unwrap();
+        engine.execute("CREATE TABLE t2 (val INT)").unwrap();
+
+        engine.execute("INSERT INTO t1 (val) VALUES (1)").unwrap();
+        engine.execute("INSERT INTO t1 (val) VALUES (2)").unwrap();
+        engine.execute("INSERT INTO t2 (val) VALUES (2)").unwrap();
+        engine.execute("INSERT INTO t2 (val) VALUES (3)").unwrap();
+
+        // UNION removes duplicates (2 appears in both tables)
+        let result = engine.execute("SELECT val FROM t1 UNION SELECT val FROM t2");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 3); // 1, 2, 3 (not 1, 2, 2, 3)
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_union_all_keeps_duplicates() {
+        let mut engine = Engine::new();
+
+        engine.execute("CREATE TABLE t1 (val INT)").unwrap();
+        engine.execute("CREATE TABLE t2 (val INT)").unwrap();
+
+        engine.execute("INSERT INTO t1 (val) VALUES (1)").unwrap();
+        engine.execute("INSERT INTO t1 (val) VALUES (2)").unwrap();
+        engine.execute("INSERT INTO t2 (val) VALUES (2)").unwrap();
+        engine.execute("INSERT INTO t2 (val) VALUES (3)").unwrap();
+
+        // UNION ALL keeps all rows including duplicates
+        let result = engine.execute("SELECT val FROM t1 UNION ALL SELECT val FROM t2");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 4); // 1, 2, 2, 3
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_chained_unions() {
+        let mut engine = Engine::new();
+
+        engine.execute("CREATE TABLE t1 (val INT)").unwrap();
+        engine.execute("CREATE TABLE t2 (val INT)").unwrap();
+        engine.execute("CREATE TABLE t3 (val INT)").unwrap();
+
+        engine.execute("INSERT INTO t1 (val) VALUES (1)").unwrap();
+        engine.execute("INSERT INTO t2 (val) VALUES (2)").unwrap();
+        engine.execute("INSERT INTO t3 (val) VALUES (3)").unwrap();
+
+        // Multiple UNIONs
+        let result =
+            engine.execute("SELECT val FROM t1 UNION SELECT val FROM t2 UNION SELECT val FROM t3");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 3);
             }
             _ => panic!("Expected Select result"),
         }

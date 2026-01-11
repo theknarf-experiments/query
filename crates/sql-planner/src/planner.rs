@@ -2,7 +2,8 @@
 
 use sql_parser::{
     CreateIndexStatement, CreateTableStatement, CreateTriggerStatement, DeleteStatement, Expr,
-    InsertStatement, SelectColumn, SelectStatement, Statement, UpdateStatement,
+    InsertStatement, SelectColumn, SelectOrUnion, SelectStatement, Statement, UnionStatement,
+    UpdateStatement,
 };
 
 use crate::plan::LogicalPlan;
@@ -25,6 +26,7 @@ pub enum PlanError {
 pub fn plan(statement: Statement) -> PlanResult {
     match statement {
         Statement::Select(select) => plan_select(select),
+        Statement::Union(union) => plan_union(union),
         Statement::Insert(insert) => plan_insert(insert),
         Statement::Update(update) => plan_update(update),
         Statement::Delete(delete) => plan_delete(delete),
@@ -44,6 +46,25 @@ pub fn plan(statement: Statement) -> PlanResult {
         Statement::Savepoint(name) => Ok(LogicalPlan::Savepoint { name }),
         Statement::ReleaseSavepoint(name) => Ok(LogicalPlan::ReleaseSavepoint { name }),
         Statement::RollbackTo(name) => Ok(LogicalPlan::RollbackTo { name }),
+    }
+}
+
+/// Plan a UNION statement
+fn plan_union(union: UnionStatement) -> PlanResult {
+    let left = plan_select_or_union(*union.left)?;
+    let right = plan_select_or_union(*union.right)?;
+    Ok(LogicalPlan::Union {
+        left: Box::new(left),
+        right: Box::new(right),
+        all: union.all,
+    })
+}
+
+/// Plan a SelectOrUnion (recursive helper)
+fn plan_select_or_union(node: SelectOrUnion) -> PlanResult {
+    match node {
+        SelectOrUnion::Select(select) => plan_select(*select),
+        SelectOrUnion::Union(union) => plan_union(union),
     }
 }
 

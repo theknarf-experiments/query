@@ -2,7 +2,7 @@
 
 ## Future Enhancements
 
-- [ ] UNION, INTERSECT, EXCEPT operators
+- [ ] INTERSECT, EXCEPT operators
 - [ ] Window functions (ROW_NUMBER, RANK, etc.)
 - [ ] Common Table Expressions (WITH clause)
 - [ ] Views

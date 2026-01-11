@@ -5,6 +5,8 @@
 pub enum Statement {
     /// SELECT statement
     Select(SelectStatement),
+    /// UNION of two or more SELECT statements
+    Union(UnionStatement),
     /// INSERT statement
     Insert(InsertStatement),
     /// UPDATE statement
@@ -37,6 +39,24 @@ pub enum Statement {
     ReleaseSavepoint(String),
     /// ROLLBACK TO SAVEPOINT name
     RollbackTo(String),
+}
+
+/// A UNION statement combining multiple SELECT queries
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnionStatement {
+    /// The left side of the union
+    pub left: Box<SelectOrUnion>,
+    /// The right side of the union
+    pub right: Box<SelectOrUnion>,
+    /// Whether to keep duplicates (UNION ALL vs UNION)
+    pub all: bool,
+}
+
+/// Either a SELECT statement or a UNION (for chaining)
+#[derive(Debug, Clone, PartialEq)]
+pub enum SelectOrUnion {
+    Select(Box<SelectStatement>),
+    Union(UnionStatement),
 }
 
 /// A SELECT statement

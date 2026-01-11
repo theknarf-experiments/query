@@ -164,6 +164,10 @@ pub enum Keyword {
     Then,
     Else,
     End,
+
+    // Set operations
+    Union,
+    All,
 }
 
 /// Error when parsing a keyword fails
@@ -277,6 +281,8 @@ impl std::str::FromStr for Keyword {
             "THEN" => Ok(Self::Then),
             "ELSE" => Ok(Self::Else),
             "END" => Ok(Self::End),
+            "UNION" => Ok(Self::Union),
+            "ALL" => Ok(Self::All),
             _ => Err(ParseKeywordError),
         }
     }

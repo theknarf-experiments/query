@@ -81,6 +81,30 @@ impl StorageEngine for MemoryEngine {
         table_data.rows.retain(|row| !predicate(row));
         Ok(original_len - table_data.rows.len())
     }
+
+    fn table_names(&self) -> Vec<String> {
+        self.tables.keys().cloned().collect()
+    }
+
+    fn update<F, U>(&mut self, table: &str, predicate: F, updater: U) -> StorageResult<usize>
+    where
+        F: Fn(&Row) -> bool,
+        U: Fn(&mut Row),
+    {
+        let table_data = self
+            .tables
+            .get_mut(table)
+            .ok_or_else(|| StorageError::TableNotFound(table.to_string()))?;
+
+        let mut count = 0;
+        for row in &mut table_data.rows {
+            if predicate(row) {
+                updater(row);
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
 }
 
 #[cfg(test)]

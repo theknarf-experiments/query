@@ -96,6 +96,9 @@ pub trait StorageEngine: Send + Sync {
     /// Get table schema
     fn get_schema(&self, name: &str) -> StorageResult<&TableSchema>;
 
+    /// Get all table names
+    fn table_names(&self) -> Vec<String>;
+
     /// Insert a row into a table
     fn insert(&mut self, table: &str, row: Row) -> StorageResult<()>;
 
@@ -106,4 +109,10 @@ pub trait StorageEngine: Send + Sync {
     fn delete<F>(&mut self, table: &str, predicate: F) -> StorageResult<usize>
     where
         F: Fn(&Row) -> bool;
+
+    /// Update rows matching a predicate
+    fn update<F, U>(&mut self, table: &str, predicate: F, updater: U) -> StorageResult<usize>
+    where
+        F: Fn(&Row) -> bool,
+        U: Fn(&mut Row);
 }

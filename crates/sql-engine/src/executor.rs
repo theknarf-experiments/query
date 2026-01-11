@@ -32,6 +32,13 @@ pub enum ExecError {
     TransactionAlreadyActive,
     /// Savepoint not found
     SavepointNotFound(String),
+    /// Foreign key constraint violation
+    ForeignKeyViolation {
+        table: String,
+        column: String,
+        references_table: String,
+        references_column: String,
+    },
 }
 
 impl From<StorageError> for ExecError {
@@ -228,17 +235,167 @@ impl Engine {
         Ok(QueryResult::RowsAffected(count))
     }
 
-    /// Execute a DELETE
+    /// Execute a DELETE with referential integrity support
     fn execute_delete(&mut self, table: &str, where_clause: Option<&Expr>) -> ExecResult {
-        let schema = self.storage.get_schema(table)?;
+        let schema = self.storage.get_schema(table)?.clone();
         let column_names: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
 
+        // Find rows to delete
+        let all_rows = self.storage.scan(table)?;
+        let rows_to_delete: Vec<Row> = all_rows
+            .into_iter()
+            .filter(|row| match where_clause {
+                Some(predicate) => eval_predicate(predicate, row, &column_names),
+                None => true,
+            })
+            .collect();
+
+        if rows_to_delete.is_empty() {
+            return Ok(QueryResult::RowsAffected(0));
+        }
+
+        // Find primary key columns
+        let pk_columns: Vec<(usize, &str)> = schema
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.primary_key)
+            .map(|(i, c)| (i, c.name.as_str()))
+            .collect();
+
+        // Get deleted key values (for checking foreign key references)
+        let deleted_values: Vec<Vec<(&str, &Value)>> = rows_to_delete
+            .iter()
+            .map(|row| {
+                pk_columns
+                    .iter()
+                    .filter_map(|(idx, col_name)| row.get(*idx).map(|v| (*col_name, v)))
+                    .collect()
+            })
+            .collect();
+
+        // Handle referential integrity for each referencing table
+        self.handle_cascade_delete(table, &deleted_values)?;
+
+        // Now delete the rows from the main table
         let deleted = self.storage.delete(table, |row| match where_clause {
             Some(predicate) => eval_predicate(predicate, row, &column_names),
             None => true,
         })?;
 
         Ok(QueryResult::RowsAffected(deleted))
+    }
+
+    /// Handle cascade delete for foreign key references
+    fn handle_cascade_delete(
+        &mut self,
+        referenced_table: &str,
+        deleted_values: &[Vec<(&str, &Value)>],
+    ) -> Result<(), ExecError> {
+        // Find all tables that reference this table
+        let table_names = self.storage.table_names();
+        let mut fk_refs: Vec<(String, String, String, StorageRefAction)> = Vec::new();
+
+        for tbl_name in &table_names {
+            if let Ok(schema) = self.storage.get_schema(tbl_name) {
+                for col in &schema.columns {
+                    if let Some(ref fk) = col.references {
+                        if fk.table == referenced_table {
+                            fk_refs.push((
+                                tbl_name.clone(),
+                                col.name.clone(),
+                                fk.column.clone(),
+                                fk.on_delete.clone(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Process each foreign key reference
+        for (child_table, child_col, parent_col, action) in fk_refs {
+            let child_schema = self.storage.get_schema(&child_table)?.clone();
+            let child_col_idx = child_schema
+                .columns
+                .iter()
+                .position(|c| c.name == child_col)
+                .ok_or_else(|| ExecError::ColumnNotFound(child_col.clone()))?;
+
+            // Check for matching values in the child table
+            for deleted_row in deleted_values {
+                if let Some((_, deleted_val)) =
+                    deleted_row.iter().find(|(col, _)| *col == parent_col)
+                {
+                    match action {
+                        StorageRefAction::Cascade => {
+                            // Recursively delete matching rows in child table
+                            self.storage.delete(&child_table, |row| {
+                                row.get(child_col_idx)
+                                    .map(|v| values_equal(v, deleted_val))
+                                    .unwrap_or(false)
+                            })?;
+                        }
+                        StorageRefAction::SetNull => {
+                            // Set the foreign key column to NULL
+                            self.storage.update(
+                                &child_table,
+                                |row| {
+                                    row.get(child_col_idx)
+                                        .map(|v| values_equal(v, deleted_val))
+                                        .unwrap_or(false)
+                                },
+                                |row| {
+                                    if let Some(val) = row.get_mut(child_col_idx) {
+                                        *val = Value::Null;
+                                    }
+                                },
+                            )?;
+                        }
+                        StorageRefAction::SetDefault => {
+                            // Set the foreign key column to its default value
+                            let default_val = child_schema.columns[child_col_idx]
+                                .default
+                                .clone()
+                                .unwrap_or(Value::Null);
+                            self.storage.update(
+                                &child_table,
+                                |row| {
+                                    row.get(child_col_idx)
+                                        .map(|v| values_equal(v, deleted_val))
+                                        .unwrap_or(false)
+                                },
+                                |row| {
+                                    if let Some(val) = row.get_mut(child_col_idx) {
+                                        *val = default_val.clone();
+                                    }
+                                },
+                            )?;
+                        }
+                        StorageRefAction::Restrict | StorageRefAction::NoAction => {
+                            // Check if any child rows reference this value
+                            let child_rows = self.storage.scan(&child_table)?;
+                            let has_reference = child_rows.iter().any(|row| {
+                                row.get(child_col_idx)
+                                    .map(|v| values_equal(v, deleted_val))
+                                    .unwrap_or(false)
+                            });
+
+                            if has_reference {
+                                return Err(ExecError::ForeignKeyViolation {
+                                    table: child_table.clone(),
+                                    column: child_col.clone(),
+                                    references_table: referenced_table.to_string(),
+                                    references_column: parent_col.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Begin a new transaction
@@ -1648,6 +1805,202 @@ mod tests {
         match result.unwrap() {
             QueryResult::Select { rows, .. } => {
                 assert_eq!(rows[0][0], Value::Int(2));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_cascade_delete() {
+        let mut engine = Engine::new();
+
+        // Create parent table
+        engine
+            .execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)")
+            .unwrap();
+
+        // Create child table with CASCADE delete
+        engine
+            .execute(
+                "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT REFERENCES users(id) ON DELETE CASCADE, item TEXT)",
+            )
+            .unwrap();
+
+        // Insert data
+        engine
+            .execute("INSERT INTO users (id, name) VALUES (1, 'alice')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (id, name) VALUES (2, 'bob')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO orders (id, user_id, item) VALUES (1, 1, 'book')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO orders (id, user_id, item) VALUES (2, 1, 'pen')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO orders (id, user_id, item) VALUES (3, 2, 'notebook')")
+            .unwrap();
+
+        // Delete user 1 - should cascade delete their orders
+        let result = engine.execute("DELETE FROM users WHERE id = 1");
+        assert_eq!(result.unwrap(), QueryResult::RowsAffected(1));
+
+        // Verify orders for user 1 are deleted
+        let result = engine.execute("SELECT COUNT(*) FROM orders");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Int(1)); // Only bob's order remains
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // Verify only bob's order remains
+        let result = engine.execute("SELECT item FROM orders");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Text("notebook".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_set_null_on_delete() {
+        let mut engine = Engine::new();
+
+        // Create parent table
+        engine
+            .execute("CREATE TABLE departments (id INT PRIMARY KEY, name TEXT)")
+            .unwrap();
+
+        // Create child table with SET NULL on delete
+        engine
+            .execute(
+                "CREATE TABLE employees (id INT PRIMARY KEY, dept_id INT REFERENCES departments(id) ON DELETE SET NULL, name TEXT)",
+            )
+            .unwrap();
+
+        // Insert data
+        engine
+            .execute("INSERT INTO departments (id, name) VALUES (1, 'Engineering')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO departments (id, name) VALUES (2, 'Sales')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO employees (id, dept_id, name) VALUES (1, 1, 'alice')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO employees (id, dept_id, name) VALUES (2, 1, 'bob')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO employees (id, dept_id, name) VALUES (3, 2, 'charlie')")
+            .unwrap();
+
+        // Delete Engineering department - should set dept_id to NULL for alice and bob
+        let result = engine.execute("DELETE FROM departments WHERE id = 1");
+        assert_eq!(result.unwrap(), QueryResult::RowsAffected(1));
+
+        // Verify employees still exist but with NULL dept_id
+        let result = engine.execute("SELECT COUNT(*) FROM employees");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Int(3)); // All employees still exist
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // Verify alice's dept_id is NULL
+        let result = engine.execute("SELECT dept_id FROM employees WHERE id = 1");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Null);
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // Charlie's dept should still be 2
+        let result = engine.execute("SELECT dept_id FROM employees WHERE id = 3");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Int(2));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_restrict_on_delete() {
+        let mut engine = Engine::new();
+
+        // Create parent table
+        engine
+            .execute("CREATE TABLE categories (id INT PRIMARY KEY, name TEXT)")
+            .unwrap();
+
+        // Create child table with RESTRICT on delete
+        engine
+            .execute(
+                "CREATE TABLE products (id INT PRIMARY KEY, category_id INT REFERENCES categories(id) ON DELETE RESTRICT, name TEXT)",
+            )
+            .unwrap();
+
+        // Insert data
+        engine
+            .execute("INSERT INTO categories (id, name) VALUES (1, 'Electronics')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO products (id, category_id, name) VALUES (1, 1, 'Phone')")
+            .unwrap();
+
+        // Try to delete category - should fail due to RESTRICT
+        let result = engine.execute("DELETE FROM categories WHERE id = 1");
+        assert!(matches!(
+            result.unwrap_err(),
+            ExecError::ForeignKeyViolation { .. }
+        ));
+
+        // Verify category still exists
+        let result = engine.execute("SELECT COUNT(*) FROM categories");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Int(1));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_no_fk_reference_delete() {
+        let mut engine = Engine::new();
+
+        // Create tables without foreign key
+        engine
+            .execute("CREATE TABLE parent (id INT PRIMARY KEY, name TEXT)")
+            .unwrap();
+        engine
+            .execute("CREATE TABLE child (id INT PRIMARY KEY, parent_id INT, name TEXT)")
+            .unwrap();
+
+        // Insert data
+        engine
+            .execute("INSERT INTO parent (id, name) VALUES (1, 'p1')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO child (id, parent_id, name) VALUES (1, 1, 'c1')")
+            .unwrap();
+
+        // Delete parent - should work since there's no FK constraint
+        let result = engine.execute("DELETE FROM parent WHERE id = 1");
+        assert_eq!(result.unwrap(), QueryResult::RowsAffected(1));
+
+        // Child should still exist
+        let result = engine.execute("SELECT COUNT(*) FROM child");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Int(1));
             }
             _ => panic!("Expected Select result"),
         }

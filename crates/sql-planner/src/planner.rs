@@ -1,8 +1,8 @@
 //! Query planner - converts AST statements to logical plans
 
 use sql_parser::{
-    CreateTableStatement, CreateTriggerStatement, DeleteStatement, Expr, InsertStatement,
-    SelectColumn, SelectStatement, Statement, UpdateStatement,
+    CreateIndexStatement, CreateTableStatement, CreateTriggerStatement, DeleteStatement, Expr,
+    InsertStatement, SelectColumn, SelectStatement, Statement, UpdateStatement,
 };
 
 use crate::plan::LogicalPlan;
@@ -36,6 +36,8 @@ pub fn plan(statement: Statement) -> PlanResult {
             table: alter.table,
             action: alter.action,
         }),
+        Statement::CreateIndex(create) => plan_create_index(create),
+        Statement::DropIndex(name) => Ok(LogicalPlan::DropIndex { name }),
         Statement::Begin => Ok(LogicalPlan::Begin),
         Statement::Commit => Ok(LogicalPlan::Commit),
         Statement::Rollback => Ok(LogicalPlan::Rollback),
@@ -203,6 +205,15 @@ fn plan_create_trigger(create: CreateTriggerStatement) -> PlanResult {
         event: create.event,
         table: create.table,
         body: create.body,
+    })
+}
+
+/// Plan a CREATE INDEX statement
+fn plan_create_index(create: CreateIndexStatement) -> PlanResult {
+    Ok(LogicalPlan::CreateIndex {
+        name: create.name,
+        table: create.table,
+        column: create.column,
     })
 }
 

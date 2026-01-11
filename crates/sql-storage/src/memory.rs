@@ -1,18 +1,30 @@
 //! In-memory storage engine implementation
 
 use crate::engine::{ColumnSchema, Row, StorageEngine, StorageError, StorageResult, TableSchema};
+use crate::Value;
 use std::collections::HashMap;
 
 /// In-memory storage engine
 #[derive(Debug, Default, Clone)]
 pub struct MemoryEngine {
     tables: HashMap<String, TableData>,
+    indexes: HashMap<String, IndexData>,
 }
 
 #[derive(Debug, Clone)]
 struct TableData {
     schema: TableSchema,
     rows: Vec<Row>,
+}
+
+/// Index structure - maps values to row indices
+#[derive(Debug, Clone)]
+struct IndexData {
+    table: String,
+    column: String,
+    column_idx: usize,
+    /// Map from value hash to list of row indices
+    entries: HashMap<u64, Vec<usize>>,
 }
 
 impl MemoryEngine {
@@ -57,7 +69,19 @@ impl StorageEngine for MemoryEngine {
             .tables
             .get_mut(table)
             .ok_or_else(|| StorageError::TableNotFound(table.to_string()))?;
-        table_data.rows.push(row);
+        let row_idx = table_data.rows.len();
+        table_data.rows.push(row.clone());
+
+        // Update indexes for this table
+        for index in self.indexes.values_mut() {
+            if index.table == table {
+                if let Some(val) = row.get(index.column_idx) {
+                    let hash = value_hash(val);
+                    index.entries.entry(hash).or_default().push(row_idx);
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -187,6 +211,116 @@ impl StorageEngine for MemoryEngine {
         self.tables.insert(new_name.to_string(), table_data);
         Ok(())
     }
+
+    fn create_index(&mut self, table: &str, column: &str, name: &str) -> StorageResult<()> {
+        // Check if index already exists
+        if self.indexes.contains_key(name) {
+            return Err(StorageError::IndexAlreadyExists(name.to_string()));
+        }
+
+        // Get table and find column index
+        let table_data = self
+            .tables
+            .get(table)
+            .ok_or_else(|| StorageError::TableNotFound(table.to_string()))?;
+
+        let column_idx = table_data
+            .schema
+            .columns
+            .iter()
+            .position(|c| c.name == column)
+            .ok_or_else(|| StorageError::ColumnNotFound(column.to_string()))?;
+
+        // Build the index entries from existing rows
+        let mut entries: HashMap<u64, Vec<usize>> = HashMap::new();
+        for (row_idx, row) in table_data.rows.iter().enumerate() {
+            if let Some(val) = row.get(column_idx) {
+                let hash = value_hash(val);
+                entries.entry(hash).or_default().push(row_idx);
+            }
+        }
+
+        self.indexes.insert(
+            name.to_string(),
+            IndexData {
+                table: table.to_string(),
+                column: column.to_string(),
+                column_idx,
+                entries,
+            },
+        );
+
+        Ok(())
+    }
+
+    fn drop_index(&mut self, name: &str) -> StorageResult<()> {
+        self.indexes
+            .remove(name)
+            .map(|_| ())
+            .ok_or_else(|| StorageError::IndexNotFound(name.to_string()))
+    }
+
+    fn index_lookup(&self, table: &str, column: &str, value: &Value) -> Option<Vec<usize>> {
+        // Find index for this table/column
+        for index in self.indexes.values() {
+            if index.table == table && index.column == column {
+                let hash = value_hash(value);
+                return index.entries.get(&hash).cloned();
+            }
+        }
+        None
+    }
+}
+
+/// Hash a Value for index lookup
+fn value_hash(v: &Value) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    match v {
+        Value::Null => 0u8.hash(&mut hasher),
+        Value::Bool(b) => {
+            1u8.hash(&mut hasher);
+            b.hash(&mut hasher);
+        }
+        Value::Int(i) => {
+            2u8.hash(&mut hasher);
+            i.hash(&mut hasher);
+        }
+        Value::Float(f) => {
+            3u8.hash(&mut hasher);
+            f.to_bits().hash(&mut hasher);
+        }
+        Value::Text(s) => {
+            4u8.hash(&mut hasher);
+            s.hash(&mut hasher);
+        }
+        Value::Date(d) => {
+            5u8.hash(&mut hasher);
+            d.year.hash(&mut hasher);
+            d.month.hash(&mut hasher);
+            d.day.hash(&mut hasher);
+        }
+        Value::Time(t) => {
+            6u8.hash(&mut hasher);
+            t.hour.hash(&mut hasher);
+            t.minute.hash(&mut hasher);
+            t.second.hash(&mut hasher);
+            t.microsecond.hash(&mut hasher);
+        }
+        Value::Timestamp(ts) => {
+            7u8.hash(&mut hasher);
+            ts.date.year.hash(&mut hasher);
+            ts.date.month.hash(&mut hasher);
+            ts.date.day.hash(&mut hasher);
+            ts.time.hour.hash(&mut hasher);
+            ts.time.minute.hash(&mut hasher);
+            ts.time.second.hash(&mut hasher);
+            ts.time.microsecond.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
 }
 
 #[cfg(test)]

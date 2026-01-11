@@ -62,7 +62,9 @@ fn statement_parser() -> impl Parser<Token, Statement, Error = Simple<Token>> {
         .or(delete_parser().map(Statement::Delete))
         .or(create_table_parser().map(Statement::CreateTable))
         .or(create_trigger_parser().map(Statement::CreateTrigger))
+        .or(create_index_parser().map(Statement::CreateIndex))
         .or(drop_trigger_parser().map(Statement::DropTrigger))
+        .or(drop_index_parser().map(Statement::DropIndex))
         .or(drop_table_parser().map(Statement::DropTable))
         .or(alter_table_parser().map(Statement::AlterTable))
         .or(begin_parser())
@@ -178,6 +180,28 @@ fn drop_trigger_parser() -> impl Parser<Token, String, Error = Simple<Token>> {
 fn drop_table_parser() -> impl Parser<Token, String, Error = Simple<Token>> {
     just(Token::Keyword(Keyword::Drop))
         .ignore_then(just(Token::Keyword(Keyword::Table)))
+        .ignore_then(identifier())
+}
+
+/// Parse CREATE INDEX name ON table(column)
+fn create_index_parser() -> impl Parser<Token, CreateIndexStatement, Error = Simple<Token>> {
+    just(Token::Keyword(Keyword::Create))
+        .ignore_then(just(Token::Keyword(Keyword::Index)))
+        .ignore_then(identifier())
+        .then_ignore(just(Token::Keyword(Keyword::On)))
+        .then(identifier())
+        .then(identifier().delimited_by(just(Token::LParen), just(Token::RParen)))
+        .map(|((name, table), column)| CreateIndexStatement {
+            name,
+            table,
+            column,
+        })
+}
+
+/// Parse DROP INDEX name
+fn drop_index_parser() -> impl Parser<Token, String, Error = Simple<Token>> {
+    just(Token::Keyword(Keyword::Drop))
+        .ignore_then(just(Token::Keyword(Keyword::Index)))
         .ignore_then(identifier())
 }
 
@@ -1740,6 +1764,34 @@ mod tests {
                 _ => panic!("Expected Exists"),
             },
             _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_create_index() {
+        let result = parse("CREATE INDEX idx_name ON users (name)");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::CreateIndex(idx) => {
+                assert_eq!(idx.name, "idx_name");
+                assert_eq!(idx.table, "users");
+                assert_eq!(idx.column, "name");
+            }
+            _ => panic!("Expected CREATE INDEX statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_drop_index() {
+        let result = parse("DROP INDEX idx_name");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::DropIndex(name) => {
+                assert_eq!(name, "idx_name");
+            }
+            _ => panic!("Expected DROP INDEX statement"),
         }
     }
 }

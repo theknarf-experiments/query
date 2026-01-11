@@ -21,6 +21,10 @@ pub enum Statement {
     DropTable(String),
     /// ALTER TABLE statement
     AlterTable(AlterTableStatement),
+    /// CREATE INDEX statement
+    CreateIndex(CreateIndexStatement),
+    /// DROP INDEX statement
+    DropIndex(String),
     /// BEGIN TRANSACTION
     Begin,
     /// COMMIT TRANSACTION
@@ -270,6 +274,14 @@ pub enum DataType {
     Date,
     Time,
     Timestamp,
+}
+
+/// CREATE INDEX statement
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateIndexStatement {
+    pub name: String,
+    pub table: String,
+    pub column: String,
 }
 
 /// CREATE TRIGGER statement

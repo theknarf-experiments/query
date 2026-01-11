@@ -93,4 +93,12 @@ pub enum LogicalPlan {
         table: String,
         action: sql_parser::AlterAction,
     },
+    /// Create an index
+    CreateIndex {
+        name: String,
+        table: String,
+        column: String,
+    },
+    /// Drop an index
+    DropIndex { name: String },
 }

@@ -240,6 +240,19 @@ impl Engine {
                 Ok(QueryResult::Success)
             }
             LogicalPlan::AlterTable { table, action } => self.execute_alter_table(&table, action),
+            // Index operations
+            LogicalPlan::CreateIndex {
+                name,
+                table,
+                column,
+            } => {
+                self.storage.create_index(&table, &column, &name)?;
+                Ok(QueryResult::Success)
+            }
+            LogicalPlan::DropIndex { name } => {
+                self.storage.drop_index(&name)?;
+                Ok(QueryResult::Success)
+            }
             _ => self.execute_query(plan),
         }
     }
@@ -3249,5 +3262,110 @@ mod tests {
         // Get schema and verify TIME type
         let schema = engine.storage.get_schema("schedules").unwrap();
         assert_eq!(schema.columns[1].data_type, sql_storage::DataType::Time);
+    }
+
+    #[test]
+    fn test_create_index() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE users (id INT, name TEXT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (id, name) VALUES (1, 'alice')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (id, name) VALUES (2, 'bob')")
+            .unwrap();
+
+        // Create index
+        let result = engine.execute("CREATE INDEX idx_users_id ON users (id)");
+        assert_eq!(result.unwrap(), QueryResult::Success);
+
+        // Data should still be queryable
+        let result = engine.execute("SELECT * FROM users");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 2);
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_drop_index() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE users (id INT, name TEXT)")
+            .unwrap();
+        engine
+            .execute("CREATE INDEX idx_users_id ON users (id)")
+            .unwrap();
+
+        // Drop index
+        let result = engine.execute("DROP INDEX idx_users_id");
+        assert_eq!(result.unwrap(), QueryResult::Success);
+
+        // Dropping again should fail
+        let result = engine.execute("DROP INDEX idx_users_id");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_index_lookup() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE users (id INT, name TEXT)")
+            .unwrap();
+
+        // Insert before index creation
+        engine
+            .execute("INSERT INTO users (id, name) VALUES (1, 'alice')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (id, name) VALUES (2, 'bob')")
+            .unwrap();
+
+        // Create index on existing data
+        engine
+            .execute("CREATE INDEX idx_users_id ON users (id)")
+            .unwrap();
+
+        // Insert after index creation (should update index)
+        engine
+            .execute("INSERT INTO users (id, name) VALUES (3, 'charlie')")
+            .unwrap();
+
+        // Verify index exists and can lookup values
+        let lookup = engine.storage.index_lookup("users", "id", &Value::Int(1));
+        assert!(lookup.is_some());
+        let indices = lookup.unwrap();
+        assert!(!indices.is_empty());
+    }
+
+    #[test]
+    fn test_create_index_errors() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE users (id INT, name TEXT)")
+            .unwrap();
+        engine
+            .execute("CREATE INDEX idx_users_id ON users (id)")
+            .unwrap();
+
+        // Duplicate index name should fail
+        let result = engine.execute("CREATE INDEX idx_users_id ON users (name)");
+        assert!(result.is_err());
+
+        // Index on non-existent table should fail
+        let result = engine.execute("CREATE INDEX idx_foo ON nonexistent (col)");
+        assert!(result.is_err());
+
+        // Index on non-existent column should fail
+        let result = engine.execute("CREATE INDEX idx_bar ON users (nonexistent)");
+        assert!(result.is_err());
     }
 }

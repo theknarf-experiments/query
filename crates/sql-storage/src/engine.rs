@@ -13,6 +13,8 @@ pub enum StorageError {
     ColumnNotFound(String),
     TypeMismatch { expected: String, found: String },
     ConstraintViolation(String),
+    IndexNotFound(String),
+    IndexAlreadyExists(String),
 }
 
 /// Schema for a table column
@@ -135,4 +137,13 @@ pub trait StorageEngine: Send + Sync {
 
     /// Rename a table
     fn rename_table(&mut self, old_name: &str, new_name: &str) -> StorageResult<()>;
+
+    /// Create an index on a table column
+    fn create_index(&mut self, table: &str, column: &str, name: &str) -> StorageResult<()>;
+
+    /// Drop an index
+    fn drop_index(&mut self, name: &str) -> StorageResult<()>;
+
+    /// Lookup rows by index (returns row indices)
+    fn index_lookup(&self, table: &str, column: &str, value: &Value) -> Option<Vec<usize>>;
 }

@@ -6,6 +6,8 @@ mod engine;
 mod memory;
 mod value;
 
-pub use engine::StorageEngine;
+pub use engine::{
+    ColumnSchema, DataType, Row, StorageEngine, StorageError, StorageResult, TableSchema,
+};
 pub use memory::MemoryEngine;
 pub use value::Value;

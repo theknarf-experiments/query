@@ -61,7 +61,58 @@ fn statement_parser() -> impl Parser<Token, Statement, Error = Simple<Token>> {
         .or(update_parser().map(Statement::Update))
         .or(delete_parser().map(Statement::Delete))
         .or(create_table_parser().map(Statement::CreateTable))
+        .or(begin_parser())
+        .or(commit_parser())
+        .or(rollback_parser())
+        .or(savepoint_parser())
+        .or(release_savepoint_parser())
         .then_ignore(just(Token::Semicolon).or_not())
+}
+
+/// Parse BEGIN [TRANSACTION]
+fn begin_parser() -> impl Parser<Token, Statement, Error = Simple<Token>> {
+    just(Token::Keyword(Keyword::Begin))
+        .then_ignore(just(Token::Keyword(Keyword::Transaction)).or_not())
+        .to(Statement::Begin)
+}
+
+/// Parse COMMIT [TRANSACTION]
+fn commit_parser() -> impl Parser<Token, Statement, Error = Simple<Token>> {
+    just(Token::Keyword(Keyword::Commit))
+        .then_ignore(just(Token::Keyword(Keyword::Transaction)).or_not())
+        .to(Statement::Commit)
+}
+
+/// Parse ROLLBACK [TRANSACTION] or ROLLBACK TO [SAVEPOINT] name
+fn rollback_parser() -> impl Parser<Token, Statement, Error = Simple<Token>> {
+    let rollback_to = just(Token::Keyword(Keyword::Rollback))
+        .ignore_then(
+            just(Token::Keyword(Keyword::To))
+                .ignore_then(just(Token::Keyword(Keyword::Savepoint)).or_not())
+                .ignore_then(identifier()),
+        )
+        .map(Statement::RollbackTo);
+
+    let rollback_full = just(Token::Keyword(Keyword::Rollback))
+        .then_ignore(just(Token::Keyword(Keyword::Transaction)).or_not())
+        .to(Statement::Rollback);
+
+    rollback_to.or(rollback_full)
+}
+
+/// Parse SAVEPOINT name
+fn savepoint_parser() -> impl Parser<Token, Statement, Error = Simple<Token>> {
+    just(Token::Keyword(Keyword::Savepoint))
+        .ignore_then(identifier())
+        .map(Statement::Savepoint)
+}
+
+/// Parse RELEASE [SAVEPOINT] name
+fn release_savepoint_parser() -> impl Parser<Token, Statement, Error = Simple<Token>> {
+    just(Token::Keyword(Keyword::Release))
+        .ignore_then(just(Token::Keyword(Keyword::Savepoint)).or_not())
+        .ignore_then(identifier())
+        .map(Statement::ReleaseSavepoint)
 }
 
 /// Parse a SELECT statement

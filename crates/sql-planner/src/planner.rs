@@ -29,6 +29,12 @@ pub fn plan(statement: Statement) -> PlanResult {
         Statement::Update(update) => plan_update(update),
         Statement::Delete(delete) => plan_delete(delete),
         Statement::CreateTable(create) => plan_create_table(create),
+        Statement::Begin => Ok(LogicalPlan::Begin),
+        Statement::Commit => Ok(LogicalPlan::Commit),
+        Statement::Rollback => Ok(LogicalPlan::Rollback),
+        Statement::Savepoint(name) => Ok(LogicalPlan::Savepoint { name }),
+        Statement::ReleaseSavepoint(name) => Ok(LogicalPlan::ReleaseSavepoint { name }),
+        Statement::RollbackTo(name) => Ok(LogicalPlan::RollbackTo { name }),
     }
 }
 

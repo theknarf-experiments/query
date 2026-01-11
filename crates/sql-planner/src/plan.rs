@@ -57,4 +57,16 @@ pub enum LogicalPlan {
         table: String,
         where_clause: Option<Expr>,
     },
+    /// Begin transaction
+    Begin,
+    /// Commit transaction
+    Commit,
+    /// Rollback transaction
+    Rollback,
+    /// Create savepoint
+    Savepoint { name: String },
+    /// Release savepoint
+    ReleaseSavepoint { name: String },
+    /// Rollback to savepoint
+    RollbackTo { name: String },
 }

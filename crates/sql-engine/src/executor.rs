@@ -26,6 +26,12 @@ pub enum ExecError {
     TypeError(String),
     /// Invalid expression
     InvalidExpression(String),
+    /// Transaction error - no active transaction
+    NoActiveTransaction,
+    /// Transaction error - transaction already active
+    TransactionAlreadyActive,
+    /// Savepoint not found
+    SavepointNotFound(String),
 }
 
 impl From<StorageError> for ExecError {
@@ -46,11 +52,35 @@ pub enum QueryResult {
     RowsAffected(usize),
     /// DDL success (CREATE TABLE, DROP TABLE)
     Success,
+    /// Transaction operation completed
+    TransactionStarted,
+    /// Transaction committed
+    TransactionCommitted,
+    /// Transaction rolled back
+    TransactionRolledBack,
+    /// Savepoint created
+    SavepointCreated(String),
+    /// Savepoint released
+    SavepointReleased(String),
+    /// Rolled back to savepoint
+    RolledBackToSavepoint(String),
+}
+
+/// Transaction state
+#[derive(Debug, Clone, Default)]
+struct TransactionState {
+    /// Is a transaction currently active?
+    active: bool,
+    /// Savepoints (name -> snapshot index)
+    savepoints: Vec<(String, usize)>,
+    /// Snapshots of storage state for rollback
+    snapshots: Vec<MemoryEngine>,
 }
 
 /// Database engine that executes queries
 pub struct Engine {
     storage: MemoryEngine,
+    transaction: TransactionState,
 }
 
 impl Default for Engine {
@@ -64,6 +94,7 @@ impl Engine {
     pub fn new() -> Self {
         Self {
             storage: MemoryEngine::new(),
+            transaction: TransactionState::default(),
         }
     }
 
@@ -96,6 +127,13 @@ impl Engine {
                 table,
                 where_clause,
             } => self.execute_delete(&table, where_clause.as_ref()),
+            // Transaction operations
+            LogicalPlan::Begin => self.begin_transaction(),
+            LogicalPlan::Commit => self.commit_transaction(),
+            LogicalPlan::Rollback => self.rollback_transaction(),
+            LogicalPlan::Savepoint { name } => self.create_savepoint(&name),
+            LogicalPlan::ReleaseSavepoint { name } => self.release_savepoint(&name),
+            LogicalPlan::RollbackTo { name } => self.rollback_to_savepoint(&name),
             _ => self.execute_query(plan),
         }
     }
@@ -201,6 +239,107 @@ impl Engine {
         })?;
 
         Ok(QueryResult::RowsAffected(deleted))
+    }
+
+    /// Begin a new transaction
+    fn begin_transaction(&mut self) -> ExecResult {
+        if self.transaction.active {
+            return Err(ExecError::TransactionAlreadyActive);
+        }
+        // Take a snapshot of the current storage state
+        self.transaction.snapshots.push(self.storage.clone());
+        self.transaction.active = true;
+        self.transaction.savepoints.clear();
+        Ok(QueryResult::TransactionStarted)
+    }
+
+    /// Commit the current transaction
+    fn commit_transaction(&mut self) -> ExecResult {
+        if !self.transaction.active {
+            return Err(ExecError::NoActiveTransaction);
+        }
+        // Discard snapshots - changes are permanent
+        self.transaction.snapshots.clear();
+        self.transaction.savepoints.clear();
+        self.transaction.active = false;
+        Ok(QueryResult::TransactionCommitted)
+    }
+
+    /// Rollback the current transaction
+    fn rollback_transaction(&mut self) -> ExecResult {
+        if !self.transaction.active {
+            return Err(ExecError::NoActiveTransaction);
+        }
+        // Restore from the initial snapshot
+        if let Some(snapshot) = self.transaction.snapshots.first().cloned() {
+            self.storage = snapshot;
+        }
+        self.transaction.snapshots.clear();
+        self.transaction.savepoints.clear();
+        self.transaction.active = false;
+        Ok(QueryResult::TransactionRolledBack)
+    }
+
+    /// Create a savepoint
+    fn create_savepoint(&mut self, name: &str) -> ExecResult {
+        if !self.transaction.active {
+            return Err(ExecError::NoActiveTransaction);
+        }
+        // Take a snapshot and record the savepoint
+        let snapshot_idx = self.transaction.snapshots.len();
+        self.transaction.snapshots.push(self.storage.clone());
+        self.transaction
+            .savepoints
+            .push((name.to_string(), snapshot_idx));
+        Ok(QueryResult::SavepointCreated(name.to_string()))
+    }
+
+    /// Release a savepoint
+    fn release_savepoint(&mut self, name: &str) -> ExecResult {
+        if !self.transaction.active {
+            return Err(ExecError::NoActiveTransaction);
+        }
+        // Find and remove the savepoint (but keep the snapshot for now)
+        let pos = self
+            .transaction
+            .savepoints
+            .iter()
+            .position(|(n, _)| n == name);
+        match pos {
+            Some(idx) => {
+                self.transaction.savepoints.remove(idx);
+                Ok(QueryResult::SavepointReleased(name.to_string()))
+            }
+            None => Err(ExecError::SavepointNotFound(name.to_string())),
+        }
+    }
+
+    /// Rollback to a savepoint
+    fn rollback_to_savepoint(&mut self, name: &str) -> ExecResult {
+        if !self.transaction.active {
+            return Err(ExecError::NoActiveTransaction);
+        }
+        // Find the savepoint
+        let pos = self
+            .transaction
+            .savepoints
+            .iter()
+            .position(|(n, _)| n == name);
+        match pos {
+            Some(idx) => {
+                let (_, snapshot_idx) = self.transaction.savepoints[idx].clone();
+                // Restore from the savepoint's snapshot
+                if let Some(snapshot) = self.transaction.snapshots.get(snapshot_idx).cloned() {
+                    self.storage = snapshot;
+                }
+                // Remove all savepoints after this one
+                self.transaction.savepoints.truncate(idx + 1);
+                // Remove all snapshots after the savepoint's snapshot
+                self.transaction.snapshots.truncate(snapshot_idx + 1);
+                Ok(QueryResult::RolledBackToSavepoint(name.to_string()))
+            }
+            None => Err(ExecError::SavepointNotFound(name.to_string())),
+        }
     }
 
     /// Execute a SELECT query
@@ -1238,6 +1377,276 @@ mod tests {
         match result.unwrap() {
             QueryResult::Select { rows, .. } => {
                 assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][0], Value::Int(2));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_begin_commit() {
+        let mut engine = Engine::new();
+        engine.execute("CREATE TABLE t (x INT)").unwrap();
+
+        // Begin transaction
+        let result = engine.execute("BEGIN");
+        assert_eq!(result.unwrap(), QueryResult::TransactionStarted);
+
+        // Insert some data
+        engine.execute("INSERT INTO t (x) VALUES (1)").unwrap();
+        engine.execute("INSERT INTO t (x) VALUES (2)").unwrap();
+
+        // Commit transaction
+        let result = engine.execute("COMMIT");
+        assert_eq!(result.unwrap(), QueryResult::TransactionCommitted);
+
+        // Data should still be there
+        let result = engine.execute("SELECT * FROM t");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 2);
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_begin_rollback() {
+        let mut engine = Engine::new();
+        engine.execute("CREATE TABLE t (x INT)").unwrap();
+        engine.execute("INSERT INTO t (x) VALUES (1)").unwrap();
+
+        // Begin transaction
+        engine.execute("BEGIN").unwrap();
+
+        // Insert more data
+        engine.execute("INSERT INTO t (x) VALUES (2)").unwrap();
+        engine.execute("INSERT INTO t (x) VALUES (3)").unwrap();
+
+        // Verify data is there during transaction
+        let result = engine.execute("SELECT COUNT(*) FROM t");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Int(3));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // Rollback transaction
+        let result = engine.execute("ROLLBACK");
+        assert_eq!(result.unwrap(), QueryResult::TransactionRolledBack);
+
+        // Only original data should remain
+        let result = engine.execute("SELECT COUNT(*) FROM t");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Int(1));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_savepoint() {
+        let mut engine = Engine::new();
+        engine.execute("CREATE TABLE t (x INT)").unwrap();
+
+        // Begin transaction
+        engine.execute("BEGIN").unwrap();
+        engine.execute("INSERT INTO t (x) VALUES (1)").unwrap();
+
+        // Create savepoint
+        let result = engine.execute("SAVEPOINT sp1");
+        assert_eq!(
+            result.unwrap(),
+            QueryResult::SavepointCreated("sp1".to_string())
+        );
+
+        // Insert more data
+        engine.execute("INSERT INTO t (x) VALUES (2)").unwrap();
+
+        // Rollback to savepoint
+        let result = engine.execute("ROLLBACK TO sp1");
+        assert_eq!(
+            result.unwrap(),
+            QueryResult::RolledBackToSavepoint("sp1".to_string())
+        );
+
+        // Only data before savepoint should remain
+        let result = engine.execute("SELECT COUNT(*) FROM t");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Int(1));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // Commit
+        engine.execute("COMMIT").unwrap();
+
+        // Data should persist
+        let result = engine.execute("SELECT COUNT(*) FROM t");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Int(1));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_release_savepoint() {
+        let mut engine = Engine::new();
+        engine.execute("CREATE TABLE t (x INT)").unwrap();
+
+        engine.execute("BEGIN").unwrap();
+        engine.execute("INSERT INTO t (x) VALUES (1)").unwrap();
+        engine.execute("SAVEPOINT sp1").unwrap();
+        engine.execute("INSERT INTO t (x) VALUES (2)").unwrap();
+
+        // Release savepoint
+        let result = engine.execute("RELEASE SAVEPOINT sp1");
+        assert_eq!(
+            result.unwrap(),
+            QueryResult::SavepointReleased("sp1".to_string())
+        );
+
+        // Trying to rollback to released savepoint should fail
+        let result = engine.execute("ROLLBACK TO sp1");
+        assert_eq!(
+            result.unwrap_err(),
+            ExecError::SavepointNotFound("sp1".to_string())
+        );
+
+        engine.execute("COMMIT").unwrap();
+    }
+
+    #[test]
+    fn test_nested_savepoints() {
+        let mut engine = Engine::new();
+        engine.execute("CREATE TABLE t (x INT)").unwrap();
+
+        engine.execute("BEGIN").unwrap();
+        engine.execute("INSERT INTO t (x) VALUES (1)").unwrap();
+        engine.execute("SAVEPOINT sp1").unwrap();
+        engine.execute("INSERT INTO t (x) VALUES (2)").unwrap();
+        engine.execute("SAVEPOINT sp2").unwrap();
+        engine.execute("INSERT INTO t (x) VALUES (3)").unwrap();
+
+        // Rollback to first savepoint (should remove sp2)
+        engine.execute("ROLLBACK TO sp1").unwrap();
+
+        let result = engine.execute("SELECT COUNT(*) FROM t");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Int(1));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // sp2 should no longer exist
+        let result = engine.execute("ROLLBACK TO sp2");
+        assert_eq!(
+            result.unwrap_err(),
+            ExecError::SavepointNotFound("sp2".to_string())
+        );
+
+        engine.execute("COMMIT").unwrap();
+    }
+
+    #[test]
+    fn test_transaction_error_no_active() {
+        let mut engine = Engine::new();
+
+        // Commit without begin should fail
+        let result = engine.execute("COMMIT");
+        assert_eq!(result.unwrap_err(), ExecError::NoActiveTransaction);
+
+        // Rollback without begin should fail
+        let result = engine.execute("ROLLBACK");
+        assert_eq!(result.unwrap_err(), ExecError::NoActiveTransaction);
+
+        // Savepoint without begin should fail
+        let result = engine.execute("SAVEPOINT sp1");
+        assert_eq!(result.unwrap_err(), ExecError::NoActiveTransaction);
+    }
+
+    #[test]
+    fn test_transaction_already_active() {
+        let mut engine = Engine::new();
+
+        engine.execute("BEGIN").unwrap();
+
+        // Second BEGIN should fail
+        let result = engine.execute("BEGIN");
+        assert_eq!(result.unwrap_err(), ExecError::TransactionAlreadyActive);
+
+        engine.execute("COMMIT").unwrap();
+    }
+
+    #[test]
+    fn test_update_in_transaction_rollback() {
+        let mut engine = Engine::new();
+        engine
+            .execute("CREATE TABLE users (id INT, name TEXT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (id, name) VALUES (1, 'alice')")
+            .unwrap();
+
+        engine.execute("BEGIN").unwrap();
+        engine
+            .execute("UPDATE users SET name = 'bob' WHERE id = 1")
+            .unwrap();
+
+        // Verify update during transaction
+        let result = engine.execute("SELECT name FROM users WHERE id = 1");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Text("bob".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // Rollback
+        engine.execute("ROLLBACK").unwrap();
+
+        // Original value should be restored
+        let result = engine.execute("SELECT name FROM users WHERE id = 1");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Text("alice".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_delete_in_transaction_rollback() {
+        let mut engine = Engine::new();
+        engine.execute("CREATE TABLE t (x INT)").unwrap();
+        engine.execute("INSERT INTO t (x) VALUES (1)").unwrap();
+        engine.execute("INSERT INTO t (x) VALUES (2)").unwrap();
+
+        engine.execute("BEGIN").unwrap();
+        engine.execute("DELETE FROM t WHERE x = 1").unwrap();
+
+        // Verify delete during transaction
+        let result = engine.execute("SELECT COUNT(*) FROM t");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Int(1));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // Rollback
+        engine.execute("ROLLBACK").unwrap();
+
+        // Deleted row should be restored
+        let result = engine.execute("SELECT COUNT(*) FROM t");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
                 assert_eq!(rows[0][0], Value::Int(2));
             }
             _ => panic!("Expected Select result"),

@@ -113,6 +113,15 @@ pub enum Keyword {
     Group,
     Having,
 
+    // Transactions
+    Begin,
+    Commit,
+    Rollback,
+    Transaction,
+    Savepoint,
+    Release,
+    To,
+
     // Aliases
     As,
 
@@ -203,6 +212,13 @@ impl std::str::FromStr for Keyword {
             "OFFSET" => Ok(Self::Offset),
             "GROUP" => Ok(Self::Group),
             "HAVING" => Ok(Self::Having),
+            "BEGIN" => Ok(Self::Begin),
+            "COMMIT" => Ok(Self::Commit),
+            "ROLLBACK" => Ok(Self::Rollback),
+            "TRANSACTION" => Ok(Self::Transaction),
+            "SAVEPOINT" => Ok(Self::Savepoint),
+            "RELEASE" => Ok(Self::Release),
+            "TO" => Ok(Self::To),
             "AS" => Ok(Self::As),
             "TRUE" => Ok(Self::True),
             "FALSE" => Ok(Self::False),

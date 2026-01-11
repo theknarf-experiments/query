@@ -13,6 +13,18 @@ pub enum Statement {
     Delete(DeleteStatement),
     /// CREATE TABLE statement
     CreateTable(CreateTableStatement),
+    /// BEGIN TRANSACTION
+    Begin,
+    /// COMMIT TRANSACTION
+    Commit,
+    /// ROLLBACK TRANSACTION
+    Rollback,
+    /// SAVEPOINT name
+    Savepoint(String),
+    /// RELEASE SAVEPOINT name
+    ReleaseSavepoint(String),
+    /// ROLLBACK TO SAVEPOINT name
+    RollbackTo(String),
 }
 
 /// A SELECT statement

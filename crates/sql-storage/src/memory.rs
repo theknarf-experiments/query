@@ -4,12 +4,12 @@ use crate::engine::{Row, StorageEngine, StorageError, StorageResult, TableSchema
 use std::collections::HashMap;
 
 /// In-memory storage engine
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct MemoryEngine {
     tables: HashMap<String, TableData>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct TableData {
     schema: TableSchema,
     rows: Vec<Row>,

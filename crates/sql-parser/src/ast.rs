@@ -5,8 +5,8 @@
 pub enum Statement {
     /// SELECT statement
     Select(SelectStatement),
-    /// UNION of two or more SELECT statements
-    Union(UnionStatement),
+    /// Set operation (UNION, INTERSECT, EXCEPT) of two or more SELECT statements
+    SetOperation(SetOperationStatement),
     /// INSERT statement
     Insert(InsertStatement),
     /// UPDATE statement
@@ -41,22 +41,35 @@ pub enum Statement {
     RollbackTo(String),
 }
 
-/// A UNION statement combining multiple SELECT queries
+/// Set operation type
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetOperator {
+    /// UNION - combines result sets
+    Union,
+    /// INTERSECT - returns common rows
+    Intersect,
+    /// EXCEPT - returns rows in first set but not in second
+    Except,
+}
+
+/// A set operation statement combining multiple SELECT queries
 #[derive(Debug, Clone, PartialEq)]
-pub struct UnionStatement {
-    /// The left side of the union
-    pub left: Box<SelectOrUnion>,
-    /// The right side of the union
-    pub right: Box<SelectOrUnion>,
-    /// Whether to keep duplicates (UNION ALL vs UNION)
+pub struct SetOperationStatement {
+    /// The left side of the operation
+    pub left: Box<SelectOrSet>,
+    /// The right side of the operation
+    pub right: Box<SelectOrSet>,
+    /// The type of set operation
+    pub op: SetOperator,
+    /// Whether to keep duplicates (UNION ALL, etc.)
     pub all: bool,
 }
 
-/// Either a SELECT statement or a UNION (for chaining)
+/// Either a SELECT statement or a set operation (for chaining)
 #[derive(Debug, Clone, PartialEq)]
-pub enum SelectOrUnion {
+pub enum SelectOrSet {
     Select(Box<SelectStatement>),
-    Union(UnionStatement),
+    SetOp(SetOperationStatement),
 }
 
 /// A SELECT statement

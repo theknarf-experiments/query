@@ -167,6 +167,8 @@ pub enum Keyword {
 
     // Set operations
     Union,
+    Intersect,
+    Except,
     All,
 }
 
@@ -282,6 +284,8 @@ impl std::str::FromStr for Keyword {
             "ELSE" => Ok(Self::Else),
             "END" => Ok(Self::End),
             "UNION" => Ok(Self::Union),
+            "INTERSECT" => Ok(Self::Intersect),
+            "EXCEPT" => Ok(Self::Except),
             "ALL" => Ok(Self::All),
             _ => Err(ParseKeywordError),
         }

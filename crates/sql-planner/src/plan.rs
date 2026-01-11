@@ -48,11 +48,13 @@ pub enum LogicalPlan {
         limit: usize,
         offset: usize,
     },
-    /// Union of two queries (combines result sets)
-    Union {
+    /// Set operation (UNION, INTERSECT, EXCEPT)
+    SetOperation {
         left: Box<LogicalPlan>,
         right: Box<LogicalPlan>,
-        /// If true, keep duplicates (UNION ALL)
+        /// The type of set operation
+        op: sql_parser::SetOperator,
+        /// If true, keep duplicates (UNION ALL, etc.)
         all: bool,
     },
     /// Remove duplicate rows

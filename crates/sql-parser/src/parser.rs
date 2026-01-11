@@ -55,7 +55,7 @@ fn parse_tokens(tokens: Vec<(Token, Span)>) -> ParseResult {
 
 /// Build the statement parser
 fn statement_parser() -> impl Parser<Token, Statement, Error = Simple<Token>> {
-    select_or_union_parser()
+    select_or_set_op_parser()
         .or(insert_parser().map(Statement::Insert))
         .or(update_parser().map(Statement::Update))
         .or(delete_parser().map(Statement::Delete))
@@ -74,31 +74,35 @@ fn statement_parser() -> impl Parser<Token, Statement, Error = Simple<Token>> {
         .then_ignore(just(Token::Semicolon).or_not())
 }
 
-/// Parse SELECT possibly followed by UNION
-fn select_or_union_parser() -> impl Parser<Token, Statement, Error = Simple<Token>> {
+/// Parse SELECT possibly followed by set operations (UNION, INTERSECT, EXCEPT)
+fn select_or_set_op_parser() -> impl Parser<Token, Statement, Error = Simple<Token>> {
+    // Parse set operator (UNION, INTERSECT, EXCEPT) with optional ALL
+    let set_op = just(Token::Keyword(Keyword::Union))
+        .to(SetOperator::Union)
+        .or(just(Token::Keyword(Keyword::Intersect)).to(SetOperator::Intersect))
+        .or(just(Token::Keyword(Keyword::Except)).to(SetOperator::Except))
+        .then(just(Token::Keyword(Keyword::All)).or_not())
+        .map(|(op, all)| (op, all.is_some()));
+
     select_parser()
-        .then(
-            just(Token::Keyword(Keyword::Union))
-                .ignore_then(just(Token::Keyword(Keyword::All)).or_not())
-                .then(select_parser())
-                .repeated(),
-        )
-        .map(|(first, unions)| {
-            if unions.is_empty() {
+        .then(set_op.then(select_parser()).repeated())
+        .map(|(first, set_ops)| {
+            if set_ops.is_empty() {
                 Statement::Select(first)
             } else {
-                // Build the union chain
-                let mut current = SelectOrUnion::Select(Box::new(first));
-                for (all, select) in unions {
-                    current = SelectOrUnion::Union(UnionStatement {
+                // Build the set operation chain
+                let mut current = SelectOrSet::Select(Box::new(first));
+                for ((op, all), select) in set_ops {
+                    current = SelectOrSet::SetOp(SetOperationStatement {
                         left: Box::new(current),
-                        right: Box::new(SelectOrUnion::Select(Box::new(select))),
-                        all: all.is_some(),
+                        right: Box::new(SelectOrSet::Select(Box::new(select))),
+                        op,
+                        all,
                     });
                 }
                 match current {
-                    SelectOrUnion::Select(s) => Statement::Select(*s),
-                    SelectOrUnion::Union(u) => Statement::Union(u),
+                    SelectOrSet::Select(s) => Statement::Select(*s),
+                    SelectOrSet::SetOp(s) => Statement::SetOperation(s),
                 }
             }
         })
@@ -2100,10 +2104,11 @@ mod tests {
         assert!(result.is_ok());
         let stmt = result.unwrap();
         match stmt {
-            Statement::Union(u) => {
-                assert!(!u.all);
+            Statement::SetOperation(s) => {
+                assert!(!s.all);
+                assert_eq!(s.op, SetOperator::Union);
             }
-            _ => panic!("Expected UNION statement"),
+            _ => panic!("Expected SetOperation statement"),
         }
     }
 
@@ -2113,10 +2118,11 @@ mod tests {
         assert!(result.is_ok());
         let stmt = result.unwrap();
         match stmt {
-            Statement::Union(u) => {
-                assert!(u.all);
+            Statement::SetOperation(s) => {
+                assert!(s.all);
+                assert_eq!(s.op, SetOperator::Union);
             }
-            _ => panic!("Expected UNION statement"),
+            _ => panic!("Expected SetOperation statement"),
         }
     }
 
@@ -2126,8 +2132,36 @@ mod tests {
         assert!(result.is_ok());
         let stmt = result.unwrap();
         match stmt {
-            Statement::Union(_) => {}
-            _ => panic!("Expected UNION statement"),
+            Statement::SetOperation(_) => {}
+            _ => panic!("Expected SetOperation statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_intersect() {
+        let result = parse("SELECT id FROM t1 INTERSECT SELECT id FROM t2");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::SetOperation(s) => {
+                assert!(!s.all);
+                assert_eq!(s.op, SetOperator::Intersect);
+            }
+            _ => panic!("Expected SetOperation statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_except() {
+        let result = parse("SELECT id FROM t1 EXCEPT SELECT id FROM t2");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::SetOperation(s) => {
+                assert!(!s.all);
+                assert_eq!(s.op, SetOperator::Except);
+            }
+            _ => panic!("Expected SetOperation statement"),
         }
     }
 }

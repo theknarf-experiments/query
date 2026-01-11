@@ -2,8 +2,8 @@
 
 use sql_parser::{
     AggregateFunc, AlterAction, Assignment, BinaryOp, ColumnDef, DataType, Expr,
-    ForeignKeyRef as ParserFKRef, JoinType, ReferentialAction as ParserRefAction, Statement,
-    TriggerAction, TriggerEvent, TriggerTiming, UnaryOp,
+    ForeignKeyRef as ParserFKRef, JoinType, ReferentialAction as ParserRefAction, SetOperator,
+    Statement, TriggerAction, TriggerEvent, TriggerTiming, UnaryOp,
 };
 use sql_planner::LogicalPlan;
 use sql_storage::{
@@ -1075,7 +1075,12 @@ impl Engine {
                     other => Ok(other),
                 }
             }
-            LogicalPlan::Union { left, right, all } => {
+            LogicalPlan::SetOperation {
+                left,
+                right,
+                op,
+                all,
+            } => {
                 let left_result = self.execute_query(*left)?;
                 let right_result = self.execute_query(*right)?;
 
@@ -1090,28 +1095,57 @@ impl Engine {
                             rows: right_rows,
                         },
                     ) => {
-                        // Combine the rows
-                        let mut combined_rows = left_rows;
-                        combined_rows.extend(right_rows);
+                        let result_rows = match op {
+                            SetOperator::Union => {
+                                // Combine the rows
+                                let mut combined_rows = left_rows;
+                                combined_rows.extend(right_rows);
 
-                        // If not UNION ALL, remove duplicates
-                        if !all {
-                            let mut unique_rows: Vec<Vec<Value>> = Vec::new();
-                            for row in combined_rows {
-                                if !unique_rows.iter().any(|r| r == &row) {
-                                    unique_rows.push(row);
+                                // If not UNION ALL, remove duplicates
+                                if !all {
+                                    let mut unique_rows: Vec<Vec<Value>> = Vec::new();
+                                    for row in combined_rows {
+                                        if !unique_rows.iter().any(|r| r == &row) {
+                                            unique_rows.push(row);
+                                        }
+                                    }
+                                    combined_rows = unique_rows;
                                 }
+                                combined_rows
                             }
-                            combined_rows = unique_rows;
-                        }
+                            SetOperator::Intersect => {
+                                // Return rows that exist in both sets
+                                let mut result: Vec<Vec<Value>> = Vec::new();
+                                for left_row in &left_rows {
+                                    if right_rows.iter().any(|r| r == left_row)
+                                        && (all || !result.iter().any(|r| r == left_row))
+                                    {
+                                        result.push(left_row.clone());
+                                    }
+                                }
+                                result
+                            }
+                            SetOperator::Except => {
+                                // Return rows from left that don't exist in right
+                                let mut result: Vec<Vec<Value>> = Vec::new();
+                                for left_row in &left_rows {
+                                    if !right_rows.iter().any(|r| r == left_row)
+                                        && (all || !result.iter().any(|r| r == left_row))
+                                    {
+                                        result.push(left_row.clone());
+                                    }
+                                }
+                                result
+                            }
+                        };
 
                         Ok(QueryResult::Select {
                             columns: left_cols,
-                            rows: combined_rows,
+                            rows: result_rows,
                         })
                     }
                     _ => Err(ExecError::InvalidExpression(
-                        "UNION requires SELECT inputs".to_string(),
+                        "Set operation requires SELECT inputs".to_string(),
                     )),
                 }
             }
@@ -4253,6 +4287,68 @@ mod tests {
         match result.unwrap() {
             QueryResult::Select { rows, .. } => {
                 assert_eq!(rows.len(), 3);
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_intersect() {
+        let mut engine = Engine::new();
+
+        engine.execute("CREATE TABLE t1 (val INT)").unwrap();
+        engine.execute("CREATE TABLE t2 (val INT)").unwrap();
+
+        engine.execute("INSERT INTO t1 (val) VALUES (1)").unwrap();
+        engine.execute("INSERT INTO t1 (val) VALUES (2)").unwrap();
+        engine.execute("INSERT INTO t1 (val) VALUES (3)").unwrap();
+        engine.execute("INSERT INTO t2 (val) VALUES (2)").unwrap();
+        engine.execute("INSERT INTO t2 (val) VALUES (3)").unwrap();
+        engine.execute("INSERT INTO t2 (val) VALUES (4)").unwrap();
+
+        // INTERSECT returns rows that exist in both
+        let result = engine.execute("SELECT val FROM t1 INTERSECT SELECT val FROM t2");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 2); // 2 and 3
+                let vals: Vec<_> = rows.iter().map(|r| r[0].clone()).collect();
+                assert!(vals.contains(&Value::Int(2)));
+                assert!(vals.contains(&Value::Int(3)));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_except() {
+        let mut engine = Engine::new();
+
+        engine.execute("CREATE TABLE t1 (val INT)").unwrap();
+        engine.execute("CREATE TABLE t2 (val INT)").unwrap();
+
+        engine.execute("INSERT INTO t1 (val) VALUES (1)").unwrap();
+        engine.execute("INSERT INTO t1 (val) VALUES (2)").unwrap();
+        engine.execute("INSERT INTO t1 (val) VALUES (3)").unwrap();
+        engine.execute("INSERT INTO t2 (val) VALUES (2)").unwrap();
+        engine.execute("INSERT INTO t2 (val) VALUES (3)").unwrap();
+        engine.execute("INSERT INTO t2 (val) VALUES (4)").unwrap();
+
+        // EXCEPT returns rows in first set but not in second
+        let result = engine.execute("SELECT val FROM t1 EXCEPT SELECT val FROM t2");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 1); // Only 1
+                assert_eq!(rows[0][0], Value::Int(1));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // EXCEPT the other way
+        let result = engine.execute("SELECT val FROM t2 EXCEPT SELECT val FROM t1");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 1); // Only 4
+                assert_eq!(rows[0][0], Value::Int(4));
             }
             _ => panic!("Expected Select result"),
         }

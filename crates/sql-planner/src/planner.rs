@@ -2,7 +2,7 @@
 
 use sql_parser::{
     CreateIndexStatement, CreateTableStatement, CreateTriggerStatement, DeleteStatement, Expr,
-    InsertStatement, SelectColumn, SelectOrUnion, SelectStatement, Statement, UnionStatement,
+    InsertStatement, SelectColumn, SelectOrSet, SelectStatement, SetOperationStatement, Statement,
     UpdateStatement,
 };
 
@@ -26,7 +26,7 @@ pub enum PlanError {
 pub fn plan(statement: Statement) -> PlanResult {
     match statement {
         Statement::Select(select) => plan_select(select),
-        Statement::Union(union) => plan_union(union),
+        Statement::SetOperation(set_op) => plan_set_operation(set_op),
         Statement::Insert(insert) => plan_insert(insert),
         Statement::Update(update) => plan_update(update),
         Statement::Delete(delete) => plan_delete(delete),
@@ -49,22 +49,23 @@ pub fn plan(statement: Statement) -> PlanResult {
     }
 }
 
-/// Plan a UNION statement
-fn plan_union(union: UnionStatement) -> PlanResult {
-    let left = plan_select_or_union(*union.left)?;
-    let right = plan_select_or_union(*union.right)?;
-    Ok(LogicalPlan::Union {
+/// Plan a set operation (UNION, INTERSECT, EXCEPT)
+fn plan_set_operation(set_op: SetOperationStatement) -> PlanResult {
+    let left = plan_select_or_set(*set_op.left)?;
+    let right = plan_select_or_set(*set_op.right)?;
+    Ok(LogicalPlan::SetOperation {
         left: Box::new(left),
         right: Box::new(right),
-        all: union.all,
+        op: set_op.op,
+        all: set_op.all,
     })
 }
 
-/// Plan a SelectOrUnion (recursive helper)
-fn plan_select_or_union(node: SelectOrUnion) -> PlanResult {
+/// Plan a SelectOrSet (recursive helper)
+fn plan_select_or_set(node: SelectOrSet) -> PlanResult {
     match node {
-        SelectOrUnion::Select(select) => plan_select(*select),
-        SelectOrUnion::Union(union) => plan_union(union),
+        SelectOrSet::Select(select) => plan_select(*select),
+        SelectOrSet::SetOp(set_op) => plan_set_operation(set_op),
     }
 }
 

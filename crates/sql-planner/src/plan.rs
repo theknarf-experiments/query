@@ -7,6 +7,12 @@ use sql_parser::{Assignment, Expr, JoinType, OrderBy};
 pub enum LogicalPlan {
     /// Scan a table
     Scan { table: String },
+    /// Index scan - lookup rows using an index
+    IndexScan {
+        table: String,
+        column: String,
+        value: Expr,
+    },
     /// Join two inputs
     Join {
         left: Box<LogicalPlan>,

@@ -270,6 +270,23 @@ impl StorageEngine for MemoryEngine {
         }
         None
     }
+
+    fn has_index(&self, table: &str, column: &str) -> bool {
+        self.indexes
+            .values()
+            .any(|idx| idx.table == table && idx.column == column)
+    }
+
+    fn get_rows_by_indices(&self, table: &str, indices: &[usize]) -> StorageResult<Vec<Row>> {
+        let table_data = self
+            .tables
+            .get(table)
+            .ok_or_else(|| StorageError::TableNotFound(table.to_string()))?;
+        Ok(indices
+            .iter()
+            .filter_map(|&idx| table_data.rows.get(idx).cloned())
+            .collect())
+    }
 }
 
 /// Hash a Value for index lookup

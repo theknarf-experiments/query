@@ -146,4 +146,10 @@ pub trait StorageEngine: Send + Sync {
 
     /// Lookup rows by index (returns row indices)
     fn index_lookup(&self, table: &str, column: &str, value: &Value) -> Option<Vec<usize>>;
+
+    /// Check if an index exists for the given table and column
+    fn has_index(&self, table: &str, column: &str) -> bool;
+
+    /// Get row by index (returns specific row indices from a table scan)
+    fn get_rows_by_indices(&self, table: &str, indices: &[usize]) -> StorageResult<Vec<Row>>;
 }

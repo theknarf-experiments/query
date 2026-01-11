@@ -748,6 +748,34 @@ impl Engine {
                     rows,
                 })
             }
+            LogicalPlan::IndexScan {
+                table,
+                column,
+                value,
+            } => {
+                let schema = self.storage.get_schema(&table)?;
+                let column_names: Vec<String> =
+                    schema.columns.iter().map(|c| c.name.clone()).collect();
+
+                // Evaluate the value expression to get the lookup value
+                let lookup_value = eval_literal(&value);
+
+                // Try index lookup
+                if let Some(indices) = self.storage.index_lookup(&table, &column, &lookup_value) {
+                    let rows = self.storage.get_rows_by_indices(&table, &indices)?;
+                    Ok(QueryResult::Select {
+                        columns: column_names,
+                        rows,
+                    })
+                } else {
+                    // Fall back to full scan if index lookup fails
+                    let rows = self.storage.scan(&table)?;
+                    Ok(QueryResult::Select {
+                        columns: column_names,
+                        rows,
+                    })
+                }
+            }
             LogicalPlan::Join {
                 left,
                 right,
@@ -883,6 +911,32 @@ impl Engine {
                 }
             }
             LogicalPlan::Filter { input, predicate } => {
+                // Check if we can use an index for this filter
+                if let Some((table_name, indexed_rows, remaining_predicate)) =
+                    self.try_index_optimization(&input, &predicate)
+                {
+                    let schema = self.storage.get_schema(&table_name)?;
+                    let column_names: Vec<String> =
+                        schema.columns.iter().map(|c| c.name.clone()).collect();
+
+                    // If we got indexed rows, filter by any remaining predicates
+                    let filtered = match remaining_predicate {
+                        Some(pred) => indexed_rows
+                            .into_iter()
+                            .filter(|row| {
+                                self.eval_predicate_with_subquery(&pred, row, &column_names)
+                            })
+                            .collect(),
+                        None => indexed_rows,
+                    };
+
+                    return Ok(QueryResult::Select {
+                        columns: column_names,
+                        rows: filtered,
+                    });
+                }
+
+                // Fall back to regular filtering
                 let result = self.execute_query(*input)?;
                 match result {
                     QueryResult::Select { columns, rows } => {
@@ -1098,6 +1152,105 @@ impl Engine {
         match self.eval_expr_with_subquery(expr, row, columns) {
             Value::Bool(b) => b,
             _ => false,
+        }
+    }
+
+    /// Try to use an index for a Filter(Scan) operation.
+    /// Returns Some((table_name, rows, remaining_predicate)) if successful.
+    fn try_index_optimization(
+        &self,
+        input: &LogicalPlan,
+        predicate: &Expr,
+    ) -> Option<(String, Vec<Vec<Value>>, Option<Expr>)> {
+        // Check if input is a simple Scan
+        let table = match input {
+            LogicalPlan::Scan { table } => table.clone(),
+            _ => return None,
+        };
+
+        // Extract equality conditions from the predicate
+        let (index_cond, remaining) = self.extract_index_conditions(&table, predicate);
+
+        // If we found an indexable condition, use it
+        if let Some((column, value)) = index_cond {
+            let lookup_value = eval_literal(&value);
+            if let Some(indices) = self.storage.index_lookup(&table, &column, &lookup_value) {
+                if let Ok(rows) = self.storage.get_rows_by_indices(&table, &indices) {
+                    return Some((table, rows, remaining));
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Extract an equality condition that can use an index from a predicate.
+    /// Returns (indexable_condition, remaining_predicate)
+    fn extract_index_conditions(
+        &self,
+        table: &str,
+        predicate: &Expr,
+    ) -> (Option<(String, Expr)>, Option<Expr>) {
+        match predicate {
+            // Simple equality: column = literal
+            Expr::BinaryOp {
+                left,
+                op: BinaryOp::Eq,
+                right,
+            } => {
+                // Check if left is column and right is literal, and column has index
+                if let Expr::Column(col) = left.as_ref() {
+                    if is_literal(right) && self.storage.has_index(table, col) {
+                        return (Some((col.clone(), *right.clone())), None);
+                    }
+                }
+                // Check if right is column and left is literal
+                if let Expr::Column(col) = right.as_ref() {
+                    if is_literal(left) && self.storage.has_index(table, col) {
+                        return (Some((col.clone(), *left.clone())), None);
+                    }
+                }
+                (None, Some(predicate.clone()))
+            }
+            // AND: try to find an indexable condition in either side
+            Expr::BinaryOp {
+                left,
+                op: BinaryOp::And,
+                right,
+            } => {
+                // Try left side first
+                let (left_idx, left_rem) = self.extract_index_conditions(table, left);
+                if left_idx.is_some() {
+                    // Combine remaining with right side
+                    let remaining = match left_rem {
+                        Some(rem) => Some(Expr::BinaryOp {
+                            left: Box::new(rem),
+                            op: BinaryOp::And,
+                            right: right.clone(),
+                        }),
+                        None => Some(*right.clone()),
+                    };
+                    return (left_idx, remaining);
+                }
+
+                // Try right side
+                let (right_idx, right_rem) = self.extract_index_conditions(table, right);
+                if right_idx.is_some() {
+                    // Combine remaining with left side
+                    let remaining = match right_rem {
+                        Some(rem) => Some(Expr::BinaryOp {
+                            left: left.clone(),
+                            op: BinaryOp::And,
+                            right: Box::new(rem),
+                        }),
+                        None => Some(*left.clone()),
+                    };
+                    return (right_idx, remaining);
+                }
+
+                (None, Some(predicate.clone()))
+            }
+            _ => (None, Some(predicate.clone())),
         }
     }
 
@@ -1520,6 +1673,18 @@ fn eval_literal(expr: &Expr) -> Value {
             other => other,
         },
         _ => Value::Null,
+    }
+}
+
+/// Check if an expression is a literal value (for index optimization)
+fn is_literal(expr: &Expr) -> bool {
+    match expr {
+        Expr::Integer(_) | Expr::Float(_) | Expr::String(_) | Expr::Boolean(_) | Expr::Null => true,
+        Expr::UnaryOp {
+            op: UnaryOp::Neg,
+            expr,
+        } => is_literal(expr),
+        _ => false,
     }
 }
 
@@ -3612,6 +3777,59 @@ mod tests {
         // Index on non-existent column should fail
         let result = engine.execute("CREATE INDEX idx_bar ON users (nonexistent)");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_index_used_in_query() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE users (id INT, name TEXT, email TEXT)")
+            .unwrap();
+
+        // Insert many rows
+        for i in 0..100 {
+            engine
+                .execute(&format!(
+                    "INSERT INTO users (id, name, email) VALUES ({}, 'user{}', 'user{}@test.com')",
+                    i, i, i
+                ))
+                .unwrap();
+        }
+
+        // Create index on id column
+        engine
+            .execute("CREATE INDEX idx_users_id ON users (id)")
+            .unwrap();
+
+        // Query using the indexed column - should use index
+        let result = engine.execute("SELECT name FROM users WHERE id = 50");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][0], Value::Text("user50".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // Query using index with additional conditions (compound predicate)
+        let result = engine.execute("SELECT name FROM users WHERE id = 25 AND name = 'user25'");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][0], Value::Text("user25".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // Query where index value doesn't exist
+        let result = engine.execute("SELECT name FROM users WHERE id = 999");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 0);
+            }
+            _ => panic!("Expected Select result"),
+        }
     }
 
     #[test]

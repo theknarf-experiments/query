@@ -7,6 +7,7 @@ members = [
     "crates/sql-storage",
     "crates/sql-wal",
     "crates/sql-engine",
+    "crates/sql-tests",
 ]
 
 [workspace.package]

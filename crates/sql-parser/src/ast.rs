@@ -84,6 +84,18 @@ pub enum Expr {
     },
     /// Unary operation
     UnaryOp { op: UnaryOp, expr: Box<Expr> },
+    /// Aggregate function call
+    Aggregate { func: AggregateFunc, arg: Box<Expr> },
+}
+
+/// Aggregate functions
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AggregateFunc {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
 }
 
 /// Binary operators

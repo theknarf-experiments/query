@@ -1,6 +1,8 @@
 //! Query executor - executes logical plans against storage
 
-use sql_parser::{Assignment, BinaryOp, ColumnDef, DataType, Expr, JoinType, UnaryOp};
+use sql_parser::{
+    AggregateFunc, Assignment, BinaryOp, ColumnDef, DataType, Expr, JoinType, UnaryOp,
+};
 use sql_planner::LogicalPlan;
 use sql_storage::{
     ColumnSchema, DataType as StorageDataType, MemoryEngine, Row, StorageEngine, StorageError,
@@ -372,31 +374,50 @@ impl Engine {
                             }
                         }
 
+                        // Check if any expression is an aggregate
+                        let has_aggregate = exprs.iter().any(|(expr, _)| is_aggregate(expr));
+
                         let new_columns: Vec<String> = exprs
                             .iter()
                             .enumerate()
                             .map(|(i, (expr, alias))| {
                                 alias.clone().unwrap_or_else(|| match expr {
                                     Expr::Column(c) => c.clone(),
+                                    Expr::Aggregate { func, .. } => {
+                                        format!("{:?}", func).to_lowercase()
+                                    }
                                     _ => format!("col{}", i),
                                 })
                             })
                             .collect();
 
-                        let new_rows: Vec<Vec<Value>> = rows
-                            .iter()
-                            .map(|row| {
-                                exprs
-                                    .iter()
-                                    .map(|(expr, _)| eval_expr(expr, row, &columns))
-                                    .collect()
-                            })
-                            .collect();
+                        if has_aggregate {
+                            // Aggregate all rows into a single result row
+                            let aggregated_row: Vec<Value> = exprs
+                                .iter()
+                                .map(|(expr, _)| eval_aggregate(expr, &rows, &columns))
+                                .collect();
 
-                        Ok(QueryResult::Select {
-                            columns: new_columns,
-                            rows: new_rows,
-                        })
+                            Ok(QueryResult::Select {
+                                columns: new_columns,
+                                rows: vec![aggregated_row],
+                            })
+                        } else {
+                            let new_rows: Vec<Vec<Value>> = rows
+                                .iter()
+                                .map(|row| {
+                                    exprs
+                                        .iter()
+                                        .map(|(expr, _)| eval_expr(expr, row, &columns))
+                                        .collect()
+                                })
+                                .collect();
+
+                            Ok(QueryResult::Select {
+                                columns: new_columns,
+                                rows: new_rows,
+                            })
+                        }
                     }
                     other => Ok(other),
                 }
@@ -510,6 +531,8 @@ fn eval_expr(expr: &Expr, row: &[Value], columns: &[String]) -> Value {
             let r = eval_expr(right, row, columns);
             eval_binary_op(&l, op, &r)
         }
+        // Aggregates should not be evaluated per-row; they're handled by eval_aggregate
+        Expr::Aggregate { .. } => Value::Null,
     }
 }
 
@@ -620,6 +643,85 @@ fn check_join_condition(on: &Option<Expr>, row: &[Value], columns: &[String]) ->
     match on {
         Some(expr) => eval_predicate(expr, row, columns),
         None => true, // No ON clause (e.g., CROSS JOIN)
+    }
+}
+
+/// Check if an expression is an aggregate function
+fn is_aggregate(expr: &Expr) -> bool {
+    matches!(expr, Expr::Aggregate { .. })
+}
+
+/// Evaluate an aggregate expression over all rows
+fn eval_aggregate(expr: &Expr, rows: &[Vec<Value>], columns: &[String]) -> Value {
+    match expr {
+        Expr::Aggregate { func, arg } => {
+            let values: Vec<Value> = rows
+                .iter()
+                .map(|row| eval_expr(arg, row, columns))
+                .collect();
+
+            match func {
+                AggregateFunc::Count => {
+                    // COUNT(*) counts all rows, COUNT(col) counts non-NULL values
+                    match arg.as_ref() {
+                        Expr::Column(c) if c == "*" => Value::Int(rows.len() as i64),
+                        _ => {
+                            let count = values.iter().filter(|v| !matches!(v, Value::Null)).count();
+                            Value::Int(count as i64)
+                        }
+                    }
+                }
+                AggregateFunc::Sum => {
+                    let sum: f64 = values
+                        .iter()
+                        .filter_map(|v| match v {
+                            Value::Int(n) => Some(*n as f64),
+                            Value::Float(f) => Some(*f),
+                            _ => None,
+                        })
+                        .sum();
+                    // Return Int if all inputs were Int, otherwise Float
+                    if values
+                        .iter()
+                        .all(|v| matches!(v, Value::Int(_) | Value::Null))
+                    {
+                        Value::Int(sum as i64)
+                    } else {
+                        Value::Float(sum)
+                    }
+                }
+                AggregateFunc::Avg => {
+                    let nums: Vec<f64> = values
+                        .iter()
+                        .filter_map(|v| match v {
+                            Value::Int(n) => Some(*n as f64),
+                            Value::Float(f) => Some(*f),
+                            _ => None,
+                        })
+                        .collect();
+                    if nums.is_empty() {
+                        Value::Null
+                    } else {
+                        Value::Float(nums.iter().sum::<f64>() / nums.len() as f64)
+                    }
+                }
+                AggregateFunc::Min => values
+                    .into_iter()
+                    .filter(|v| !matches!(v, Value::Null))
+                    .min_by(compare_values)
+                    .unwrap_or(Value::Null),
+                AggregateFunc::Max => values
+                    .into_iter()
+                    .filter(|v| !matches!(v, Value::Null))
+                    .max_by(compare_values)
+                    .unwrap_or(Value::Null),
+            }
+        }
+        // For non-aggregate expressions, just return the first row's value (or NULL if empty)
+        _ => rows
+            .first()
+            .map(|row| eval_expr(expr, row, columns))
+            .unwrap_or(Value::Null),
     }
 }
 
@@ -772,11 +874,11 @@ mod tests {
             .execute("INSERT INTO nums (a, b) VALUES (10, 3)")
             .unwrap();
 
-        let result = engine.execute("SELECT a + b AS sum FROM nums");
+        let result = engine.execute("SELECT a + b AS total FROM nums");
         assert!(result.is_ok());
         match result.unwrap() {
             QueryResult::Select { columns, rows } => {
-                assert_eq!(columns, vec!["sum"]);
+                assert_eq!(columns, vec!["total"]);
                 assert_eq!(rows[0][0], Value::Int(13));
             }
             _ => panic!("Expected Select result"),
@@ -998,6 +1100,119 @@ mod tests {
                 assert_eq!(columns.len(), 2);
                 // Cartesian product: 2 * 3 = 6 rows
                 assert_eq!(rows.len(), 6);
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_count_star() {
+        let mut engine = Engine::new();
+        engine
+            .execute("CREATE TABLE users (id INT, name TEXT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (id, name) VALUES (1, 'alice')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (id, name) VALUES (2, 'bob')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (id, name) VALUES (3, 'charlie')")
+            .unwrap();
+
+        let result = engine.execute("SELECT COUNT(*) FROM users");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            QueryResult::Select { columns, rows } => {
+                assert_eq!(columns.len(), 1);
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][0], Value::Int(3));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_sum() {
+        let mut engine = Engine::new();
+        engine.execute("CREATE TABLE nums (x INT)").unwrap();
+        engine.execute("INSERT INTO nums (x) VALUES (10)").unwrap();
+        engine.execute("INSERT INTO nums (x) VALUES (20)").unwrap();
+        engine.execute("INSERT INTO nums (x) VALUES (30)").unwrap();
+
+        let result = engine.execute("SELECT SUM(x) FROM nums");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][0], Value::Int(60));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_avg() {
+        let mut engine = Engine::new();
+        engine.execute("CREATE TABLE nums (x INT)").unwrap();
+        engine.execute("INSERT INTO nums (x) VALUES (10)").unwrap();
+        engine.execute("INSERT INTO nums (x) VALUES (20)").unwrap();
+        engine.execute("INSERT INTO nums (x) VALUES (30)").unwrap();
+
+        let result = engine.execute("SELECT AVG(x) FROM nums");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][0], Value::Float(20.0));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_min_max() {
+        let mut engine = Engine::new();
+        engine.execute("CREATE TABLE nums (x INT)").unwrap();
+        engine.execute("INSERT INTO nums (x) VALUES (15)").unwrap();
+        engine.execute("INSERT INTO nums (x) VALUES (5)").unwrap();
+        engine.execute("INSERT INTO nums (x) VALUES (25)").unwrap();
+
+        let result = engine.execute("SELECT MIN(x), MAX(x) FROM nums");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][0], Value::Int(5));
+                assert_eq!(rows[0][1], Value::Int(25));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_count_with_where() {
+        let mut engine = Engine::new();
+        engine
+            .execute("CREATE TABLE users (id INT, active INT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (id, active) VALUES (1, 1)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (id, active) VALUES (2, 0)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (id, active) VALUES (3, 1)")
+            .unwrap();
+
+        let result = engine.execute("SELECT COUNT(*) FROM users WHERE active = 1");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][0], Value::Int(2));
             }
             _ => panic!("Expected Select result"),
         }

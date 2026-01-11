@@ -113,6 +113,13 @@ pub enum Keyword {
     // Boolean literals
     True,
     False,
+
+    // Aggregate functions
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
 }
 
 /// Error when parsing a keyword fails
@@ -187,6 +194,11 @@ impl std::str::FromStr for Keyword {
             "AS" => Ok(Self::As),
             "TRUE" => Ok(Self::True),
             "FALSE" => Ok(Self::False),
+            "COUNT" => Ok(Self::Count),
+            "SUM" => Ok(Self::Sum),
+            "AVG" => Ok(Self::Avg),
+            "MIN" => Ok(Self::Min),
+            "MAX" => Ok(Self::Max),
             _ => Err(ParseKeywordError),
         }
     }

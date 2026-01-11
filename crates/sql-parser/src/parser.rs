@@ -214,11 +214,32 @@ fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone {
                 None => Expr::Column(first),
             });
 
+        // Aggregate functions: COUNT(*), COUNT(col), SUM(col), AVG(col), MIN(col), MAX(col)
+        let aggregate_func = select! {
+            Token::Keyword(Keyword::Count) => AggregateFunc::Count,
+            Token::Keyword(Keyword::Sum) => AggregateFunc::Sum,
+            Token::Keyword(Keyword::Avg) => AggregateFunc::Avg,
+            Token::Keyword(Keyword::Min) => AggregateFunc::Min,
+            Token::Keyword(Keyword::Max) => AggregateFunc::Max,
+        };
+
+        // Parse aggregate argument - either * (for COUNT) or an expression
+        let aggregate_arg = just(Token::Star)
+            .to(Expr::Column("*".to_string()))
+            .or(expr.clone());
+
+        let aggregate = aggregate_func
+            .then(aggregate_arg.delimited_by(just(Token::LParen), just(Token::RParen)))
+            .map(|(func, arg)| Expr::Aggregate {
+                func,
+                arg: Box::new(arg),
+            });
+
         let paren_expr = expr
             .clone()
             .delimited_by(just(Token::LParen), just(Token::RParen));
 
-        let atom = literal.or(column).or(paren_expr);
+        let atom = literal.or(aggregate).or(column).or(paren_expr);
 
         // Unary operators
         let unary = just(Token::Minus)
@@ -868,6 +889,80 @@ mod tests {
                 assert_eq!(s.joins[0].table.name, "orders");
                 assert_eq!(s.joins[0].table.alias, Some("o".to_string()));
             }
+            _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_count_star() {
+        let result = parse("SELECT COUNT(*) FROM users");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Select(s) => {
+                assert_eq!(s.columns.len(), 1);
+                match &s.columns[0] {
+                    SelectColumn::Expr { expr, .. } => {
+                        assert!(matches!(
+                            expr,
+                            Expr::Aggregate {
+                                func: AggregateFunc::Count,
+                                ..
+                            }
+                        ));
+                    }
+                    _ => panic!("Expected aggregate expression"),
+                }
+            }
+            _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_sum_column() {
+        let result = parse("SELECT SUM(amount) FROM orders");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Select(s) => match &s.columns[0] {
+                SelectColumn::Expr { expr, .. } => match expr {
+                    Expr::Aggregate { func, arg } => {
+                        assert_eq!(*func, AggregateFunc::Sum);
+                        assert!(matches!(**arg, Expr::Column(ref c) if c == "amount"));
+                    }
+                    _ => panic!("Expected Aggregate"),
+                },
+                _ => panic!("Expected expression"),
+            },
+            _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_multiple_aggregates() {
+        let result = parse("SELECT COUNT(*), AVG(price), MAX(quantity) FROM products");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Select(s) => {
+                assert_eq!(s.columns.len(), 3);
+            }
+            _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_aggregate_with_alias() {
+        let result = parse("SELECT COUNT(*) AS total FROM users");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Select(s) => match &s.columns[0] {
+                SelectColumn::Expr { alias, .. } => {
+                    assert_eq!(alias, &Some("total".to_string()));
+                }
+                _ => panic!("Expected expression"),
+            },
             _ => panic!("Expected SELECT statement"),
         }
     }

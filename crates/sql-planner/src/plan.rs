@@ -1,12 +1,19 @@
 //! Query plan types
 
-use sql_parser::{Assignment, Expr, OrderBy};
+use sql_parser::{Assignment, Expr, JoinType, OrderBy};
 
 /// A logical query plan node
 #[derive(Debug, Clone, PartialEq)]
 pub enum LogicalPlan {
     /// Scan a table
     Scan { table: String },
+    /// Join two inputs
+    Join {
+        left: Box<LogicalPlan>,
+        right: Box<LogicalPlan>,
+        join_type: JoinType,
+        on: Option<Expr>,
+    },
     /// Filter rows
     Filter {
         input: Box<LogicalPlan>,

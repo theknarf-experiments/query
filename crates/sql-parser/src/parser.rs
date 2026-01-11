@@ -80,6 +80,8 @@ fn select_parser() -> impl Parser<Token, SelectStatement, Error = Simple<Token>>
 
     let from_clause = from_kw.ignore_then(table_ref_parser()).or_not();
 
+    let joins = join_parser().repeated();
+
     let where_clause = where_kw.ignore_then(expr_parser()).or_not();
 
     let order_by_clause = order_kw
@@ -99,18 +101,22 @@ fn select_parser() -> impl Parser<Token, SelectStatement, Error = Simple<Token>>
     select_kw
         .ignore_then(columns)
         .then(from_clause)
+        .then(joins)
         .then(where_clause)
         .then(order_by_clause)
         .then(limit_clause)
         .then(offset_clause)
         .map(
-            |(((((columns, from), where_clause), order_by), limit), offset)| SelectStatement {
-                columns,
-                from,
-                where_clause,
-                order_by,
-                limit,
-                offset,
+            |((((((columns, from), joins), where_clause), order_by), limit), offset)| {
+                SelectStatement {
+                    columns,
+                    from,
+                    joins,
+                    where_clause,
+                    order_by,
+                    limit,
+                    offset,
+                }
             },
         )
 }
@@ -138,6 +144,43 @@ fn table_ref_parser() -> impl Parser<Token, TableRef, Error = Simple<Token>> + C
         .map(|(name, alias)| TableRef { name, alias })
 }
 
+/// Parse a JOIN clause
+fn join_parser() -> impl Parser<Token, Join, Error = Simple<Token>> + Clone {
+    let on_kw = just(Token::Keyword(Keyword::On));
+
+    // Parse join type
+    let join_type = just(Token::Keyword(Keyword::Inner))
+        .ignore_then(just(Token::Keyword(Keyword::Join)))
+        .to(JoinType::Inner)
+        .or(just(Token::Keyword(Keyword::Left))
+            .ignore_then(just(Token::Keyword(Keyword::Outer)).or_not())
+            .ignore_then(just(Token::Keyword(Keyword::Join)))
+            .to(JoinType::Left))
+        .or(just(Token::Keyword(Keyword::Right))
+            .ignore_then(just(Token::Keyword(Keyword::Outer)).or_not())
+            .ignore_then(just(Token::Keyword(Keyword::Join)))
+            .to(JoinType::Right))
+        .or(just(Token::Keyword(Keyword::Full))
+            .ignore_then(just(Token::Keyword(Keyword::Outer)).or_not())
+            .ignore_then(just(Token::Keyword(Keyword::Join)))
+            .to(JoinType::Full))
+        .or(just(Token::Keyword(Keyword::Cross))
+            .ignore_then(just(Token::Keyword(Keyword::Join)))
+            .to(JoinType::Cross))
+        .or(just(Token::Keyword(Keyword::Join)).to(JoinType::Inner)); // Default JOIN is INNER JOIN
+
+    let on_clause = on_kw.ignore_then(expr_parser()).or_not();
+
+    join_type
+        .then(table_ref_parser())
+        .then(on_clause)
+        .map(|((join_type, table), on)| Join {
+            join_type,
+            table,
+            on,
+        })
+}
+
 /// Parse an ORDER BY item
 fn order_by_item_parser() -> impl Parser<Token, OrderBy, Error = Simple<Token>> + Clone {
     expr_parser()
@@ -163,7 +206,13 @@ fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone {
             Token::Keyword(Keyword::Null) => Expr::Null,
         };
 
-        let column = identifier().map(Expr::Column);
+        // Support both simple columns (name) and qualified columns (table.name)
+        let column = identifier()
+            .then(just(Token::Dot).ignore_then(identifier()).or_not())
+            .map(|(first, second)| match second {
+                Some(col) => Expr::Column(format!("{}.{}", first, col)),
+                None => Expr::Column(first),
+            });
 
         let paren_expr = expr
             .clone()
@@ -727,6 +776,99 @@ mod tests {
                 assert!(d.where_clause.is_none());
             }
             _ => panic!("Expected DELETE statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_inner_join() {
+        let result = parse("SELECT * FROM users INNER JOIN orders ON users.id = orders.user_id");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Select(s) => {
+                assert_eq!(s.joins.len(), 1);
+                assert_eq!(s.joins[0].join_type, JoinType::Inner);
+                assert_eq!(s.joins[0].table.name, "orders");
+                assert!(s.joins[0].on.is_some());
+            }
+            _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_left_join() {
+        let result = parse("SELECT * FROM users LEFT JOIN orders ON users.id = orders.user_id");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Select(s) => {
+                assert_eq!(s.joins.len(), 1);
+                assert_eq!(s.joins[0].join_type, JoinType::Left);
+                assert_eq!(s.joins[0].table.name, "orders");
+            }
+            _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_left_outer_join() {
+        let result =
+            parse("SELECT * FROM users LEFT OUTER JOIN orders ON users.id = orders.user_id");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Select(s) => {
+                assert_eq!(s.joins.len(), 1);
+                assert_eq!(s.joins[0].join_type, JoinType::Left);
+            }
+            _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_cross_join() {
+        let result = parse("SELECT * FROM users CROSS JOIN orders");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Select(s) => {
+                assert_eq!(s.joins.len(), 1);
+                assert_eq!(s.joins[0].join_type, JoinType::Cross);
+                assert!(s.joins[0].on.is_none());
+            }
+            _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_multiple_joins() {
+        let result = parse(
+            "SELECT * FROM users JOIN orders ON users.id = orders.user_id JOIN items ON orders.id = items.order_id"
+        );
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Select(s) => {
+                assert_eq!(s.joins.len(), 2);
+                assert_eq!(s.joins[0].table.name, "orders");
+                assert_eq!(s.joins[1].table.name, "items");
+            }
+            _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_join_with_alias() {
+        let result = parse("SELECT * FROM users u JOIN orders o ON u.id = o.user_id");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Select(s) => {
+                assert_eq!(s.joins.len(), 1);
+                assert_eq!(s.joins[0].table.name, "orders");
+                assert_eq!(s.joins[0].table.alias, Some("o".to_string()));
+            }
+            _ => panic!("Expected SELECT statement"),
         }
     }
 }

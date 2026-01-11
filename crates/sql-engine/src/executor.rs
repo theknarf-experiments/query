@@ -1,6 +1,6 @@
 //! Query executor - executes logical plans against storage
 
-use sql_parser::{Assignment, BinaryOp, ColumnDef, DataType, Expr, UnaryOp};
+use sql_parser::{Assignment, BinaryOp, ColumnDef, DataType, Expr, JoinType, UnaryOp};
 use sql_planner::LogicalPlan;
 use sql_storage::{
     ColumnSchema, DataType as StorageDataType, MemoryEngine, Row, StorageEngine, StorageError,
@@ -208,6 +208,140 @@ impl Engine {
                     columns: column_names,
                     rows,
                 })
+            }
+            LogicalPlan::Join {
+                left,
+                right,
+                join_type,
+                on,
+            } => {
+                let left_result = self.execute_query(*left)?;
+                let right_result = self.execute_query(*right)?;
+
+                match (left_result, right_result) {
+                    (
+                        QueryResult::Select {
+                            columns: left_cols,
+                            rows: left_rows,
+                        },
+                        QueryResult::Select {
+                            columns: right_cols,
+                            rows: right_rows,
+                        },
+                    ) => {
+                        // Combine column names
+                        let mut combined_cols = left_cols.clone();
+                        combined_cols.extend(right_cols.clone());
+
+                        let mut result_rows: Vec<Vec<Value>> = Vec::new();
+
+                        match join_type {
+                            JoinType::Inner => {
+                                // INNER JOIN: only rows where ON condition matches
+                                for left_row in &left_rows {
+                                    for right_row in &right_rows {
+                                        let combined_row = combine_rows(left_row, right_row);
+                                        if check_join_condition(&on, &combined_row, &combined_cols)
+                                        {
+                                            result_rows.push(combined_row);
+                                        }
+                                    }
+                                }
+                            }
+                            JoinType::Left => {
+                                // LEFT JOIN: all left rows, matching right rows or NULLs
+                                for left_row in &left_rows {
+                                    let mut matched = false;
+                                    for right_row in &right_rows {
+                                        let combined_row = combine_rows(left_row, right_row);
+                                        if check_join_condition(&on, &combined_row, &combined_cols)
+                                        {
+                                            result_rows.push(combined_row);
+                                            matched = true;
+                                        }
+                                    }
+                                    if !matched {
+                                        // Add left row with NULLs for right columns
+                                        let null_row: Vec<Value> =
+                                            vec![Value::Null; right_cols.len()];
+                                        result_rows.push(combine_rows(left_row, &null_row));
+                                    }
+                                }
+                            }
+                            JoinType::Right => {
+                                // RIGHT JOIN: all right rows, matching left rows or NULLs
+                                for right_row in &right_rows {
+                                    let mut matched = false;
+                                    for left_row in &left_rows {
+                                        let combined_row = combine_rows(left_row, right_row);
+                                        if check_join_condition(&on, &combined_row, &combined_cols)
+                                        {
+                                            result_rows.push(combined_row);
+                                            matched = true;
+                                        }
+                                    }
+                                    if !matched {
+                                        // Add right row with NULLs for left columns
+                                        let null_row: Vec<Value> =
+                                            vec![Value::Null; left_cols.len()];
+                                        result_rows.push(combine_rows(&null_row, right_row));
+                                    }
+                                }
+                            }
+                            JoinType::Full => {
+                                // FULL OUTER JOIN: all rows from both sides
+                                let mut left_matched: Vec<bool> = vec![false; left_rows.len()];
+                                let mut right_matched: Vec<bool> = vec![false; right_rows.len()];
+
+                                for (li, left_row) in left_rows.iter().enumerate() {
+                                    for (ri, right_row) in right_rows.iter().enumerate() {
+                                        let combined_row = combine_rows(left_row, right_row);
+                                        if check_join_condition(&on, &combined_row, &combined_cols)
+                                        {
+                                            result_rows.push(combined_row);
+                                            left_matched[li] = true;
+                                            right_matched[ri] = true;
+                                        }
+                                    }
+                                }
+
+                                // Add unmatched left rows
+                                for (li, left_row) in left_rows.iter().enumerate() {
+                                    if !left_matched[li] {
+                                        let null_row: Vec<Value> =
+                                            vec![Value::Null; right_cols.len()];
+                                        result_rows.push(combine_rows(left_row, &null_row));
+                                    }
+                                }
+
+                                // Add unmatched right rows
+                                for (ri, right_row) in right_rows.iter().enumerate() {
+                                    if !right_matched[ri] {
+                                        let null_row: Vec<Value> =
+                                            vec![Value::Null; left_cols.len()];
+                                        result_rows.push(combine_rows(&null_row, right_row));
+                                    }
+                                }
+                            }
+                            JoinType::Cross => {
+                                // CROSS JOIN: cartesian product
+                                for left_row in &left_rows {
+                                    for right_row in &right_rows {
+                                        result_rows.push(combine_rows(left_row, right_row));
+                                    }
+                                }
+                            }
+                        }
+
+                        Ok(QueryResult::Select {
+                            columns: combined_cols,
+                            rows: result_rows,
+                        })
+                    }
+                    _ => Err(ExecError::InvalidExpression(
+                        "Join requires Select inputs".to_string(),
+                    )),
+                }
             }
             LogicalPlan::Filter { input, predicate } => {
                 let result = self.execute_query(*input)?;
@@ -471,6 +605,21 @@ fn eval_predicate(expr: &Expr, row: &[Value], columns: &[String]) -> bool {
     match eval_expr(expr, row, columns) {
         Value::Bool(b) => b,
         _ => false,
+    }
+}
+
+/// Combine two rows into one
+fn combine_rows(left: &[Value], right: &[Value]) -> Vec<Value> {
+    let mut combined = left.to_vec();
+    combined.extend(right.iter().cloned());
+    combined
+}
+
+/// Check if JOIN condition is satisfied
+fn check_join_condition(on: &Option<Expr>, row: &[Value], columns: &[String]) -> bool {
+    match on {
+        Some(expr) => eval_predicate(expr, row, columns),
+        None => true, // No ON clause (e.g., CROSS JOIN)
     }
 }
 
@@ -755,6 +904,100 @@ mod tests {
         match result.unwrap() {
             QueryResult::Select { rows, .. } => {
                 assert_eq!(rows.len(), 0);
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_inner_join() {
+        let mut engine = Engine::new();
+        engine
+            .execute("CREATE TABLE users (id INT, name TEXT)")
+            .unwrap();
+        engine
+            .execute("CREATE TABLE orders (id INT, user_id INT, item TEXT)")
+            .unwrap();
+
+        engine
+            .execute("INSERT INTO users (id, name) VALUES (1, 'alice')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (id, name) VALUES (2, 'bob')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO orders (id, user_id, item) VALUES (1, 1, 'book')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO orders (id, user_id, item) VALUES (2, 1, 'pen')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO orders (id, user_id, item) VALUES (3, 3, 'notebook')")
+            .unwrap();
+
+        let result = engine.execute("SELECT * FROM users JOIN orders ON id = user_id");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            QueryResult::Select { columns, rows } => {
+                // Should have columns from both tables
+                assert_eq!(columns.len(), 5);
+                // Alice has 2 orders, Bob has 0 (user_id 3 doesn't match anyone)
+                assert_eq!(rows.len(), 2);
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_left_join() {
+        let mut engine = Engine::new();
+        engine
+            .execute("CREATE TABLE users (id INT, name TEXT)")
+            .unwrap();
+        engine
+            .execute("CREATE TABLE orders (id INT, user_id INT)")
+            .unwrap();
+
+        engine
+            .execute("INSERT INTO users (id, name) VALUES (1, 'alice')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (id, name) VALUES (2, 'bob')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO orders (id, user_id) VALUES (1, 1)")
+            .unwrap();
+
+        let result = engine.execute("SELECT * FROM users LEFT JOIN orders ON id = user_id");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                // Alice matches, Bob doesn't but still included with NULLs
+                assert_eq!(rows.len(), 2);
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_cross_join() {
+        let mut engine = Engine::new();
+        engine.execute("CREATE TABLE a (x INT)").unwrap();
+        engine.execute("CREATE TABLE b (y INT)").unwrap();
+
+        engine.execute("INSERT INTO a (x) VALUES (1)").unwrap();
+        engine.execute("INSERT INTO a (x) VALUES (2)").unwrap();
+        engine.execute("INSERT INTO b (y) VALUES (10)").unwrap();
+        engine.execute("INSERT INTO b (y) VALUES (20)").unwrap();
+        engine.execute("INSERT INTO b (y) VALUES (30)").unwrap();
+
+        let result = engine.execute("SELECT * FROM a CROSS JOIN b");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            QueryResult::Select { columns, rows } => {
+                assert_eq!(columns.len(), 2);
+                // Cartesian product: 2 * 3 = 6 rows
+                assert_eq!(rows.len(), 6);
             }
             _ => panic!("Expected Select result"),
         }

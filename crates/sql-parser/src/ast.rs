@@ -20,6 +20,7 @@ pub enum Statement {
 pub struct SelectStatement {
     pub columns: Vec<SelectColumn>,
     pub from: Option<TableRef>,
+    pub joins: Vec<Join>,
     pub where_clause: Option<Expr>,
     pub order_by: Vec<OrderBy>,
     pub limit: Option<Expr>,
@@ -40,6 +41,24 @@ pub enum SelectColumn {
 pub struct TableRef {
     pub name: String,
     pub alias: Option<String>,
+}
+
+/// A JOIN clause
+#[derive(Debug, Clone, PartialEq)]
+pub struct Join {
+    pub join_type: JoinType,
+    pub table: TableRef,
+    pub on: Option<Expr>,
+}
+
+/// Type of JOIN operation
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JoinType {
+    Inner,
+    Left,
+    Right,
+    Full,
+    Cross,
 }
 
 /// An expression

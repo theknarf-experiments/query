@@ -52,6 +52,18 @@ fn plan_select(select: SelectStatement) -> PlanResult {
         }
     };
 
+    // Apply JOINs
+    for join in select.joins {
+        plan = LogicalPlan::Join {
+            left: Box::new(plan),
+            right: Box::new(LogicalPlan::Scan {
+                table: join.table.name,
+            }),
+            join_type: join.join_type,
+            on: join.on,
+        };
+    }
+
     // Apply WHERE filter
     if let Some(predicate) = select.where_clause {
         plan = LogicalPlan::Filter {
@@ -327,6 +339,63 @@ mod tests {
                 assert!(where_clause.is_some());
             }
             _ => panic!("Expected Delete"),
+        }
+    }
+
+    #[test]
+    fn test_plan_inner_join() {
+        let result = plan_sql("SELECT * FROM users INNER JOIN orders ON users.id = orders.user_id");
+        assert!(result.is_ok());
+        let plan = result.unwrap();
+        // Should be Projection -> Join -> (Scan, Scan)
+        match plan {
+            LogicalPlan::Projection { input, .. } => match *input {
+                LogicalPlan::Join {
+                    left,
+                    right,
+                    join_type,
+                    on,
+                } => {
+                    assert_eq!(join_type, sql_parser::JoinType::Inner);
+                    assert!(on.is_some());
+                    assert!(matches!(*left, LogicalPlan::Scan { table } if table == "users"));
+                    assert!(matches!(*right, LogicalPlan::Scan { table } if table == "orders"));
+                }
+                _ => panic!("Expected Join"),
+            },
+            _ => panic!("Expected Projection"),
+        }
+    }
+
+    #[test]
+    fn test_plan_multiple_joins() {
+        let result = plan_sql(
+            "SELECT * FROM users JOIN orders ON users.id = orders.user_id JOIN items ON orders.id = items.order_id"
+        );
+        assert!(result.is_ok());
+        let plan = result.unwrap();
+        // Should be Projection -> Join -> (Join -> (Scan, Scan), Scan)
+        match plan {
+            LogicalPlan::Projection { input, .. } => match *input {
+                LogicalPlan::Join { left, right, .. } => {
+                    // right should be items scan
+                    assert!(matches!(*right, LogicalPlan::Scan { table } if table == "items"));
+                    // left should be another join
+                    match *left {
+                        LogicalPlan::Join { left, right, .. } => {
+                            assert!(
+                                matches!(*left, LogicalPlan::Scan { table } if table == "users")
+                            );
+                            assert!(
+                                matches!(*right, LogicalPlan::Scan { table } if table == "orders")
+                            );
+                        }
+                        _ => panic!("Expected nested Join"),
+                    }
+                }
+                _ => panic!("Expected Join"),
+            },
+            _ => panic!("Expected Projection"),
         }
     }
 }

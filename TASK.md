@@ -8,3 +8,9 @@ Plugable storage engines, so that one can swap out which engine one want to use 
 Find a standardized test for SQL queries to run against to ensure you follow the full SQL standard.
 Use deterministic simulation testing to fully test the database in all kinds of failure modes.
 A write ahead log to ensure reliability.
+Support for primary and foriegn keys, database triggers, cascade delete, etc
+Transaction support.
+Import and export from CSV, JSON, etc.
+Database migrations.
+
+Keep working to find remaining parts that is needed to support a full database.

@@ -1175,6 +1175,24 @@ impl Engine {
                 }
                 Value::Bool(false)
             }
+            Expr::Like {
+                expr,
+                pattern,
+                negated,
+            } => {
+                let val = self.eval_expr_with_subquery(expr, row, columns);
+                let pat = self.eval_expr_with_subquery(pattern, row, columns);
+                let result = match (val, pat) {
+                    (Value::Text(s), Value::Text(p)) => match_like_pattern(&s, &p),
+                    _ => false,
+                };
+                Value::Bool(if *negated { !result } else { result })
+            }
+            Expr::IsNull { expr, negated } => {
+                let val = self.eval_expr_with_subquery(expr, row, columns);
+                let is_null = matches!(val, Value::Null);
+                Value::Bool(if *negated { !is_null } else { is_null })
+            }
         }
     }
 
@@ -1346,6 +1364,24 @@ fn eval_having_expr(expr: &Expr, group_rows: &[Vec<Value>], columns: &[String]) 
         Expr::Null => Value::Null,
         // Subquery expressions need to be evaluated with context
         Expr::Subquery(_) | Expr::InSubquery { .. } | Expr::Exists(_) => Value::Null,
+        Expr::Like {
+            expr,
+            pattern,
+            negated,
+        } => {
+            let val = eval_having_expr(expr, group_rows, columns);
+            let pat = eval_having_expr(pattern, group_rows, columns);
+            let result = match (val, pat) {
+                (Value::Text(s), Value::Text(p)) => match_like_pattern(&s, &p),
+                _ => false,
+            };
+            Value::Bool(if *negated { !result } else { result })
+        }
+        Expr::IsNull { expr, negated } => {
+            let val = eval_having_expr(expr, group_rows, columns);
+            let is_null = matches!(val, Value::Null);
+            Value::Bool(if *negated { !is_null } else { is_null })
+        }
     }
 }
 
@@ -1441,6 +1477,26 @@ fn eval_expr(expr: &Expr, row: &[Value], columns: &[String]) -> Value {
         Expr::Aggregate { .. } => Value::Null,
         // Subquery expressions need to be evaluated with engine context
         Expr::Subquery(_) | Expr::InSubquery { .. } | Expr::Exists(_) => Value::Null,
+        // LIKE pattern matching
+        Expr::Like {
+            expr,
+            pattern,
+            negated,
+        } => {
+            let val = eval_expr(expr, row, columns);
+            let pat = eval_expr(pattern, row, columns);
+            let result = match (val, pat) {
+                (Value::Text(s), Value::Text(p)) => match_like_pattern(&s, &p),
+                _ => false,
+            };
+            Value::Bool(if *negated { !result } else { result })
+        }
+        // IS NULL / IS NOT NULL
+        Expr::IsNull { expr, negated } => {
+            let val = eval_expr(expr, row, columns);
+            let is_null = matches!(val, Value::Null);
+            Value::Bool(if *negated { !is_null } else { is_null })
+        }
     }
 }
 
@@ -1529,6 +1585,44 @@ fn compare_values(left: &Value, right: &Value) -> std::cmp::Ordering {
         (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
         _ => std::cmp::Ordering::Equal,
     }
+}
+
+/// Match a SQL LIKE pattern using dynamic programming
+/// % matches any sequence of characters
+/// _ matches any single character
+fn match_like_pattern(s: &str, pattern: &str) -> bool {
+    let s_chars: Vec<char> = s.chars().collect();
+    let p_chars: Vec<char> = pattern.chars().collect();
+    let s_len = s_chars.len();
+    let p_len = p_chars.len();
+
+    // dp[i][j] = true if s[0..i] matches pattern[0..j]
+    let mut dp = vec![vec![false; p_len + 1]; s_len + 1];
+    dp[0][0] = true;
+
+    // Handle patterns starting with %
+    for j in 1..=p_len {
+        if p_chars[j - 1] == '%' {
+            dp[0][j] = dp[0][j - 1];
+        }
+    }
+
+    for i in 1..=s_len {
+        for j in 1..=p_len {
+            let pc = p_chars[j - 1];
+            let sc = s_chars[i - 1];
+
+            if pc == '%' {
+                // % can match zero chars (dp[i][j-1]) or one more char (dp[i-1][j])
+                dp[i][j] = dp[i][j - 1] || dp[i - 1][j];
+            } else if pc == '_' || pc == sc {
+                // _ matches any single char, or exact match
+                dp[i][j] = dp[i - 1][j - 1];
+            }
+        }
+    }
+
+    dp[s_len][p_len]
 }
 
 /// Evaluate a predicate expression
@@ -3453,6 +3547,114 @@ mod tests {
         match result.unwrap() {
             QueryResult::Select { rows, .. } => {
                 assert_eq!(rows.len(), 3);
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_like_pattern() {
+        let mut engine = Engine::new();
+
+        engine.execute("CREATE TABLE users (name TEXT)").unwrap();
+        engine
+            .execute("INSERT INTO users (name) VALUES ('john')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (name) VALUES ('johnny')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (name) VALUES ('bob')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (name) VALUES ('alice')")
+            .unwrap();
+
+        // Match starting with 'john'
+        let result = engine.execute("SELECT * FROM users WHERE name LIKE 'john%'");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 2); // john, johnny
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // Match ending with 'ice'
+        let result = engine.execute("SELECT * FROM users WHERE name LIKE '%ice'");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 1); // alice
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // Match with underscore (single char)
+        let result = engine.execute("SELECT * FROM users WHERE name LIKE 'b_b'");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 1); // bob
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_not_like() {
+        let mut engine = Engine::new();
+
+        engine.execute("CREATE TABLE users (name TEXT)").unwrap();
+        engine
+            .execute("INSERT INTO users (name) VALUES ('john')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (name) VALUES ('bob')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (name) VALUES ('alice')")
+            .unwrap();
+
+        // NOT LIKE - exclude john
+        let result = engine.execute("SELECT * FROM users WHERE name NOT LIKE 'john'");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 2); // bob, alice
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_is_null() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE users (id INT, email TEXT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (id, email) VALUES (1, 'a@example.com')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (id, email) VALUES (2, NULL)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO users (id, email) VALUES (3, 'b@example.com')")
+            .unwrap();
+
+        // Find rows where email IS NULL
+        let result = engine.execute("SELECT * FROM users WHERE email IS NULL");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][0], Value::Int(2));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // Find rows where email IS NOT NULL
+        let result = engine.execute("SELECT * FROM users WHERE email IS NOT NULL");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 2);
             }
             _ => panic!("Expected Select result"),
         }

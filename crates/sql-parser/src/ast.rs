@@ -123,6 +123,14 @@ pub enum Expr {
     },
     /// EXISTS subquery
     Exists(Box<SelectStatement>),
+    /// LIKE pattern matching
+    Like {
+        expr: Box<Expr>,
+        pattern: Box<Expr>,
+        negated: bool,
+    },
+    /// IS NULL / IS NOT NULL
+    IsNull { expr: Box<Expr>, negated: bool },
 }
 
 /// Aggregate functions

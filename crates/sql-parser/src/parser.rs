@@ -514,8 +514,44 @@ fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone {
                 right: Box::new(right),
             });
 
+        // IS NULL / IS NOT NULL
+        let is_null = add_sub
+            .clone()
+            .then(
+                just(Token::Keyword(Keyword::Is))
+                    .ignore_then(just(Token::Keyword(Keyword::Not)).or_not())
+                    .then_ignore(just(Token::Keyword(Keyword::Null)))
+                    .or_not(),
+            )
+            .map(|(left, is_clause)| match is_clause {
+                Some(negated) => Expr::IsNull {
+                    expr: Box::new(left),
+                    negated: negated.is_some(),
+                },
+                None => left,
+            });
+
+        // LIKE pattern matching: expr [NOT] LIKE pattern
+        let like_expr = is_null
+            .clone()
+            .then(
+                just(Token::Keyword(Keyword::Not))
+                    .or_not()
+                    .then_ignore(just(Token::Keyword(Keyword::Like)))
+                    .then(is_null.clone())
+                    .or_not(),
+            )
+            .map(|(left, like_clause)| match like_clause {
+                Some((negated, pattern)) => Expr::Like {
+                    expr: Box::new(left),
+                    pattern: Box::new(pattern),
+                    negated: negated.is_some(),
+                },
+                None => left,
+            });
+
         // IN subquery: expr [NOT] IN (SELECT ...)
-        let in_subquery = add_sub
+        let in_subquery = like_expr
             .clone()
             .then(
                 just(Token::Keyword(Keyword::Not))
@@ -1830,6 +1866,70 @@ mod tests {
             Statement::Select(s) => {
                 assert!(!s.distinct);
             }
+            _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_like() {
+        let result = parse("SELECT * FROM users WHERE name LIKE '%john%'");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Select(s) => match s.where_clause.unwrap() {
+                Expr::Like { negated, .. } => {
+                    assert!(!negated);
+                }
+                _ => panic!("Expected LIKE expression"),
+            },
+            _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_not_like() {
+        let result = parse("SELECT * FROM users WHERE name NOT LIKE '%admin%'");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Select(s) => match s.where_clause.unwrap() {
+                Expr::Like { negated, .. } => {
+                    assert!(negated);
+                }
+                _ => panic!("Expected NOT LIKE expression"),
+            },
+            _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_is_null() {
+        let result = parse("SELECT * FROM users WHERE email IS NULL");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Select(s) => match s.where_clause.unwrap() {
+                Expr::IsNull { negated, .. } => {
+                    assert!(!negated);
+                }
+                _ => panic!("Expected IS NULL expression"),
+            },
+            _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_is_not_null() {
+        let result = parse("SELECT * FROM users WHERE email IS NOT NULL");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Select(s) => match s.where_clause.unwrap() {
+                Expr::IsNull { negated, .. } => {
+                    assert!(negated);
+                }
+                _ => panic!("Expected IS NOT NULL expression"),
+            },
             _ => panic!("Expected SELECT statement"),
         }
     }

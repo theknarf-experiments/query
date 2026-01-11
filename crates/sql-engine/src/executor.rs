@@ -1193,6 +1193,35 @@ impl Engine {
                 let is_null = matches!(val, Value::Null);
                 Value::Bool(if *negated { !is_null } else { is_null })
             }
+            Expr::Case {
+                operand,
+                when_clauses,
+                else_result,
+            } => {
+                match operand {
+                    Some(op) => {
+                        let op_val = self.eval_expr_with_subquery(op, row, columns);
+                        for (when_expr, then_expr) in when_clauses {
+                            let when_val = self.eval_expr_with_subquery(when_expr, row, columns);
+                            if values_equal(&op_val, &when_val) {
+                                return self.eval_expr_with_subquery(then_expr, row, columns);
+                            }
+                        }
+                    }
+                    None => {
+                        for (when_expr, then_expr) in when_clauses {
+                            let cond = self.eval_expr_with_subquery(when_expr, row, columns);
+                            if matches!(cond, Value::Bool(true)) {
+                                return self.eval_expr_with_subquery(then_expr, row, columns);
+                            }
+                        }
+                    }
+                }
+                match else_result {
+                    Some(else_expr) => self.eval_expr_with_subquery(else_expr, row, columns),
+                    None => Value::Null,
+                }
+            }
         }
     }
 
@@ -1382,6 +1411,35 @@ fn eval_having_expr(expr: &Expr, group_rows: &[Vec<Value>], columns: &[String]) 
             let is_null = matches!(val, Value::Null);
             Value::Bool(if *negated { !is_null } else { is_null })
         }
+        Expr::Case {
+            operand,
+            when_clauses,
+            else_result,
+        } => {
+            match operand {
+                Some(op) => {
+                    let op_val = eval_having_expr(op, group_rows, columns);
+                    for (when_expr, then_expr) in when_clauses {
+                        let when_val = eval_having_expr(when_expr, group_rows, columns);
+                        if values_equal(&op_val, &when_val) {
+                            return eval_having_expr(then_expr, group_rows, columns);
+                        }
+                    }
+                }
+                None => {
+                    for (when_expr, then_expr) in when_clauses {
+                        let cond = eval_having_expr(when_expr, group_rows, columns);
+                        if matches!(cond, Value::Bool(true)) {
+                            return eval_having_expr(then_expr, group_rows, columns);
+                        }
+                    }
+                }
+            }
+            match else_result {
+                Some(else_expr) => eval_having_expr(else_expr, group_rows, columns),
+                None => Value::Null,
+            }
+        }
     }
 }
 
@@ -1496,6 +1554,39 @@ fn eval_expr(expr: &Expr, row: &[Value], columns: &[String]) -> Value {
             let val = eval_expr(expr, row, columns);
             let is_null = matches!(val, Value::Null);
             Value::Bool(if *negated { !is_null } else { is_null })
+        }
+        // CASE WHEN expression
+        Expr::Case {
+            operand,
+            when_clauses,
+            else_result,
+        } => {
+            match operand {
+                Some(op) => {
+                    // Simple CASE: CASE expr WHEN val THEN result ...
+                    let op_val = eval_expr(op, row, columns);
+                    for (when_expr, then_expr) in when_clauses {
+                        let when_val = eval_expr(when_expr, row, columns);
+                        if values_equal(&op_val, &when_val) {
+                            return eval_expr(then_expr, row, columns);
+                        }
+                    }
+                }
+                None => {
+                    // Searched CASE: CASE WHEN cond THEN result ...
+                    for (when_expr, then_expr) in when_clauses {
+                        let cond = eval_expr(when_expr, row, columns);
+                        if matches!(cond, Value::Bool(true)) {
+                            return eval_expr(then_expr, row, columns);
+                        }
+                    }
+                }
+            }
+            // Return ELSE result or NULL
+            match else_result {
+                Some(else_expr) => eval_expr(else_expr, row, columns),
+                None => Value::Null,
+            }
         }
     }
 }
@@ -3655,6 +3746,61 @@ mod tests {
         match result.unwrap() {
             QueryResult::Select { rows, .. } => {
                 assert_eq!(rows.len(), 2);
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_case_when_searched() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE scores (name TEXT, score INT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO scores (name, score) VALUES ('alice', 95)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO scores (name, score) VALUES ('bob', 72)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO scores (name, score) VALUES ('charlie', 45)")
+            .unwrap();
+
+        // Searched CASE: CASE WHEN cond THEN result ...
+        let result = engine.execute(
+            "SELECT name, CASE WHEN score >= 90 THEN 'A' WHEN score >= 70 THEN 'B' ELSE 'C' END FROM scores"
+        );
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 3);
+                assert_eq!(rows[0][1], Value::Text("A".to_string())); // alice: 95 -> A
+                assert_eq!(rows[1][1], Value::Text("B".to_string())); // bob: 72 -> B
+                assert_eq!(rows[2][1], Value::Text("C".to_string())); // charlie: 45 -> C
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_case_when_no_else() {
+        let mut engine = Engine::new();
+
+        engine.execute("CREATE TABLE items (status TEXT)").unwrap();
+        engine
+            .execute("INSERT INTO items (status) VALUES ('active')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO items (status) VALUES ('pending')")
+            .unwrap();
+
+        // CASE without ELSE returns NULL when no match
+        let result = engine.execute("SELECT CASE WHEN status = 'active' THEN 'yes' END FROM items");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Text("yes".to_string()));
+                assert_eq!(rows[1][0], Value::Null);
             }
             _ => panic!("Expected Select result"),
         }

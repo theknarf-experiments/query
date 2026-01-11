@@ -463,9 +463,42 @@ fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone {
             .clone()
             .delimited_by(just(Token::LParen), just(Token::RParen));
 
+        // CASE WHEN expression
+        // Supports both:
+        // - CASE WHEN cond THEN result ... [ELSE result] END
+        // - CASE expr WHEN val THEN result ... [ELSE result] END
+        let when_clause = just(Token::Keyword(Keyword::When))
+            .ignore_then(expr.clone())
+            .then_ignore(just(Token::Keyword(Keyword::Then)))
+            .then(expr.clone());
+
+        let case_expr = just(Token::Keyword(Keyword::Case))
+            .ignore_then(
+                // Optional operand for simple CASE
+                expr.clone()
+                    .then(when_clause.clone().repeated().at_least(1))
+                    .map(|(operand, when_clauses)| (Some(Box::new(operand)), when_clauses))
+                    .or(when_clause
+                        .repeated()
+                        .at_least(1)
+                        .map(|when_clauses| (None, when_clauses))),
+            )
+            .then(
+                just(Token::Keyword(Keyword::Else))
+                    .ignore_then(expr.clone())
+                    .or_not(),
+            )
+            .then_ignore(just(Token::Keyword(Keyword::End)))
+            .map(|((operand, when_clauses), else_result)| Expr::Case {
+                operand,
+                when_clauses,
+                else_result: else_result.map(Box::new),
+            });
+
         let atom = literal
             .or(aggregate)
             .or(exists_subquery)
+            .or(case_expr)
             .or(column)
             .or(scalar_subquery)
             .or(paren_expr);
@@ -1929,6 +1962,50 @@ mod tests {
                     assert!(negated);
                 }
                 _ => panic!("Expected IS NOT NULL expression"),
+            },
+            _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_case_when() {
+        let result = parse("SELECT CASE WHEN x > 0 THEN 'positive' ELSE 'non-positive' END FROM t");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Select(s) => match &s.columns[0] {
+                SelectColumn::Expr { expr, .. } => match expr {
+                    Expr::Case {
+                        operand,
+                        when_clauses,
+                        else_result,
+                    } => {
+                        assert!(operand.is_none());
+                        assert_eq!(when_clauses.len(), 1);
+                        assert!(else_result.is_some());
+                    }
+                    _ => panic!("Expected CASE expression"),
+                },
+                _ => panic!("Expected expression"),
+            },
+            _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_case_when_multiple() {
+        let result = parse("SELECT CASE WHEN a THEN 1 WHEN b THEN 2 WHEN c THEN 3 END FROM t");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Select(s) => match &s.columns[0] {
+                SelectColumn::Expr { expr, .. } => match expr {
+                    Expr::Case { when_clauses, .. } => {
+                        assert_eq!(when_clauses.len(), 3);
+                    }
+                    _ => panic!("Expected CASE expression"),
+                },
+                _ => panic!("Expected expression"),
             },
             _ => panic!("Expected SELECT statement"),
         }

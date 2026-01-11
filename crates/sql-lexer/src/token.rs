@@ -157,6 +157,13 @@ pub enum Keyword {
 
     // Subqueries
     Exists,
+
+    // CASE expressions
+    Case,
+    When,
+    Then,
+    Else,
+    End,
 }
 
 /// Error when parsing a keyword fails
@@ -265,6 +272,11 @@ impl std::str::FromStr for Keyword {
             "COLUMN" => Ok(Self::Column),
             "RENAME" => Ok(Self::Rename),
             "EXISTS" => Ok(Self::Exists),
+            "CASE" => Ok(Self::Case),
+            "WHEN" => Ok(Self::When),
+            "THEN" => Ok(Self::Then),
+            "ELSE" => Ok(Self::Else),
+            "END" => Ok(Self::End),
             _ => Err(ParseKeywordError),
         }
     }

@@ -131,6 +131,15 @@ pub enum Expr {
     },
     /// IS NULL / IS NOT NULL
     IsNull { expr: Box<Expr>, negated: bool },
+    /// CASE WHEN expression
+    Case {
+        /// Optional operand for simple CASE (CASE x WHEN ...)
+        operand: Option<Box<Expr>>,
+        /// WHEN conditions and results
+        when_clauses: Vec<(Expr, Expr)>,
+        /// ELSE result
+        else_result: Option<Box<Expr>>,
+    },
 }
 
 /// Aggregate functions

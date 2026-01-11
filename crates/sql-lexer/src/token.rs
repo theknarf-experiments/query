@@ -76,6 +76,12 @@ pub enum Keyword {
     Unique,
     Not,
     Default,
+    Constraint,
+    Check,
+    Cascade,
+    Restrict,
+    Action,
+    NoAction,
 
     // Logical operators
     And,
@@ -169,6 +175,12 @@ impl std::str::FromStr for Keyword {
             "UNIQUE" => Ok(Self::Unique),
             "NOT" => Ok(Self::Not),
             "DEFAULT" => Ok(Self::Default),
+            "CONSTRAINT" => Ok(Self::Constraint),
+            "CHECK" => Ok(Self::Check),
+            "CASCADE" => Ok(Self::Cascade),
+            "RESTRICT" => Ok(Self::Restrict),
+            "ACTION" => Ok(Self::Action),
+            "NO" => Ok(Self::NoAction), // NO ACTION is parsed as NO + ACTION
             "AND" => Ok(Self::And),
             "OR" => Ok(Self::Or),
             "IS" => Ok(Self::Is),

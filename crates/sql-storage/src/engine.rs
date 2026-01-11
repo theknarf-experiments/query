@@ -22,6 +22,29 @@ pub struct ColumnSchema {
     pub data_type: DataType,
     pub nullable: bool,
     pub primary_key: bool,
+    pub unique: bool,
+    pub default: Option<crate::Value>,
+    pub references: Option<ForeignKeyRef>,
+}
+
+/// Foreign key reference information
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForeignKeyRef {
+    pub table: String,
+    pub column: String,
+    pub on_delete: ReferentialAction,
+    pub on_update: ReferentialAction,
+}
+
+/// Actions for referential integrity
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ReferentialAction {
+    #[default]
+    NoAction,
+    Cascade,
+    SetNull,
+    SetDefault,
+    Restrict,
 }
 
 /// Data types supported by the storage engine
@@ -33,11 +56,30 @@ pub enum DataType {
     Bool,
 }
 
+/// Table constraint
+#[derive(Debug, Clone, PartialEq)]
+pub enum TableConstraint {
+    PrimaryKey {
+        columns: Vec<String>,
+    },
+    ForeignKey {
+        columns: Vec<String>,
+        references_table: String,
+        references_columns: Vec<String>,
+        on_delete: ReferentialAction,
+        on_update: ReferentialAction,
+    },
+    Unique {
+        columns: Vec<String>,
+    },
+}
+
 /// Schema for a table
 #[derive(Debug, Clone, PartialEq)]
 pub struct TableSchema {
     pub name: String,
     pub columns: Vec<ColumnSchema>,
+    pub constraints: Vec<TableConstraint>,
 }
 
 /// A row of data

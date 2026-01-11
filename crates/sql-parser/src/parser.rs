@@ -427,7 +427,12 @@ fn create_table_parser() -> impl Parser<Token, CreateTableStatement, Error = Sim
     let create_kw = just(Token::Keyword(Keyword::Create));
     let table_kw = just(Token::Keyword(Keyword::Table));
 
-    let column_defs = column_def_parser()
+    // Column definitions and table constraints can be mixed
+    let column_or_constraint = column_def_parser()
+        .map(Either::Left)
+        .or(table_constraint_parser().map(Either::Right));
+
+    let definitions = column_or_constraint
         .separated_by(just(Token::Comma))
         .at_least(1)
         .delimited_by(just(Token::LParen), just(Token::RParen));
@@ -435,8 +440,28 @@ fn create_table_parser() -> impl Parser<Token, CreateTableStatement, Error = Sim
     create_kw
         .ignore_then(table_kw)
         .ignore_then(identifier())
-        .then(column_defs)
-        .map(|(name, columns)| CreateTableStatement { name, columns })
+        .then(definitions)
+        .map(|(name, defs)| {
+            let mut columns = Vec::new();
+            let mut constraints = Vec::new();
+            for def in defs {
+                match def {
+                    Either::Left(col) => columns.push(col),
+                    Either::Right(constraint) => constraints.push(constraint),
+                }
+            }
+            CreateTableStatement {
+                name,
+                columns,
+                constraints,
+            }
+        })
+}
+
+/// Helper enum for parsing mixed column defs and table constraints
+enum Either<L, R> {
+    Left(L),
+    Right(R),
 }
 
 /// Parse a column definition
@@ -452,28 +477,182 @@ fn column_def_parser() -> impl Parser<Token, ColumnDef, Error = Simple<Token>> +
         Token::Keyword(Keyword::Boolean) => DataType::Bool,
     };
 
+    // Column constraints can appear in any order after the data type
     let not_null = just(Token::Keyword(Keyword::Not))
         .then(just(Token::Keyword(Keyword::Null)))
-        .to(false)
-        .or_not()
-        .map(|o| o.unwrap_or(true)); // default is nullable
+        .to(());
 
     let primary_key = just(Token::Keyword(Keyword::Primary))
         .then(just(Token::Keyword(Keyword::Key)))
-        .to(true)
-        .or_not()
-        .map(|o| o.unwrap_or(false));
+        .to(());
+
+    let unique = just(Token::Keyword(Keyword::Unique)).to(());
+
+    let default_val = just(Token::Keyword(Keyword::Default)).ignore_then(literal_expr());
+
+    let references = just(Token::Keyword(Keyword::References))
+        .ignore_then(identifier())
+        .then(
+            identifier()
+                .delimited_by(just(Token::LParen), just(Token::RParen))
+                .or_not(),
+        )
+        .then(referential_action_parser().or_not())
+        .map(|((table, column), actions)| {
+            let (on_delete, on_update) = actions.unwrap_or_default();
+            ForeignKeyRef {
+                table,
+                column: column.unwrap_or_else(|| "id".to_string()),
+                on_delete,
+                on_update,
+            }
+        });
+
+    // Parse column constraints in any order
+    let constraint = not_null
+        .map(|_| ColumnConstraint::NotNull)
+        .or(primary_key.map(|_| ColumnConstraint::PrimaryKey))
+        .or(unique.map(|_| ColumnConstraint::Unique))
+        .or(default_val.map(ColumnConstraint::Default))
+        .or(references.map(ColumnConstraint::References));
 
     identifier()
         .then(data_type)
-        .then(not_null)
-        .then(primary_key)
-        .map(|(((name, data_type), nullable), primary_key)| ColumnDef {
-            name,
-            data_type,
-            nullable,
-            primary_key,
+        .then(constraint.repeated())
+        .map(|((name, data_type), constraints)| {
+            let mut nullable = true;
+            let mut primary_key = false;
+            let mut unique = false;
+            let mut default = None;
+            let mut references = None;
+
+            for c in constraints {
+                match c {
+                    ColumnConstraint::NotNull => nullable = false,
+                    ColumnConstraint::PrimaryKey => {
+                        primary_key = true;
+                        nullable = false; // Primary keys are implicitly NOT NULL
+                    }
+                    ColumnConstraint::Unique => unique = true,
+                    ColumnConstraint::Default(expr) => default = Some(expr),
+                    ColumnConstraint::References(fk) => references = Some(fk),
+                }
+            }
+
+            ColumnDef {
+                name,
+                data_type,
+                nullable,
+                primary_key,
+                unique,
+                default,
+                references,
+            }
         })
+}
+
+/// Column constraints during parsing
+enum ColumnConstraint {
+    NotNull,
+    PrimaryKey,
+    Unique,
+    Default(Expr),
+    References(ForeignKeyRef),
+}
+
+/// Parse a literal expression (for DEFAULT values)
+fn literal_expr() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone {
+    select! {
+        Token::Integer(n) => Expr::Integer(n),
+        Token::Float(f) => Expr::Float(f.value()),
+        Token::String(s) => Expr::String(s),
+        Token::Keyword(Keyword::True) => Expr::Boolean(true),
+        Token::Keyword(Keyword::False) => Expr::Boolean(false),
+        Token::Keyword(Keyword::Null) => Expr::Null,
+    }
+}
+
+/// Parse referential actions (ON DELETE/UPDATE)
+fn referential_action_parser(
+) -> impl Parser<Token, (ReferentialAction, ReferentialAction), Error = Simple<Token>> + Clone {
+    let action = just(Token::Keyword(Keyword::Cascade))
+        .to(ReferentialAction::Cascade)
+        .or(just(Token::Keyword(Keyword::Restrict)).to(ReferentialAction::Restrict))
+        .or(just(Token::Keyword(Keyword::NoAction))
+            .then(just(Token::Keyword(Keyword::Action)))
+            .to(ReferentialAction::NoAction))
+        .or(just(Token::Keyword(Keyword::Set))
+            .then(just(Token::Keyword(Keyword::Null)))
+            .to(ReferentialAction::SetNull))
+        .or(just(Token::Keyword(Keyword::Set))
+            .then(just(Token::Keyword(Keyword::Default)))
+            .to(ReferentialAction::SetDefault));
+
+    let on_delete = just(Token::Keyword(Keyword::On))
+        .then(just(Token::Keyword(Keyword::Delete)))
+        .ignore_then(action.clone());
+
+    let on_update = just(Token::Keyword(Keyword::On))
+        .then(just(Token::Keyword(Keyword::Update)))
+        .ignore_then(action);
+
+    on_delete
+        .or_not()
+        .then(on_update.or_not())
+        .map(|(del, upd)| {
+            (
+                del.unwrap_or(ReferentialAction::NoAction),
+                upd.unwrap_or(ReferentialAction::NoAction),
+            )
+        })
+}
+
+/// Parse a table-level constraint
+fn table_constraint_parser() -> impl Parser<Token, TableConstraint, Error = Simple<Token>> + Clone {
+    let constraint_name = just(Token::Keyword(Keyword::Constraint))
+        .ignore_then(identifier())
+        .or_not();
+
+    let column_list = identifier()
+        .separated_by(just(Token::Comma))
+        .at_least(1)
+        .delimited_by(just(Token::LParen), just(Token::RParen));
+
+    let primary_key = just(Token::Keyword(Keyword::Primary))
+        .then(just(Token::Keyword(Keyword::Key)))
+        .ignore_then(column_list.clone())
+        .map(|columns| TableConstraint::PrimaryKey {
+            name: None,
+            columns,
+        });
+
+    let unique = just(Token::Keyword(Keyword::Unique))
+        .ignore_then(column_list.clone())
+        .map(|columns| TableConstraint::Unique {
+            name: None,
+            columns,
+        });
+
+    let foreign_key = just(Token::Keyword(Keyword::Foreign))
+        .then(just(Token::Keyword(Keyword::Key)))
+        .ignore_then(column_list.clone())
+        .then_ignore(just(Token::Keyword(Keyword::References)))
+        .then(identifier())
+        .then(column_list.clone())
+        .then(referential_action_parser().or_not())
+        .map(|(((columns, ref_table), ref_cols), actions)| {
+            let (on_delete, on_update) = actions.unwrap_or_default();
+            TableConstraint::ForeignKey {
+                name: None,
+                columns,
+                references_table: ref_table,
+                references_columns: ref_cols,
+                on_delete,
+                on_update,
+            }
+        });
+
+    constraint_name.ignore_then(primary_key.or(unique).or(foreign_key))
 }
 
 #[cfg(test)]
@@ -964,6 +1143,147 @@ mod tests {
                 _ => panic!("Expected expression"),
             },
             _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_primary_key_constraint() {
+        let result = parse("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::CreateTable(ct) => {
+                assert_eq!(ct.columns.len(), 2);
+                assert!(ct.columns[0].primary_key);
+                assert!(!ct.columns[0].nullable); // PK implies NOT NULL
+                assert!(!ct.columns[1].primary_key);
+            }
+            _ => panic!("Expected CREATE TABLE statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_not_null_constraint() {
+        let result = parse("CREATE TABLE users (id INT NOT NULL, name TEXT)");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::CreateTable(ct) => {
+                assert!(!ct.columns[0].nullable);
+                assert!(ct.columns[1].nullable);
+            }
+            _ => panic!("Expected CREATE TABLE statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_unique_constraint() {
+        let result = parse("CREATE TABLE users (id INT, email TEXT UNIQUE)");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::CreateTable(ct) => {
+                assert!(!ct.columns[0].unique);
+                assert!(ct.columns[1].unique);
+            }
+            _ => panic!("Expected CREATE TABLE statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_default_value() {
+        let result = parse("CREATE TABLE users (id INT, active BOOL DEFAULT TRUE)");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::CreateTable(ct) => {
+                assert!(ct.columns[0].default.is_none());
+                assert_eq!(ct.columns[1].default, Some(Expr::Boolean(true)));
+            }
+            _ => panic!("Expected CREATE TABLE statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_foreign_key_inline() {
+        let result =
+            parse("CREATE TABLE orders (id INT PRIMARY KEY, user_id INT REFERENCES users)");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::CreateTable(ct) => {
+                assert_eq!(ct.columns.len(), 2);
+                assert!(ct.columns[1].references.is_some());
+                let fk = ct.columns[1].references.as_ref().unwrap();
+                assert_eq!(fk.table, "users");
+            }
+            _ => panic!("Expected CREATE TABLE statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_combined_constraints() {
+        let result =
+            parse("CREATE TABLE users (id INT PRIMARY KEY NOT NULL UNIQUE, name TEXT NOT NULL)");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::CreateTable(ct) => {
+                assert!(ct.columns[0].primary_key);
+                assert!(!ct.columns[0].nullable);
+                assert!(ct.columns[0].unique);
+                assert!(!ct.columns[1].nullable);
+            }
+            _ => panic!("Expected CREATE TABLE statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_table_level_primary_key() {
+        let result = parse("CREATE TABLE users (id INT, name TEXT, PRIMARY KEY (id))");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::CreateTable(ct) => {
+                assert_eq!(ct.columns.len(), 2);
+                assert_eq!(ct.constraints.len(), 1);
+                match &ct.constraints[0] {
+                    TableConstraint::PrimaryKey { columns, .. } => {
+                        assert_eq!(columns, &vec!["id".to_string()]);
+                    }
+                    _ => panic!("Expected PrimaryKey constraint"),
+                }
+            }
+            _ => panic!("Expected CREATE TABLE statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_table_level_foreign_key() {
+        let result = parse(
+            "CREATE TABLE orders (id INT, user_id INT, FOREIGN KEY (user_id) REFERENCES users (id))",
+        );
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::CreateTable(ct) => {
+                assert_eq!(ct.columns.len(), 2);
+                assert_eq!(ct.constraints.len(), 1);
+                match &ct.constraints[0] {
+                    TableConstraint::ForeignKey {
+                        columns,
+                        references_table,
+                        references_columns,
+                        ..
+                    } => {
+                        assert_eq!(columns, &vec!["user_id".to_string()]);
+                        assert_eq!(references_table, "users");
+                        assert_eq!(references_columns, &vec!["id".to_string()]);
+                    }
+                    _ => panic!("Expected ForeignKey constraint"),
+                }
+            }
+            _ => panic!("Expected CREATE TABLE statement"),
         }
     }
 }

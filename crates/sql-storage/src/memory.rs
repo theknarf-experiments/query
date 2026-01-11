@@ -98,14 +98,21 @@ mod tests {
                     data_type: DataType::Int,
                     nullable: false,
                     primary_key: true,
+                    unique: false,
+                    default: None,
+                    references: None,
                 },
                 ColumnSchema {
                     name: "name".to_string(),
                     data_type: DataType::Text,
                     nullable: false,
                     primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
                 },
             ],
+            constraints: Vec::new(),
         }
     }
 

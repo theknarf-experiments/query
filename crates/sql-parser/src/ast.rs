@@ -168,6 +168,7 @@ pub struct DeleteStatement {
 pub struct CreateTableStatement {
     pub name: String,
     pub columns: Vec<ColumnDef>,
+    pub constraints: Vec<TableConstraint>,
 }
 
 /// Column definition
@@ -177,6 +178,54 @@ pub struct ColumnDef {
     pub data_type: DataType,
     pub nullable: bool,
     pub primary_key: bool,
+    pub unique: bool,
+    pub default: Option<Expr>,
+    pub references: Option<ForeignKeyRef>,
+}
+
+/// Foreign key reference
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForeignKeyRef {
+    pub table: String,
+    pub column: String,
+    pub on_delete: ReferentialAction,
+    pub on_update: ReferentialAction,
+}
+
+/// Referential action for foreign keys
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ReferentialAction {
+    #[default]
+    NoAction,
+    Cascade,
+    SetNull,
+    SetDefault,
+    Restrict,
+}
+
+/// Table constraint
+#[derive(Debug, Clone, PartialEq)]
+pub enum TableConstraint {
+    PrimaryKey {
+        name: Option<String>,
+        columns: Vec<String>,
+    },
+    ForeignKey {
+        name: Option<String>,
+        columns: Vec<String>,
+        references_table: String,
+        references_columns: Vec<String>,
+        on_delete: ReferentialAction,
+        on_update: ReferentialAction,
+    },
+    Unique {
+        name: Option<String>,
+        columns: Vec<String>,
+    },
+    Check {
+        name: Option<String>,
+        expr: Expr,
+    },
 }
 
 /// Data types

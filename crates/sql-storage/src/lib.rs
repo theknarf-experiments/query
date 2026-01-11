@@ -7,7 +7,8 @@ mod memory;
 mod value;
 
 pub use engine::{
-    ColumnSchema, DataType, Row, StorageEngine, StorageError, StorageResult, TableSchema,
+    ColumnSchema, DataType, ForeignKeyRef, ReferentialAction, Row, StorageEngine, StorageError,
+    StorageResult, TableConstraint, TableSchema,
 };
 pub use memory::MemoryEngine;
 pub use value::Value;

@@ -1,12 +1,13 @@
 //! Query executor - executes logical plans against storage
 
 use sql_parser::{
-    AggregateFunc, Assignment, BinaryOp, ColumnDef, DataType, Expr, JoinType, UnaryOp,
+    AggregateFunc, Assignment, BinaryOp, ColumnDef, DataType, Expr, ForeignKeyRef as ParserFKRef,
+    JoinType, ReferentialAction as ParserRefAction, UnaryOp,
 };
 use sql_planner::LogicalPlan;
 use sql_storage::{
-    ColumnSchema, DataType as StorageDataType, MemoryEngine, Row, StorageEngine, StorageError,
-    TableSchema, Value,
+    ColumnSchema, DataType as StorageDataType, ForeignKeyRef, MemoryEngine,
+    ReferentialAction as StorageRefAction, Row, StorageEngine, StorageError, TableSchema, Value,
 };
 
 /// Result type for execution operations
@@ -110,8 +111,12 @@ impl Engine {
                     data_type: convert_data_type(&c.data_type),
                     nullable: c.nullable,
                     primary_key: c.primary_key,
+                    unique: c.unique,
+                    default: c.default.as_ref().map(eval_literal),
+                    references: c.references.as_ref().map(convert_fk_ref),
                 })
                 .collect(),
+            constraints: Vec::new(), // TODO: Handle table-level constraints
         };
         self.storage.create_table(schema)?;
         Ok(QueryResult::Success)
@@ -474,6 +479,27 @@ fn convert_data_type(dt: &DataType) -> StorageDataType {
         DataType::Float => StorageDataType::Float,
         DataType::Text => StorageDataType::Text,
         DataType::Bool => StorageDataType::Bool,
+    }
+}
+
+/// Convert parser foreign key ref to storage format
+fn convert_fk_ref(fk: &ParserFKRef) -> ForeignKeyRef {
+    ForeignKeyRef {
+        table: fk.table.clone(),
+        column: fk.column.clone(),
+        on_delete: convert_ref_action(&fk.on_delete),
+        on_update: convert_ref_action(&fk.on_update),
+    }
+}
+
+/// Convert parser referential action to storage format
+fn convert_ref_action(action: &ParserRefAction) -> StorageRefAction {
+    match action {
+        ParserRefAction::NoAction => StorageRefAction::NoAction,
+        ParserRefAction::Cascade => StorageRefAction::Cascade,
+        ParserRefAction::SetNull => StorageRefAction::SetNull,
+        ParserRefAction::SetDefault => StorageRefAction::SetDefault,
+        ParserRefAction::Restrict => StorageRefAction::Restrict,
     }
 }
 

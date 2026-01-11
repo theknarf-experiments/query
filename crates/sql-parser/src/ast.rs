@@ -42,6 +42,7 @@ pub enum Statement {
 /// A SELECT statement
 #[derive(Debug, Clone, PartialEq)]
 pub struct SelectStatement {
+    pub distinct: bool,
     pub columns: Vec<SelectColumn>,
     pub from: Option<TableRef>,
     pub joins: Vec<Join>,

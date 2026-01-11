@@ -251,6 +251,7 @@ fn string_literal() -> impl Parser<Token, String, Error = Simple<Token>> + Clone
 /// Parse a SELECT statement
 fn select_parser() -> impl Parser<Token, SelectStatement, Error = Simple<Token>> {
     let select_kw = just(Token::Keyword(Keyword::Select));
+    let distinct_kw = just(Token::Keyword(Keyword::Distinct));
     let from_kw = just(Token::Keyword(Keyword::From));
     let where_kw = just(Token::Keyword(Keyword::Where));
     let group_kw = just(Token::Keyword(Keyword::Group));
@@ -259,6 +260,8 @@ fn select_parser() -> impl Parser<Token, SelectStatement, Error = Simple<Token>>
     let by_kw = just(Token::Keyword(Keyword::By));
     let limit_kw = just(Token::Keyword(Keyword::Limit));
     let offset_kw = just(Token::Keyword(Keyword::Offset));
+
+    let distinct = distinct_kw.or_not().map(|d| d.is_some());
 
     let columns = select_column_parser()
         .separated_by(just(Token::Comma))
@@ -293,7 +296,8 @@ fn select_parser() -> impl Parser<Token, SelectStatement, Error = Simple<Token>>
     let offset_clause = offset_kw.ignore_then(expr_parser()).or_not();
 
     select_kw
-        .ignore_then(columns)
+        .ignore_then(distinct)
+        .then(columns)
         .then(from_clause)
         .then(joins)
         .then(where_clause)
@@ -304,10 +308,17 @@ fn select_parser() -> impl Parser<Token, SelectStatement, Error = Simple<Token>>
         .then(offset_clause)
         .map(
             |(
-                (((((((columns, from), joins), where_clause), group_by), having), order_by), limit),
+                (
+                    (
+                        ((((((distinct, columns), from), joins), where_clause), group_by), having),
+                        order_by,
+                    ),
+                    limit,
+                ),
                 offset,
             )| {
                 SelectStatement {
+                    distinct,
                     columns,
                     from,
                     joins,
@@ -673,6 +684,7 @@ fn subquery_select_parser() -> impl Parser<Token, SelectStatement, Error = Simpl
         .then(from_clause)
         .then(where_clause)
         .map(|((columns, from), where_clause)| SelectStatement {
+            distinct: false,
             columns,
             from,
             joins: Vec::new(),
@@ -1792,6 +1804,33 @@ mod tests {
                 assert_eq!(name, "idx_name");
             }
             _ => panic!("Expected DROP INDEX statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_select_distinct() {
+        let result = parse("SELECT DISTINCT name FROM users");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Select(s) => {
+                assert!(s.distinct);
+                assert_eq!(s.columns.len(), 1);
+            }
+            _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_select_without_distinct() {
+        let result = parse("SELECT name FROM users");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Select(s) => {
+                assert!(!s.distinct);
+            }
+            _ => panic!("Expected SELECT statement"),
         }
     }
 }

@@ -108,6 +108,13 @@ fn plan_select(select: SelectStatement) -> PlanResult {
         };
     }
 
+    // Apply DISTINCT
+    if select.distinct {
+        plan = LogicalPlan::Distinct {
+            input: Box::new(plan),
+        };
+    }
+
     // Apply ORDER BY
     if !select.order_by.is_empty() {
         plan = LogicalPlan::Sort {

@@ -41,6 +41,7 @@ impl From<f64> for FloatBits {
 pub enum Keyword {
     // DML
     Select,
+    Distinct,
     From,
     Where,
     Insert,
@@ -176,6 +177,7 @@ impl std::str::FromStr for Keyword {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_uppercase().as_str() {
             "SELECT" => Ok(Self::Select),
+            "DISTINCT" => Ok(Self::Distinct),
             "FROM" => Ok(Self::From),
             "WHERE" => Ok(Self::Where),
             "INSERT" => Ok(Self::Insert),

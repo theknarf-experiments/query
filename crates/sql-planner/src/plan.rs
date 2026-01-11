@@ -42,6 +42,8 @@ pub enum LogicalPlan {
         limit: usize,
         offset: usize,
     },
+    /// Remove duplicate rows
+    Distinct { input: Box<LogicalPlan> },
     /// Insert rows into a table
     Insert {
         table: String,

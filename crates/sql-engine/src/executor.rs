@@ -1001,6 +1001,26 @@ impl Engine {
                     other => Ok(other),
                 }
             }
+            LogicalPlan::Distinct { input } => {
+                let result = self.execute_query(*input)?;
+                match result {
+                    QueryResult::Select { columns, rows } => {
+                        // Remove duplicate rows using a HashSet-like approach
+                        // Since Row contains Value which has f64, we need a custom comparison
+                        let mut unique_rows: Vec<Vec<Value>> = Vec::new();
+                        for row in rows {
+                            if !unique_rows.iter().any(|r| r == &row) {
+                                unique_rows.push(row);
+                            }
+                        }
+                        Ok(QueryResult::Select {
+                            columns,
+                            rows: unique_rows,
+                        })
+                    }
+                    other => Ok(other),
+                }
+            }
             LogicalPlan::Aggregate {
                 input,
                 group_by,
@@ -3367,5 +3387,74 @@ mod tests {
         // Index on non-existent column should fail
         let result = engine.execute("CREATE INDEX idx_bar ON users (nonexistent)");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_select_distinct() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE items (category TEXT, name TEXT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO items (category, name) VALUES ('fruit', 'apple')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO items (category, name) VALUES ('fruit', 'banana')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO items (category, name) VALUES ('veggie', 'carrot')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO items (category, name) VALUES ('fruit', 'apple')")
+            .unwrap(); // duplicate
+
+        // Without DISTINCT - should have 4 rows
+        let result = engine.execute("SELECT category FROM items");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 4);
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // With DISTINCT - should have 2 unique categories
+        let result = engine.execute("SELECT DISTINCT category FROM items");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 2);
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_select_distinct_multiple_columns() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE orders (product TEXT, qty INT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO orders (product, qty) VALUES ('apple', 10)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO orders (product, qty) VALUES ('apple', 10)")
+            .unwrap(); // duplicate
+        engine
+            .execute("INSERT INTO orders (product, qty) VALUES ('apple', 20)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO orders (product, qty) VALUES ('banana', 10)")
+            .unwrap();
+
+        // With DISTINCT on multiple columns - should have 3 unique combinations
+        let result = engine.execute("SELECT DISTINCT product, qty FROM orders");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 3);
+            }
+            _ => panic!("Expected Select result"),
+        }
     }
 }

@@ -140,6 +140,13 @@ pub enum Expr {
         /// ELSE result
         else_result: Option<Box<Expr>>,
     },
+    /// BETWEEN expression (expr BETWEEN low AND high)
+    Between {
+        expr: Box<Expr>,
+        low: Box<Expr>,
+        high: Box<Expr>,
+        negated: bool,
+    },
 }
 
 /// Aggregate functions

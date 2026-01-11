@@ -1222,6 +1222,19 @@ impl Engine {
                     None => Value::Null,
                 }
             }
+            Expr::Between {
+                expr,
+                low,
+                high,
+                negated,
+            } => {
+                let val = self.eval_expr_with_subquery(expr, row, columns);
+                let low_val = self.eval_expr_with_subquery(low, row, columns);
+                let high_val = self.eval_expr_with_subquery(high, row, columns);
+                let in_range = !matches!(compare_values(&val, &low_val), std::cmp::Ordering::Less)
+                    && !matches!(compare_values(&val, &high_val), std::cmp::Ordering::Greater);
+                Value::Bool(if *negated { !in_range } else { in_range })
+            }
         }
     }
 
@@ -1440,6 +1453,19 @@ fn eval_having_expr(expr: &Expr, group_rows: &[Vec<Value>], columns: &[String]) 
                 None => Value::Null,
             }
         }
+        Expr::Between {
+            expr,
+            low,
+            high,
+            negated,
+        } => {
+            let val = eval_having_expr(expr, group_rows, columns);
+            let low_val = eval_having_expr(low, group_rows, columns);
+            let high_val = eval_having_expr(high, group_rows, columns);
+            let in_range = !matches!(compare_values(&val, &low_val), std::cmp::Ordering::Less)
+                && !matches!(compare_values(&val, &high_val), std::cmp::Ordering::Greater);
+            Value::Bool(if *negated { !in_range } else { in_range })
+        }
     }
 }
 
@@ -1587,6 +1613,20 @@ fn eval_expr(expr: &Expr, row: &[Value], columns: &[String]) -> Value {
                 Some(else_expr) => eval_expr(else_expr, row, columns),
                 None => Value::Null,
             }
+        }
+        // BETWEEN expression
+        Expr::Between {
+            expr,
+            low,
+            high,
+            negated,
+        } => {
+            let val = eval_expr(expr, row, columns);
+            let low_val = eval_expr(low, row, columns);
+            let high_val = eval_expr(high, row, columns);
+            let in_range = !matches!(compare_values(&val, &low_val), std::cmp::Ordering::Less)
+                && !matches!(compare_values(&val, &high_val), std::cmp::Ordering::Greater);
+            Value::Bool(if *negated { !in_range } else { in_range })
         }
     }
 }
@@ -3801,6 +3841,58 @@ mod tests {
             QueryResult::Select { rows, .. } => {
                 assert_eq!(rows[0][0], Value::Text("yes".to_string()));
                 assert_eq!(rows[1][0], Value::Null);
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_between() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE products (name TEXT, price INT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO products (name, price) VALUES ('cheap', 10)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO products (name, price) VALUES ('medium', 50)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO products (name, price) VALUES ('expensive', 100)")
+            .unwrap();
+
+        // Test BETWEEN
+        let result = engine.execute("SELECT name FROM products WHERE price BETWEEN 20 AND 80");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][0], Value::Text("medium".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // Test NOT BETWEEN
+        let result = engine
+            .execute("SELECT name FROM products WHERE price NOT BETWEEN 20 AND 80 ORDER BY price");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0][0], Value::Text("cheap".to_string()));
+                assert_eq!(rows[1][0], Value::Text("expensive".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // Test BETWEEN is inclusive on both ends
+        let result = engine
+            .execute("SELECT name FROM products WHERE price BETWEEN 10 AND 50 ORDER BY price");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0][0], Value::Text("cheap".to_string()));
+                assert_eq!(rows[1][0], Value::Text("medium".to_string()));
             }
             _ => panic!("Expected Select result"),
         }

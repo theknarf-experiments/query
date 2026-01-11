@@ -5,8 +5,6 @@
 - [ ] UNION, INTERSECT, EXCEPT operators
 - [ ] Window functions (ROW_NUMBER, RANK, etc.)
 - [ ] Common Table Expressions (WITH clause)
-- [ ] CASE WHEN expressions
-- [ ] BETWEEN operator
 - [ ] Views
 - [ ] Stored procedures
 - [ ] Query optimizer (use indexes in query execution)

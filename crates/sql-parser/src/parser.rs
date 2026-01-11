@@ -583,8 +583,30 @@ fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone {
                 None => left,
             });
 
+        // BETWEEN: expr [NOT] BETWEEN low AND high
+        let between_expr = like_expr
+            .clone()
+            .then(
+                just(Token::Keyword(Keyword::Not))
+                    .or_not()
+                    .then_ignore(just(Token::Keyword(Keyword::Between)))
+                    .then(like_expr.clone())
+                    .then_ignore(just(Token::Keyword(Keyword::And)))
+                    .then(like_expr.clone())
+                    .or_not(),
+            )
+            .map(|(left, between_clause)| match between_clause {
+                Some(((negated, low), high)) => Expr::Between {
+                    expr: Box::new(left),
+                    low: Box::new(low),
+                    high: Box::new(high),
+                    negated: negated.is_some(),
+                },
+                None => left,
+            });
+
         // IN subquery: expr [NOT] IN (SELECT ...)
-        let in_subquery = like_expr
+        let in_subquery = between_expr
             .clone()
             .then(
                 just(Token::Keyword(Keyword::Not))
@@ -2006,6 +2028,38 @@ mod tests {
                     _ => panic!("Expected CASE expression"),
                 },
                 _ => panic!("Expected expression"),
+            },
+            _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_between() {
+        let result = parse("SELECT * FROM products WHERE price BETWEEN 10 AND 100");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Select(s) => match s.where_clause.unwrap() {
+                Expr::Between { negated, .. } => {
+                    assert!(!negated);
+                }
+                _ => panic!("Expected BETWEEN expression"),
+            },
+            _ => panic!("Expected SELECT statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_not_between() {
+        let result = parse("SELECT * FROM products WHERE price NOT BETWEEN 10 AND 100");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Select(s) => match s.where_clause.unwrap() {
+                Expr::Between { negated, .. } => {
+                    assert!(negated);
+                }
+                _ => panic!("Expected BETWEEN expression"),
             },
             _ => panic!("Expected SELECT statement"),
         }

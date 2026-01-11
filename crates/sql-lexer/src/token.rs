@@ -1,5 +1,41 @@
 //! Token types for SQL lexer
 
+use std::hash::{Hash, Hasher};
+
+/// Wrapper for f64 that implements Hash and Eq using bit representation
+#[derive(Debug, Clone, Copy)]
+pub struct FloatBits(pub f64);
+
+impl FloatBits {
+    pub fn new(value: f64) -> Self {
+        Self(value)
+    }
+
+    pub fn value(self) -> f64 {
+        self.0
+    }
+}
+
+impl PartialEq for FloatBits {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits()
+    }
+}
+
+impl Eq for FloatBits {}
+
+impl Hash for FloatBits {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.to_bits().hash(state);
+    }
+}
+
+impl From<f64> for FloatBits {
+    fn from(value: f64) -> Self {
+        Self(value)
+    }
+}
+
 /// SQL Keywords
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Keyword {
@@ -144,7 +180,7 @@ impl Keyword {
 }
 
 /// A token in the SQL language
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Token {
     // Keywords
     Keyword(Keyword),
@@ -153,7 +189,8 @@ pub enum Token {
     Identifier(String),
     String(String),
     Integer(i64),
-    Float(f64),
+    /// Float stored as bit representation for Hash/Eq support
+    Float(FloatBits),
 
     // Punctuation
     LParen,    // (

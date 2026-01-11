@@ -1,5 +1,6 @@
 //! SQL Lexer implementation using Chumsky 0.9
 
+use crate::token::FloatBits;
 use crate::{Keyword, LexError, LexResult, Span, Token};
 use chumsky::prelude::*;
 
@@ -29,7 +30,7 @@ fn lexer_parser() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>>
         .chain::<char, _, _>(just('.'))
         .chain::<char, _, _>(text::digits(10))
         .collect::<String>()
-        .map(|s| Token::Float(s.parse().unwrap()));
+        .map(|s| Token::Float(FloatBits::new(s.parse().unwrap())));
 
     // String literal (single-quoted)
     let string = just('\'')

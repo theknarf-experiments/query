@@ -9,7 +9,7 @@ mod token;
 
 pub use lexer::lexer;
 pub use span::Span;
-pub use token::{Keyword, Token};
+pub use token::{FloatBits, Keyword, Token};
 
 /// Result of lexing - either a list of spanned tokens or errors
 pub type LexResult = Result<Vec<(Token, Span)>, Vec<LexError>>;
@@ -96,7 +96,10 @@ mod tests {
         let tokens: Vec<_> = result.unwrap().into_iter().map(|(t, _)| t).collect();
         assert_eq!(
             tokens,
-            vec![Token::Keyword(Keyword::Select), Token::Float(3.14),]
+            vec![
+                Token::Keyword(Keyword::Select),
+                Token::Float(FloatBits::new(3.14)),
+            ]
         );
     }
 

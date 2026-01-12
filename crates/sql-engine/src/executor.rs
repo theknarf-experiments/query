@@ -4,8 +4,9 @@ use std::collections::HashMap;
 
 use sql_parser::{
     AggregateFunc, AlterAction, Assignment, BinaryOp, ColumnDef, Cte, DataType, Expr,
-    ForeignKeyRef as ParserFKRef, JoinType, OrderBy, ReferentialAction as ParserRefAction,
-    SetOperator, Statement, TriggerAction, TriggerEvent, TriggerTiming, UnaryOp, WindowFunc,
+    ForeignKeyRef as ParserFKRef, JoinType, OrderBy, ProcedureStatement,
+    ReferentialAction as ParserRefAction, SetOperator, Statement, TriggerAction, TriggerEvent,
+    TriggerTiming, UnaryOp, WindowFunc,
 };
 use sql_planner::LogicalPlan;
 use sql_storage::{
@@ -55,6 +56,12 @@ pub enum ExecError {
     TriggerNotFound(String),
     /// Trigger already exists
     TriggerAlreadyExists(String),
+    /// Procedure not found
+    ProcedureNotFound(String),
+    /// Procedure already exists
+    ProcedureAlreadyExists(String),
+    /// Procedure parameter count mismatch
+    ProcedureArgCountMismatch { expected: usize, got: usize },
 }
 
 impl From<StorageError> for ExecError {
@@ -117,12 +124,20 @@ struct ViewDefinition {
     query: sql_planner::LogicalPlan,
 }
 
+/// Stored procedure definition
+#[derive(Debug, Clone)]
+struct ProcedureDefinition {
+    params: Vec<sql_parser::ProcedureParam>,
+    body: Vec<sql_parser::ProcedureStatement>,
+}
+
 /// Database engine that executes queries
 pub struct Engine {
     storage: MemoryEngine,
     transaction: TransactionState,
     triggers: Vec<Trigger>,
     views: HashMap<String, ViewDefinition>,
+    procedures: HashMap<String, ProcedureDefinition>,
 }
 
 impl Default for Engine {
@@ -139,6 +154,7 @@ impl Engine {
             transaction: TransactionState::default(),
             triggers: Vec::new(),
             views: HashMap::new(),
+            procedures: HashMap::new(),
         }
     }
 
@@ -290,6 +306,18 @@ impl Engine {
                 self.views.remove(&name);
                 Ok(QueryResult::Success)
             }
+            LogicalPlan::CreateProcedure { name, params, body } => {
+                self.procedures
+                    .insert(name, ProcedureDefinition { params, body });
+                Ok(QueryResult::Success)
+            }
+            LogicalPlan::DropProcedure { name } => {
+                if self.procedures.remove(&name).is_none() {
+                    return Err(ExecError::ProcedureNotFound(name));
+                }
+                Ok(QueryResult::Success)
+            }
+            LogicalPlan::CallProcedure { name, args } => self.execute_procedure(&name, args),
             _ => self.execute_query(plan),
         }
     }
@@ -325,6 +353,68 @@ impl Engine {
             }
             AlterAction::RenameTable(new_name) => {
                 self.storage.rename_table(table, &new_name)?;
+                Ok(QueryResult::Success)
+            }
+        }
+    }
+
+    /// Execute a stored procedure
+    fn execute_procedure(&mut self, name: &str, args: Vec<Expr>) -> ExecResult {
+        // Look up the procedure
+        let procedure = self
+            .procedures
+            .get(name)
+            .ok_or_else(|| ExecError::ProcedureNotFound(name.to_string()))?
+            .clone();
+
+        // Check argument count
+        if args.len() != procedure.params.len() {
+            return Err(ExecError::ProcedureArgCountMismatch {
+                expected: procedure.params.len(),
+                got: args.len(),
+            });
+        }
+
+        // Build parameter bindings (name -> value)
+        let mut bindings: HashMap<String, Value> = HashMap::new();
+        for (param, arg) in procedure.params.iter().zip(args.iter()) {
+            let value = eval_literal(arg);
+            bindings.insert(param.name.clone(), value);
+        }
+
+        // Execute each statement in the procedure body
+        let mut last_result = QueryResult::Success;
+        for stmt in &procedure.body {
+            last_result = self.execute_procedure_statement(stmt, &bindings)?;
+        }
+
+        Ok(last_result)
+    }
+
+    /// Execute a single statement within a procedure body
+    fn execute_procedure_statement(
+        &mut self,
+        stmt: &ProcedureStatement,
+        bindings: &HashMap<String, Value>,
+    ) -> ExecResult {
+        match stmt {
+            ProcedureStatement::Sql(sql_stmt) => {
+                // Substitute parameters in the statement and execute
+                let substituted = substitute_params_in_statement(sql_stmt, bindings);
+                let plan = sql_planner::plan(substituted)
+                    .map_err(|_| ExecError::InvalidExpression("Planning error".to_string()))?;
+                self.execute_plan(plan)
+            }
+            ProcedureStatement::Declare { .. } => {
+                // Variable declarations are no-ops at runtime (already handled via bindings)
+                Ok(QueryResult::Success)
+            }
+            ProcedureStatement::SetVar { .. } => {
+                // SET @var = expr - for now just ignore (simplified implementation)
+                Ok(QueryResult::Success)
+            }
+            ProcedureStatement::Return(_) => {
+                // RETURN - procedure ends (simplified - just return success)
                 Ok(QueryResult::Success)
             }
         }
@@ -1603,6 +1693,7 @@ impl Engine {
             transaction: TransactionState::default(),
             triggers: self.triggers.clone(),
             views: self.views.clone(),
+            procedures: self.procedures.clone(),
         };
         temp_engine.execute_query(plan)
     }
@@ -1858,6 +1949,134 @@ fn convert_ref_action(action: &ParserRefAction) -> StorageRefAction {
         ParserRefAction::SetNull => StorageRefAction::SetNull,
         ParserRefAction::SetDefault => StorageRefAction::SetDefault,
         ParserRefAction::Restrict => StorageRefAction::Restrict,
+    }
+}
+
+/// Substitute procedure parameters in a statement
+fn substitute_params_in_statement(
+    stmt: &Statement,
+    bindings: &HashMap<String, Value>,
+) -> Statement {
+    match stmt {
+        Statement::Insert(insert) => Statement::Insert(sql_parser::InsertStatement {
+            table: insert.table.clone(),
+            columns: insert.columns.clone(),
+            values: insert
+                .values
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|e| substitute_params_in_expr(e, bindings))
+                        .collect()
+                })
+                .collect(),
+        }),
+        Statement::Update(update) => Statement::Update(sql_parser::UpdateStatement {
+            table: update.table.clone(),
+            assignments: update
+                .assignments
+                .iter()
+                .map(|a| sql_parser::Assignment {
+                    column: a.column.clone(),
+                    value: substitute_params_in_expr(&a.value, bindings),
+                })
+                .collect(),
+            where_clause: update
+                .where_clause
+                .as_ref()
+                .map(|e| substitute_params_in_expr(e, bindings)),
+        }),
+        Statement::Delete(delete) => Statement::Delete(sql_parser::DeleteStatement {
+            table: delete.table.clone(),
+            where_clause: delete
+                .where_clause
+                .as_ref()
+                .map(|e| substitute_params_in_expr(e, bindings)),
+        }),
+        Statement::Select(select) => {
+            Statement::Select(Box::new(substitute_params_in_select(select, bindings)))
+        }
+        // Other statements don't need parameter substitution
+        other => other.clone(),
+    }
+}
+
+/// Substitute procedure parameters in a SELECT statement
+fn substitute_params_in_select(
+    select: &sql_parser::SelectStatement,
+    bindings: &HashMap<String, Value>,
+) -> sql_parser::SelectStatement {
+    sql_parser::SelectStatement {
+        with_clause: select.with_clause.clone(),
+        distinct: select.distinct,
+        columns: select
+            .columns
+            .iter()
+            .map(|col| match col {
+                sql_parser::SelectColumn::Star => sql_parser::SelectColumn::Star,
+                sql_parser::SelectColumn::Expr { expr, alias } => sql_parser::SelectColumn::Expr {
+                    expr: substitute_params_in_expr(expr, bindings),
+                    alias: alias.clone(),
+                },
+            })
+            .collect(),
+        from: select.from.clone(),
+        joins: select.joins.clone(),
+        where_clause: select
+            .where_clause
+            .as_ref()
+            .map(|e| substitute_params_in_expr(e, bindings)),
+        group_by: select
+            .group_by
+            .iter()
+            .map(|e| substitute_params_in_expr(e, bindings))
+            .collect(),
+        having: select
+            .having
+            .as_ref()
+            .map(|e| substitute_params_in_expr(e, bindings)),
+        order_by: select.order_by.clone(),
+        limit: select.limit.clone(),
+        offset: select.offset.clone(),
+    }
+}
+
+/// Substitute procedure parameters in an expression
+fn substitute_params_in_expr(expr: &Expr, bindings: &HashMap<String, Value>) -> Expr {
+    match expr {
+        Expr::Column(name) => {
+            // Check if this column name matches a parameter binding
+            if let Some(value) = bindings.get(name) {
+                value_to_expr(value)
+            } else {
+                Expr::Column(name.clone())
+            }
+        }
+        Expr::BinaryOp { left, op, right } => Expr::BinaryOp {
+            left: Box::new(substitute_params_in_expr(left, bindings)),
+            op: op.clone(),
+            right: Box::new(substitute_params_in_expr(right, bindings)),
+        },
+        Expr::UnaryOp { op, expr } => Expr::UnaryOp {
+            op: op.clone(),
+            expr: Box::new(substitute_params_in_expr(expr, bindings)),
+        },
+        // For other expression types, just clone them
+        _ => expr.clone(),
+    }
+}
+
+/// Convert a Value back to an Expr (for parameter substitution)
+fn value_to_expr(value: &Value) -> Expr {
+    match value {
+        Value::Int(n) => Expr::Integer(*n),
+        Value::Float(f) => Expr::Float(*f),
+        Value::Text(s) => Expr::String(s.clone()),
+        Value::Bool(b) => Expr::Boolean(*b),
+        Value::Null => Expr::Null,
+        Value::Date(d) => Expr::String(d.to_string()),
+        Value::Time(t) => Expr::String(t.to_string()),
+        Value::Timestamp(ts) => Expr::String(ts.to_string()),
     }
 }
 
@@ -4971,5 +5190,149 @@ mod tests {
         // View should no longer exist - query will fail
         let result = engine.execute("SELECT * FROM v");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_simple_procedure() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE logs (id INT, message TEXT)")
+            .unwrap();
+
+        // Create a simple procedure that inserts a log entry
+        let result = engine.execute(
+            "CREATE PROCEDURE add_log (msg TEXT) AS BEGIN INSERT INTO logs (id, message) VALUES (1, msg) END",
+        );
+        assert_eq!(result.unwrap(), QueryResult::Success);
+
+        // Call the procedure
+        let result = engine.execute("CALL add_log ('Hello World')");
+        assert!(result.is_ok());
+
+        // Verify the insert happened
+        let result = engine.execute("SELECT * FROM logs");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][1], Value::Text("Hello World".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_procedure_with_multiple_params() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE users (id INT, name TEXT, age INT)")
+            .unwrap();
+
+        // Create a procedure with multiple parameters
+        let result = engine.execute(
+            "CREATE PROCEDURE add_user (user_id INT, user_name TEXT, user_age INT) AS BEGIN INSERT INTO users (id, name, age) VALUES (user_id, user_name, user_age) END",
+        );
+        assert_eq!(result.unwrap(), QueryResult::Success);
+
+        // Call the procedure
+        engine.execute("CALL add_user (1, 'Alice', 30)").unwrap();
+        engine.execute("CALL add_user (2, 'Bob', 25)").unwrap();
+
+        // Verify the inserts
+        let result = engine.execute("SELECT * FROM users ORDER BY id");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0][0], Value::Int(1));
+                assert_eq!(rows[0][1], Value::Text("Alice".to_string()));
+                assert_eq!(rows[0][2], Value::Int(30));
+                assert_eq!(rows[1][0], Value::Int(2));
+                assert_eq!(rows[1][1], Value::Text("Bob".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_drop_procedure() {
+        let mut engine = Engine::new();
+
+        engine.execute("CREATE TABLE t (val INT)").unwrap();
+
+        // Create a procedure
+        engine
+            .execute("CREATE PROCEDURE do_nothing AS BEGIN SELECT * FROM t END")
+            .unwrap();
+
+        // Call should work
+        let result = engine.execute("CALL do_nothing");
+        assert!(result.is_ok());
+
+        // Drop the procedure
+        engine.execute("DROP PROCEDURE do_nothing").unwrap();
+
+        // Call should fail
+        let result = engine.execute("CALL do_nothing");
+        assert!(matches!(result, Err(ExecError::ProcedureNotFound(_))));
+    }
+
+    #[test]
+    fn test_procedure_arg_count_mismatch() {
+        let mut engine = Engine::new();
+
+        engine.execute("CREATE TABLE t (val INT)").unwrap();
+
+        // Create a procedure with one parameter
+        engine
+            .execute(
+                "CREATE PROCEDURE needs_one (x INT) AS BEGIN INSERT INTO t (val) VALUES (x) END",
+            )
+            .unwrap();
+
+        // Call with wrong number of arguments
+        let result = engine.execute("CALL needs_one");
+        assert!(matches!(
+            result,
+            Err(ExecError::ProcedureArgCountMismatch {
+                expected: 1,
+                got: 0
+            })
+        ));
+
+        let result = engine.execute("CALL needs_one (1, 2)");
+        assert!(matches!(
+            result,
+            Err(ExecError::ProcedureArgCountMismatch {
+                expected: 1,
+                got: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn test_exec_keyword() {
+        let mut engine = Engine::new();
+
+        engine.execute("CREATE TABLE t (val INT)").unwrap();
+
+        engine
+            .execute(
+                "CREATE PROCEDURE insert_val (v INT) AS BEGIN INSERT INTO t (val) VALUES (v) END",
+            )
+            .unwrap();
+
+        // Use EXEC instead of CALL
+        let result = engine.execute("EXEC insert_val (42)");
+        assert!(result.is_ok());
+
+        let result = engine.execute("SELECT * FROM t");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][0], Value::Int(42));
+            }
+            _ => panic!("Expected Select result"),
+        }
     }
 }

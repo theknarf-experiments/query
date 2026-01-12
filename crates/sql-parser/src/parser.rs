@@ -68,6 +68,9 @@ fn statement_parser() -> impl Parser<Token, Statement, Error = Simple<Token>> {
         .or(drop_view_parser().map(Statement::DropView))
         .or(drop_table_parser().map(Statement::DropTable))
         .or(alter_table_parser().map(Statement::AlterTable))
+        .or(create_procedure_parser().map(Statement::CreateProcedure))
+        .or(drop_procedure_parser().map(Statement::DropProcedure))
+        .or(call_procedure_parser().map(Statement::CallProcedure))
         .or(begin_parser())
         .or(commit_parser())
         .or(rollback_parser())
@@ -305,6 +308,105 @@ fn drop_view_parser() -> impl Parser<Token, String, Error = Simple<Token>> {
     just(Token::Keyword(Keyword::Drop))
         .ignore_then(just(Token::Keyword(Keyword::View)))
         .ignore_then(identifier())
+}
+
+/// Parse a procedure parameter: name TYPE
+fn procedure_param_parser() -> impl Parser<Token, ProcedureParam, Error = Simple<Token>> {
+    identifier()
+        .then(data_type_parser())
+        .map(|(name, data_type)| ProcedureParam { name, data_type })
+}
+
+/// Parse a procedure body statement (simplified - only supports basic DML)
+fn procedure_body_statement_parser() -> impl Parser<Token, ProcedureStatement, Error = Simple<Token>>
+{
+    // DECLARE @name TYPE
+    let declare_stmt = just(Token::Keyword(Keyword::Declare))
+        .ignore_then(identifier())
+        .then(data_type_parser())
+        .map(|(name, data_type)| ProcedureStatement::Declare { name, data_type });
+
+    // SET @name = expr
+    let set_var_stmt = just(Token::Keyword(Keyword::Set))
+        .ignore_then(identifier())
+        .then_ignore(just(Token::Eq))
+        .then(expr_parser())
+        .map(|(name, value)| ProcedureStatement::SetVar { name, value });
+
+    // RETURN [expr]
+    let return_stmt = just(Token::Keyword(Keyword::Return))
+        .ignore_then(expr_parser().or_not())
+        .map(ProcedureStatement::Return);
+
+    // INSERT statement
+    let insert_stmt =
+        insert_parser().map(|s| ProcedureStatement::Sql(Box::new(Statement::Insert(s))));
+
+    // UPDATE statement
+    let update_stmt =
+        update_parser().map(|s| ProcedureStatement::Sql(Box::new(Statement::Update(s))));
+
+    // DELETE statement
+    let delete_stmt =
+        delete_parser().map(|s| ProcedureStatement::Sql(Box::new(Statement::Delete(s))));
+
+    // SELECT statement (simplified for procedure bodies)
+    let select_stmt =
+        select_parser().map(|s| ProcedureStatement::Sql(Box::new(Statement::Select(Box::new(s)))));
+
+    declare_stmt
+        .or(set_var_stmt)
+        .or(return_stmt)
+        .or(insert_stmt)
+        .or(update_stmt)
+        .or(delete_stmt)
+        .or(select_stmt)
+        .then_ignore(just(Token::Semicolon).or_not())
+}
+
+/// Parse CREATE PROCEDURE name (params) AS BEGIN ... END
+fn create_procedure_parser() -> impl Parser<Token, CreateProcedureStatement, Error = Simple<Token>>
+{
+    let params = procedure_param_parser()
+        .separated_by(just(Token::Comma))
+        .delimited_by(just(Token::LParen), just(Token::RParen))
+        .or_not()
+        .map(|p| p.unwrap_or_default());
+
+    let body = procedure_body_statement_parser().repeated();
+
+    just(Token::Keyword(Keyword::Create))
+        .ignore_then(just(Token::Keyword(Keyword::Procedure)))
+        .ignore_then(identifier())
+        .then(params)
+        .then_ignore(just(Token::Keyword(Keyword::As)))
+        .then_ignore(just(Token::Keyword(Keyword::Begin)))
+        .then(body)
+        .then_ignore(just(Token::Keyword(Keyword::End)))
+        .map(|((name, params), body)| CreateProcedureStatement { name, params, body })
+}
+
+/// Parse DROP PROCEDURE name
+fn drop_procedure_parser() -> impl Parser<Token, String, Error = Simple<Token>> {
+    just(Token::Keyword(Keyword::Drop))
+        .ignore_then(just(Token::Keyword(Keyword::Procedure)))
+        .ignore_then(identifier())
+}
+
+/// Parse CALL/EXEC procedure_name(args)
+fn call_procedure_parser() -> impl Parser<Token, CallProcedureStatement, Error = Simple<Token>> {
+    let args = expr_parser()
+        .separated_by(just(Token::Comma))
+        .delimited_by(just(Token::LParen), just(Token::RParen))
+        .or_not()
+        .map(|a| a.unwrap_or_default());
+
+    just(Token::Keyword(Keyword::Call))
+        .or(just(Token::Keyword(Keyword::Exec)))
+        .or(just(Token::Keyword(Keyword::Execute)))
+        .ignore_then(identifier())
+        .then(args)
+        .map(|(name, args)| CallProcedureStatement { name, args })
 }
 
 /// Parse ALTER TABLE statement
@@ -1077,9 +1179,9 @@ enum Either<L, R> {
     Right(R),
 }
 
-/// Parse a column definition
-fn column_def_parser() -> impl Parser<Token, ColumnDef, Error = Simple<Token>> + Clone {
-    let data_type = select! {
+/// Parse a data type (INT, TEXT, FLOAT, etc.)
+fn data_type_parser() -> impl Parser<Token, DataType, Error = Simple<Token>> + Clone {
+    select! {
         Token::Keyword(Keyword::Int) => DataType::Int,
         Token::Keyword(Keyword::Integer) => DataType::Int,
         Token::Keyword(Keyword::Text) => DataType::Text,
@@ -1091,7 +1193,12 @@ fn column_def_parser() -> impl Parser<Token, ColumnDef, Error = Simple<Token>> +
         Token::Keyword(Keyword::Date) => DataType::Date,
         Token::Keyword(Keyword::Time) => DataType::Time,
         Token::Keyword(Keyword::Timestamp) => DataType::Timestamp,
-    };
+    }
+}
+
+/// Parse a column definition
+fn column_def_parser() -> impl Parser<Token, ColumnDef, Error = Simple<Token>> + Clone {
+    let data_type = data_type_parser();
 
     // Column constraints can appear in any order after the data type
     let not_null = just(Token::Keyword(Keyword::Not))
@@ -2292,6 +2399,95 @@ mod tests {
                 assert_eq!(s.op, SetOperator::Except);
             }
             _ => panic!("Expected SetOperation statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_create_procedure() {
+        let result = parse("CREATE PROCEDURE my_proc (x INT, y TEXT) AS BEGIN SELECT * FROM t END");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::CreateProcedure(proc) => {
+                assert_eq!(proc.name, "my_proc");
+                assert_eq!(proc.params.len(), 2);
+                assert_eq!(proc.params[0].name, "x");
+                assert_eq!(proc.params[0].data_type, DataType::Int);
+                assert_eq!(proc.params[1].name, "y");
+                assert_eq!(proc.params[1].data_type, DataType::Text);
+                assert_eq!(proc.body.len(), 1);
+            }
+            _ => panic!("Expected CreateProcedure statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_create_procedure_no_params() {
+        let result = parse("CREATE PROCEDURE simple AS BEGIN INSERT INTO t (id) VALUES (1) END");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::CreateProcedure(proc) => {
+                assert_eq!(proc.name, "simple");
+                assert!(proc.params.is_empty());
+                assert_eq!(proc.body.len(), 1);
+            }
+            _ => panic!("Expected CreateProcedure statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_drop_procedure() {
+        let result = parse("DROP PROCEDURE my_proc");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::DropProcedure(name) => {
+                assert_eq!(name, "my_proc");
+            }
+            _ => panic!("Expected DropProcedure statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_call_procedure() {
+        let result = parse("CALL my_proc (1, 'hello')");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::CallProcedure(call) => {
+                assert_eq!(call.name, "my_proc");
+                assert_eq!(call.args.len(), 2);
+            }
+            _ => panic!("Expected CallProcedure statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_exec_procedure() {
+        let result = parse("EXEC my_proc (42)");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::CallProcedure(call) => {
+                assert_eq!(call.name, "my_proc");
+                assert_eq!(call.args.len(), 1);
+            }
+            _ => panic!("Expected CallProcedure statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_execute_procedure() {
+        let result = parse("EXECUTE my_proc");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::CallProcedure(call) => {
+                assert_eq!(call.name, "my_proc");
+                assert!(call.args.is_empty());
+            }
+            _ => panic!("Expected CallProcedure statement"),
         }
     }
 }

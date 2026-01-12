@@ -31,6 +31,12 @@ pub enum Statement {
     CreateView(CreateViewStatement),
     /// DROP VIEW statement
     DropView(String),
+    /// CREATE PROCEDURE statement
+    CreateProcedure(CreateProcedureStatement),
+    /// DROP PROCEDURE statement
+    DropProcedure(String),
+    /// CALL/EXEC procedure
+    CallProcedure(CallProcedureStatement),
     /// BEGIN TRANSACTION
     Begin,
     /// COMMIT TRANSACTION
@@ -387,6 +393,41 @@ pub struct CreateViewStatement {
     pub name: String,
     pub columns: Option<Vec<String>>,
     pub query: Box<SelectStatement>,
+}
+
+/// Parameter definition for stored procedures
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProcedureParam {
+    pub name: String,
+    pub data_type: DataType,
+}
+
+/// CREATE PROCEDURE statement
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateProcedureStatement {
+    pub name: String,
+    pub params: Vec<ProcedureParam>,
+    pub body: Vec<ProcedureStatement>,
+}
+
+/// Statement inside a procedure body
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProcedureStatement {
+    /// A regular SQL statement
+    Sql(Box<Statement>),
+    /// Variable declaration
+    Declare { name: String, data_type: DataType },
+    /// Assignment: SET @var = expr
+    SetVar { name: String, value: Expr },
+    /// Return statement
+    Return(Option<Expr>),
+}
+
+/// CALL/EXEC procedure statement
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallProcedureStatement {
+    pub name: String,
+    pub args: Vec<Expr>,
 }
 
 /// CREATE TRIGGER statement

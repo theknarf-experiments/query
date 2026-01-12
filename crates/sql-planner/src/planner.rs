@@ -1,9 +1,10 @@
 //! Query planner - converts AST statements to logical plans
 
 use sql_parser::{
-    CreateIndexStatement, CreateTableStatement, CreateTriggerStatement, CreateViewStatement,
-    DeleteStatement, Expr, InsertStatement, SelectColumn, SelectOrSet, SelectStatement,
-    SetOperationStatement, Statement, UpdateStatement, WithClause,
+    CallProcedureStatement, CreateIndexStatement, CreateProcedureStatement, CreateTableStatement,
+    CreateTriggerStatement, CreateViewStatement, DeleteStatement, Expr, InsertStatement,
+    SelectColumn, SelectOrSet, SelectStatement, SetOperationStatement, Statement, UpdateStatement,
+    WithClause,
 };
 
 use crate::plan::LogicalPlan;
@@ -42,6 +43,9 @@ pub fn plan(statement: Statement) -> PlanResult {
         Statement::DropIndex(name) => Ok(LogicalPlan::DropIndex { name }),
         Statement::CreateView(create) => plan_create_view(create),
         Statement::DropView(name) => Ok(LogicalPlan::DropView { name }),
+        Statement::CreateProcedure(create) => plan_create_procedure(create),
+        Statement::DropProcedure(name) => Ok(LogicalPlan::DropProcedure { name }),
+        Statement::CallProcedure(call) => plan_call_procedure(call),
         Statement::Begin => Ok(LogicalPlan::Begin),
         Statement::Commit => Ok(LogicalPlan::Commit),
         Statement::Rollback => Ok(LogicalPlan::Rollback),
@@ -280,6 +284,23 @@ fn plan_create_view(create: CreateViewStatement) -> PlanResult {
         name: create.name,
         columns: create.columns,
         query: Box::new(query_plan),
+    })
+}
+
+/// Plan a CREATE PROCEDURE statement
+fn plan_create_procedure(create: CreateProcedureStatement) -> PlanResult {
+    Ok(LogicalPlan::CreateProcedure {
+        name: create.name,
+        params: create.params,
+        body: create.body,
+    })
+}
+
+/// Plan a CALL procedure statement
+fn plan_call_procedure(call: CallProcedureStatement) -> PlanResult {
+    Ok(LogicalPlan::CallProcedure {
+        name: call.name,
+        args: call.args,
     })
 }
 

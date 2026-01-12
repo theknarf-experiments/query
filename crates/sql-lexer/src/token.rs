@@ -184,6 +184,15 @@ pub enum Keyword {
 
     // Views
     View,
+
+    // Stored procedures
+    Procedure,
+    Call,
+    Declare,
+    Exec,
+    Execute,
+    Returns,
+    Return,
 }
 
 /// Error when parsing a keyword fails
@@ -309,6 +318,13 @@ impl std::str::FromStr for Keyword {
             "WITH" => Ok(Self::With),
             "RECURSIVE" => Ok(Self::Recursive),
             "VIEW" => Ok(Self::View),
+            "PROCEDURE" => Ok(Self::Procedure),
+            "CALL" => Ok(Self::Call),
+            "DECLARE" => Ok(Self::Declare),
+            "EXEC" => Ok(Self::Exec),
+            "EXECUTE" => Ok(Self::Execute),
+            "RETURNS" => Ok(Self::Returns),
+            "RETURN" => Ok(Self::Return),
             _ => Err(ParseKeywordError),
         }
     }

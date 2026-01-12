@@ -1,6 +1,6 @@
 //! Query plan types
 
-use sql_parser::{Assignment, Cte, Expr, JoinType, OrderBy};
+use sql_parser::{Assignment, Cte, Expr, JoinType, OrderBy, ProcedureParam, ProcedureStatement};
 
 /// A logical query plan node
 #[derive(Debug, Clone, PartialEq)]
@@ -135,4 +135,14 @@ pub enum LogicalPlan {
     },
     /// Drop a view
     DropView { name: String },
+    /// Create a stored procedure
+    CreateProcedure {
+        name: String,
+        params: Vec<ProcedureParam>,
+        body: Vec<ProcedureStatement>,
+    },
+    /// Drop a stored procedure
+    DropProcedure { name: String },
+    /// Call a stored procedure
+    CallProcedure { name: String, args: Vec<Expr> },
 }

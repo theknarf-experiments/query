@@ -25,7 +25,7 @@ pub enum PlanError {
 /// Convert a Statement to a LogicalPlan
 pub fn plan(statement: Statement) -> PlanResult {
     match statement {
-        Statement::Select(select) => plan_select(select),
+        Statement::Select(select) => plan_select(*select),
         Statement::SetOperation(set_op) => plan_set_operation(set_op),
         Statement::Insert(insert) => plan_insert(insert),
         Statement::Update(update) => plan_update(update),

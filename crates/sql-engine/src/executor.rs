@@ -2,8 +2,8 @@
 
 use sql_parser::{
     AggregateFunc, AlterAction, Assignment, BinaryOp, ColumnDef, DataType, Expr,
-    ForeignKeyRef as ParserFKRef, JoinType, ReferentialAction as ParserRefAction, SetOperator,
-    Statement, TriggerAction, TriggerEvent, TriggerTiming, UnaryOp,
+    ForeignKeyRef as ParserFKRef, JoinType, OrderBy, ReferentialAction as ParserRefAction,
+    SetOperator, Statement, TriggerAction, TriggerEvent, TriggerTiming, UnaryOp, WindowFunc,
 };
 use sql_planner::LogicalPlan;
 use sql_storage::{
@@ -967,8 +967,9 @@ impl Engine {
                             }
                         }
 
-                        // Check if any expression is an aggregate
+                        // Check if any expression is an aggregate or window function
                         let has_aggregate = exprs.iter().any(|(expr, _)| is_aggregate(expr));
+                        let has_window = exprs.iter().any(|(expr, _)| is_window_function(expr));
 
                         let new_columns: Vec<String> = exprs
                             .iter()
@@ -977,6 +978,9 @@ impl Engine {
                                 alias.clone().unwrap_or_else(|| match expr {
                                     Expr::Column(c) => c.clone(),
                                     Expr::Aggregate { func, .. } => {
+                                        format!("{:?}", func).to_lowercase()
+                                    }
+                                    Expr::WindowFunction { func, .. } => {
                                         format!("{:?}", func).to_lowercase()
                                     }
                                     _ => format!("col{}", i),
@@ -994,6 +998,13 @@ impl Engine {
                             Ok(QueryResult::Select {
                                 columns: new_columns,
                                 rows: vec![aggregated_row],
+                            })
+                        } else if has_window {
+                            // Evaluate window functions
+                            let new_rows = eval_window_functions(&exprs, &rows, &columns);
+                            Ok(QueryResult::Select {
+                                columns: new_columns,
+                                rows: new_rows,
                             })
                         } else {
                             let new_rows: Vec<Vec<Value>> = rows
@@ -1365,7 +1376,7 @@ impl Engine {
             Expr::Aggregate { .. } => Value::Null,
             Expr::Subquery(select) => {
                 // Execute the subquery and return the first value
-                if let Ok(plan) = sql_planner::plan(Statement::Select(*select.clone())) {
+                if let Ok(plan) = sql_planner::plan(Statement::Select(select.clone())) {
                     // Clone self to avoid borrow issues - subqueries use same storage
                     if let Ok(QueryResult::Select { rows, .. }) = self.execute_subquery(&plan) {
                         if let Some(first_row) = rows.first() {
@@ -1383,7 +1394,7 @@ impl Engine {
                 negated,
             } => {
                 let val = self.eval_expr_with_subquery(expr, row, columns);
-                if let Ok(plan) = sql_planner::plan(Statement::Select(*subquery.clone())) {
+                if let Ok(plan) = sql_planner::plan(Statement::Select(subquery.clone())) {
                     if let Ok(QueryResult::Select { rows, .. }) = self.execute_subquery(&plan) {
                         // Check if val is in any of the subquery result rows
                         let found = rows
@@ -1395,7 +1406,7 @@ impl Engine {
                 Value::Bool(false)
             }
             Expr::Exists(select) => {
-                if let Ok(plan) = sql_planner::plan(Statement::Select(*select.clone())) {
+                if let Ok(plan) = sql_planner::plan(Statement::Select(select.clone())) {
                     if let Ok(QueryResult::Select { rows, .. }) = self.execute_subquery(&plan) {
                         return Value::Bool(!rows.is_empty());
                     }
@@ -1461,6 +1472,11 @@ impl Engine {
                 let in_range = !matches!(compare_values(&val, &low_val), std::cmp::Ordering::Less)
                     && !matches!(compare_values(&val, &high_val), std::cmp::Ordering::Greater);
                 Value::Bool(if *negated { !in_range } else { in_range })
+            }
+            Expr::WindowFunction { .. } => {
+                // Window functions are evaluated during query execution, not at expression level
+                // Return NULL here as a placeholder - actual evaluation happens in execute_query
+                Value::Null
             }
         }
     }
@@ -1693,6 +1709,10 @@ fn eval_having_expr(expr: &Expr, group_rows: &[Vec<Value>], columns: &[String]) 
                 && !matches!(compare_values(&val, &high_val), std::cmp::Ordering::Greater);
             Value::Bool(if *negated { !in_range } else { in_range })
         }
+        Expr::WindowFunction { .. } => {
+            // Window functions are evaluated during query execution, not in HAVING clause
+            Value::Null
+        }
     }
 }
 
@@ -1866,6 +1886,10 @@ fn eval_expr(expr: &Expr, row: &[Value], columns: &[String]) -> Value {
             let in_range = !matches!(compare_values(&val, &low_val), std::cmp::Ordering::Less)
                 && !matches!(compare_values(&val, &high_val), std::cmp::Ordering::Greater);
             Value::Bool(if *negated { !in_range } else { in_range })
+        }
+        Expr::WindowFunction { .. } => {
+            // Window functions are evaluated during query execution, not at expression level
+            Value::Null
         }
     }
 }
@@ -2094,6 +2118,165 @@ fn eval_aggregate(expr: &Expr, rows: &[Vec<Value>], columns: &[String]) -> Value
             .first()
             .map(|row| eval_expr(expr, row, columns))
             .unwrap_or(Value::Null),
+    }
+}
+
+/// Check if an expression is a window function
+fn is_window_function(expr: &Expr) -> bool {
+    matches!(expr, Expr::WindowFunction { .. })
+}
+
+/// Evaluate window functions over all rows
+fn eval_window_functions(
+    exprs: &[(Expr, Option<String>)],
+    rows: &[Vec<Value>],
+    columns: &[String],
+) -> Vec<Vec<Value>> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+
+    // For each row, we need to calculate all expressions including window functions
+    rows.iter()
+        .enumerate()
+        .map(|(row_idx, row)| {
+            exprs
+                .iter()
+                .map(|(expr, _)| {
+                    if let Expr::WindowFunction {
+                        func,
+                        partition_by,
+                        order_by,
+                    } = expr
+                    {
+                        eval_single_window_function(
+                            func,
+                            partition_by,
+                            order_by,
+                            row_idx,
+                            rows,
+                            columns,
+                        )
+                    } else {
+                        eval_expr(expr, row, columns)
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Evaluate a single window function for a specific row
+fn eval_single_window_function(
+    func: &WindowFunc,
+    partition_by: &[Expr],
+    order_by: &[OrderBy],
+    row_idx: usize,
+    rows: &[Vec<Value>],
+    columns: &[String],
+) -> Value {
+    let current_row = &rows[row_idx];
+
+    // Get partition values for current row
+    let current_partition: Vec<Value> = partition_by
+        .iter()
+        .map(|e| eval_expr(e, current_row, columns))
+        .collect();
+
+    // Find all rows in the same partition
+    let partition_rows: Vec<(usize, &Vec<Value>)> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| {
+            let partition_values: Vec<Value> = partition_by
+                .iter()
+                .map(|e| eval_expr(e, r, columns))
+                .collect();
+            partition_values == current_partition
+        })
+        .collect();
+
+    // Sort partition rows by ORDER BY if specified
+    let mut sorted_indices: Vec<usize> = partition_rows.iter().map(|(i, _)| *i).collect();
+    if !order_by.is_empty() {
+        sorted_indices.sort_by(|&a, &b| {
+            for ob in order_by {
+                let val_a = eval_expr(&ob.expr, &rows[a], columns);
+                let val_b = eval_expr(&ob.expr, &rows[b], columns);
+                let cmp = compare_values(&val_a, &val_b);
+                let cmp = if ob.desc { cmp.reverse() } else { cmp };
+                if cmp != std::cmp::Ordering::Equal {
+                    return cmp;
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+    }
+
+    // Find position of current row in sorted partition
+    let position = sorted_indices
+        .iter()
+        .position(|&i| i == row_idx)
+        .unwrap_or(0);
+
+    match func {
+        WindowFunc::RowNumber => {
+            // ROW_NUMBER: sequential number starting from 1
+            Value::Int((position + 1) as i64)
+        }
+        WindowFunc::Rank => {
+            // RANK: rank with gaps for ties
+            if position == 0 {
+                Value::Int(1)
+            } else {
+                // Get current row's order values
+                let current_order_values: Vec<Value> = order_by
+                    .iter()
+                    .map(|ob| eval_expr(&ob.expr, &rows[row_idx], columns))
+                    .collect();
+
+                // Count rows with different (smaller) order values before current row
+                let rows_before = sorted_indices[..position]
+                    .iter()
+                    .filter(|&&idx| {
+                        let other_order_values: Vec<Value> = order_by
+                            .iter()
+                            .map(|ob| eval_expr(&ob.expr, &rows[idx], columns))
+                            .collect();
+                        other_order_values != current_order_values
+                    })
+                    .count();
+
+                Value::Int((rows_before + 1) as i64)
+            }
+        }
+        WindowFunc::DenseRank => {
+            // DENSE_RANK: rank without gaps for ties
+            if position == 0 {
+                Value::Int(1)
+            } else {
+                let current_order_values: Vec<Value> = order_by
+                    .iter()
+                    .map(|ob| eval_expr(&ob.expr, &rows[row_idx], columns))
+                    .collect();
+
+                // Count distinct order value combinations before current row
+                let mut seen_values: Vec<Vec<Value>> = Vec::new();
+                for &idx in &sorted_indices[..position] {
+                    let other_order_values: Vec<Value> = order_by
+                        .iter()
+                        .map(|ob| eval_expr(&ob.expr, &rows[idx], columns))
+                        .collect();
+                    if other_order_values != current_order_values
+                        && !seen_values.contains(&other_order_values)
+                    {
+                        seen_values.push(other_order_values);
+                    }
+                }
+
+                Value::Int((seen_values.len() + 1) as i64)
+            }
+        }
     }
 }
 
@@ -4349,6 +4532,154 @@ mod tests {
             QueryResult::Select { rows, .. } => {
                 assert_eq!(rows.len(), 1); // Only 4
                 assert_eq!(rows[0][0], Value::Int(4));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_row_number() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE sales (id INT, amount INT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO sales (id, amount) VALUES (1, 100)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO sales (id, amount) VALUES (2, 200)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO sales (id, amount) VALUES (3, 150)")
+            .unwrap();
+
+        // ROW_NUMBER() OVER (ORDER BY amount)
+        let result = engine.execute("SELECT id, ROW_NUMBER() OVER (ORDER BY amount) FROM sales");
+        match result.unwrap() {
+            QueryResult::Select { columns, rows } => {
+                assert_eq!(columns.len(), 2);
+                assert_eq!(rows.len(), 3);
+                // Sorted by amount: 100, 150, 200 => ids: 1, 3, 2
+                // Row numbers should be 1, 2, 3 based on original row order
+                // Row 0 (id=1, amount=100) is position 0 in sorted order => row_number = 1
+                // Row 1 (id=2, amount=200) is position 2 in sorted order => row_number = 3
+                // Row 2 (id=3, amount=150) is position 1 in sorted order => row_number = 2
+                assert_eq!(rows[0][1], Value::Int(1)); // id=1, amount=100 is first
+                assert_eq!(rows[1][1], Value::Int(3)); // id=2, amount=200 is third
+                assert_eq!(rows[2][1], Value::Int(2)); // id=3, amount=150 is second
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_row_number_with_partition() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE sales (dept TEXT, emp TEXT, amount INT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO sales (dept, emp, amount) VALUES ('A', 'Alice', 100)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO sales (dept, emp, amount) VALUES ('A', 'Bob', 200)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO sales (dept, emp, amount) VALUES ('B', 'Charlie', 150)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO sales (dept, emp, amount) VALUES ('B', 'Diana', 250)")
+            .unwrap();
+
+        // ROW_NUMBER() OVER (PARTITION BY dept ORDER BY amount)
+        let result = engine.execute(
+            "SELECT dept, emp, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY amount) FROM sales",
+        );
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 4);
+                // Within dept A: Alice (100) = 1, Bob (200) = 2
+                // Within dept B: Charlie (150) = 1, Diana (250) = 2
+                assert_eq!(rows[0][2], Value::Int(1)); // Alice is #1 in dept A
+                assert_eq!(rows[1][2], Value::Int(2)); // Bob is #2 in dept A
+                assert_eq!(rows[2][2], Value::Int(1)); // Charlie is #1 in dept B
+                assert_eq!(rows[3][2], Value::Int(2)); // Diana is #2 in dept B
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_rank_with_ties() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE scores (name TEXT, score INT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO scores (name, score) VALUES ('Alice', 100)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO scores (name, score) VALUES ('Bob', 90)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO scores (name, score) VALUES ('Charlie', 100)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO scores (name, score) VALUES ('Diana', 80)")
+            .unwrap();
+
+        // RANK() should give same rank to ties and skip ranks
+        // Sorted by score: 80, 90, 100, 100 => ranks: 1, 2, 3, 3 (4 is skipped)
+        let result = engine.execute("SELECT name, RANK() OVER (ORDER BY score) FROM scores");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 4);
+                // Original order: Alice(100), Bob(90), Charlie(100), Diana(80)
+                // In sorted order: Diana(80)=1, Bob(90)=2, Alice(100)=3, Charlie(100)=3
+                assert_eq!(rows[0][1], Value::Int(3)); // Alice score=100, rank=3
+                assert_eq!(rows[1][1], Value::Int(2)); // Bob score=90, rank=2
+                assert_eq!(rows[2][1], Value::Int(3)); // Charlie score=100, rank=3
+                assert_eq!(rows[3][1], Value::Int(1)); // Diana score=80, rank=1
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_dense_rank() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE scores (name TEXT, score INT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO scores (name, score) VALUES ('Alice', 100)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO scores (name, score) VALUES ('Bob', 90)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO scores (name, score) VALUES ('Charlie', 100)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO scores (name, score) VALUES ('Diana', 80)")
+            .unwrap();
+
+        // DENSE_RANK() gives same rank to ties but doesn't skip ranks
+        // Sorted by score: 80, 90, 100, 100 => dense_ranks: 1, 2, 3, 3
+        let result = engine.execute("SELECT name, DENSE_RANK() OVER (ORDER BY score) FROM scores");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 4);
+                // Original order: Alice(100), Bob(90), Charlie(100), Diana(80)
+                // In sorted order: Diana(80)=1, Bob(90)=2, Alice(100)=3, Charlie(100)=3
+                assert_eq!(rows[0][1], Value::Int(3)); // Alice score=100, dense_rank=3
+                assert_eq!(rows[1][1], Value::Int(2)); // Bob score=90, dense_rank=2
+                assert_eq!(rows[2][1], Value::Int(3)); // Charlie score=100, dense_rank=3
+                assert_eq!(rows[3][1], Value::Int(1)); // Diana score=80, dense_rank=1
             }
             _ => panic!("Expected Select result"),
         }

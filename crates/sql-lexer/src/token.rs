@@ -170,6 +170,13 @@ pub enum Keyword {
     Intersect,
     Except,
     All,
+
+    // Window functions
+    Over,
+    Partition,
+    RowNumber,
+    Rank,
+    DenseRank,
 }
 
 /// Error when parsing a keyword fails
@@ -287,6 +294,11 @@ impl std::str::FromStr for Keyword {
             "INTERSECT" => Ok(Self::Intersect),
             "EXCEPT" => Ok(Self::Except),
             "ALL" => Ok(Self::All),
+            "OVER" => Ok(Self::Over),
+            "PARTITION" => Ok(Self::Partition),
+            "ROW_NUMBER" => Ok(Self::RowNumber),
+            "RANK" => Ok(Self::Rank),
+            "DENSE_RANK" => Ok(Self::DenseRank),
             _ => Err(ParseKeywordError),
         }
     }

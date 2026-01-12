@@ -88,7 +88,7 @@ fn select_or_set_op_parser() -> impl Parser<Token, Statement, Error = Simple<Tok
         .then(set_op.then(select_parser()).repeated())
         .map(|(first, set_ops)| {
             if set_ops.is_empty() {
-                Statement::Select(first)
+                Statement::Select(Box::new(first))
             } else {
                 // Build the set operation chain
                 let mut current = SelectOrSet::Select(Box::new(first));
@@ -101,7 +101,7 @@ fn select_or_set_op_parser() -> impl Parser<Token, Statement, Error = Simple<Tok
                     });
                 }
                 match current {
-                    SelectOrSet::Select(s) => Statement::Select(*s),
+                    SelectOrSet::Select(s) => Statement::Select(s),
                     SelectOrSet::SetOp(s) => Statement::SetOperation(s),
                 }
             }
@@ -480,6 +480,58 @@ fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone {
                 arg: Box::new(arg),
             });
 
+        // Window functions: ROW_NUMBER() OVER (...), RANK() OVER (...), DENSE_RANK() OVER (...)
+        let window_func = select! {
+            Token::Keyword(Keyword::RowNumber) => WindowFunc::RowNumber,
+            Token::Keyword(Keyword::Rank) => WindowFunc::Rank,
+            Token::Keyword(Keyword::DenseRank) => WindowFunc::DenseRank,
+        };
+
+        // Parse ORDER BY for window
+        let order_by_item = expr
+            .clone()
+            .then(
+                just(Token::Keyword(Keyword::Desc))
+                    .to(true)
+                    .or(just(Token::Keyword(Keyword::Asc)).to(false))
+                    .or_not(),
+            )
+            .map(|(expr, desc)| OrderBy {
+                expr,
+                desc: desc.unwrap_or(false),
+            });
+
+        // Parse PARTITION BY clause
+        let partition_by = just(Token::Keyword(Keyword::Partition))
+            .ignore_then(just(Token::Keyword(Keyword::By)))
+            .ignore_then(expr.clone().separated_by(just(Token::Comma)).at_least(1))
+            .or_not()
+            .map(|opt| opt.unwrap_or_default());
+
+        // Parse ORDER BY clause for window
+        let window_order_by = just(Token::Keyword(Keyword::Order))
+            .ignore_then(just(Token::Keyword(Keyword::By)))
+            .ignore_then(order_by_item.separated_by(just(Token::Comma)).at_least(1))
+            .or_not()
+            .map(|opt| opt.unwrap_or_default());
+
+        // Parse OVER clause
+        let over_clause = just(Token::Keyword(Keyword::Over)).ignore_then(
+            partition_by
+                .then(window_order_by)
+                .delimited_by(just(Token::LParen), just(Token::RParen)),
+        );
+
+        let window_function = window_func
+            .then_ignore(just(Token::LParen))
+            .then_ignore(just(Token::RParen))
+            .then(over_clause)
+            .map(|(func, (partition_by, order_by))| Expr::WindowFunction {
+                func,
+                partition_by,
+                order_by,
+            });
+
         // EXISTS (SELECT ...)
         let exists_subquery = just(Token::Keyword(Keyword::Exists))
             .ignore_then(
@@ -530,6 +582,7 @@ fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone {
 
         let atom = literal
             .or(aggregate)
+            .or(window_function)
             .or(exists_subquery)
             .or(case_expr)
             .or(column)

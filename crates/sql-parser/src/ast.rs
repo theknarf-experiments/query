@@ -4,7 +4,7 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
     /// SELECT statement
-    Select(SelectStatement),
+    Select(Box<SelectStatement>),
     /// Set operation (UNION, INTERSECT, EXCEPT) of two or more SELECT statements
     SetOperation(SetOperationStatement),
     /// INSERT statement
@@ -180,6 +180,20 @@ pub enum Expr {
         high: Box<Expr>,
         negated: bool,
     },
+    /// Window function call
+    WindowFunction {
+        func: WindowFunc,
+        partition_by: Vec<Expr>,
+        order_by: Vec<OrderBy>,
+    },
+}
+
+/// Window functions
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowFunc {
+    RowNumber,
+    Rank,
+    DenseRank,
 }
 
 /// Aggregate functions

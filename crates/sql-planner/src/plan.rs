@@ -1,12 +1,21 @@
 //! Query plan types
 
-use sql_parser::{Assignment, Expr, JoinType, OrderBy};
+use sql_parser::{Assignment, Cte, Expr, JoinType, OrderBy};
 
 /// A logical query plan node
 #[derive(Debug, Clone, PartialEq)]
 pub enum LogicalPlan {
     /// Scan a table
     Scan { table: String },
+    /// Common Table Expression (WITH clause)
+    WithCte {
+        /// The CTE definitions
+        ctes: Vec<Cte>,
+        /// Whether this is a recursive CTE
+        recursive: bool,
+        /// The main query
+        input: Box<LogicalPlan>,
+    },
     /// Index scan - lookup rows using an index
     IndexScan {
         table: String,

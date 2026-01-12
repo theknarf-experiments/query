@@ -3,7 +3,7 @@
 use sql_parser::{
     CreateIndexStatement, CreateTableStatement, CreateTriggerStatement, DeleteStatement, Expr,
     InsertStatement, SelectColumn, SelectOrSet, SelectStatement, SetOperationStatement, Statement,
-    UpdateStatement,
+    UpdateStatement, WithClause,
 };
 
 use crate::plan::LogicalPlan;
@@ -71,6 +71,30 @@ fn plan_select_or_set(node: SelectOrSet) -> PlanResult {
 
 /// Plan a SELECT statement
 fn plan_select(select: SelectStatement) -> PlanResult {
+    // Save WITH clause for later wrapping
+    let with_clause = select.with_clause.clone();
+
+    // Plan the main query
+    let plan = plan_select_core(select)?;
+
+    // Wrap with CTE if WITH clause is present
+    wrap_with_cte(plan, with_clause)
+}
+
+/// Wrap a plan with CTE if WITH clause is present
+fn wrap_with_cte(plan: LogicalPlan, with_clause: Option<WithClause>) -> PlanResult {
+    match with_clause {
+        Some(with) => Ok(LogicalPlan::WithCte {
+            ctes: with.ctes,
+            recursive: with.recursive,
+            input: Box::new(plan),
+        }),
+        None => Ok(plan),
+    }
+}
+
+/// Plan the core of a SELECT statement (without CTE handling)
+fn plan_select_core(select: SelectStatement) -> PlanResult {
     // Start with a table scan (or empty if no FROM)
     let mut plan = match select.from {
         Some(table_ref) => LogicalPlan::Scan {

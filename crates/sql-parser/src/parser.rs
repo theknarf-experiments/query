@@ -74,6 +74,36 @@ fn statement_parser() -> impl Parser<Token, Statement, Error = Simple<Token>> {
         .then_ignore(just(Token::Semicolon).or_not())
 }
 
+/// Parse a single CTE definition: name [(columns)] AS (SELECT ...)
+fn cte_parser() -> impl Parser<Token, Cte, Error = Simple<Token>> {
+    let column_names = identifier()
+        .separated_by(just(Token::Comma))
+        .at_least(1)
+        .delimited_by(just(Token::LParen), just(Token::RParen))
+        .or_not();
+
+    identifier()
+        .then(column_names)
+        .then_ignore(just(Token::Keyword(Keyword::As)))
+        .then(select_parser().delimited_by(just(Token::LParen), just(Token::RParen)))
+        .map(|((name, columns), query)| Cte {
+            name,
+            columns,
+            query: Box::new(query),
+        })
+}
+
+/// Parse WITH clause: WITH [RECURSIVE] cte1, cte2, ...
+fn with_clause_parser() -> impl Parser<Token, WithClause, Error = Simple<Token>> {
+    just(Token::Keyword(Keyword::With))
+        .ignore_then(just(Token::Keyword(Keyword::Recursive)).or_not())
+        .then(cte_parser().separated_by(just(Token::Comma)).at_least(1))
+        .map(|(recursive, ctes)| WithClause {
+            recursive: recursive.is_some(),
+            ctes,
+        })
+}
+
 /// Parse SELECT possibly followed by set operations (UNION, INTERSECT, EXCEPT)
 fn select_or_set_op_parser() -> impl Parser<Token, Statement, Error = Simple<Token>> {
     // Parse set operator (UNION, INTERSECT, EXCEPT) with optional ALL
@@ -84,9 +114,18 @@ fn select_or_set_op_parser() -> impl Parser<Token, Statement, Error = Simple<Tok
         .then(just(Token::Keyword(Keyword::All)).or_not())
         .map(|(op, all)| (op, all.is_some()));
 
-    select_parser()
+    // Parse optional WITH clause followed by SELECT
+    with_clause_parser()
+        .or_not()
+        .then(select_parser())
         .then(set_op.then(select_parser()).repeated())
-        .map(|(first, set_ops)| {
+        .map(|((with_clause, first), set_ops)| {
+            // Attach WITH clause to the first SELECT
+            let first = SelectStatement {
+                with_clause,
+                ..first
+            };
+
             if set_ops.is_empty() {
                 Statement::Select(Box::new(first))
             } else {
@@ -283,6 +322,12 @@ fn string_literal() -> impl Parser<Token, String, Error = Simple<Token>> + Clone
 
 /// Parse a SELECT statement
 fn select_parser() -> impl Parser<Token, SelectStatement, Error = Simple<Token>> {
+    select_parser_impl(None)
+}
+
+fn select_parser_impl(
+    with_clause: Option<WithClause>,
+) -> impl Parser<Token, SelectStatement, Error = Simple<Token>> {
     let select_kw = just(Token::Keyword(Keyword::Select));
     let distinct_kw = just(Token::Keyword(Keyword::Distinct));
     let from_kw = just(Token::Keyword(Keyword::From));
@@ -340,7 +385,7 @@ fn select_parser() -> impl Parser<Token, SelectStatement, Error = Simple<Token>>
         .then(limit_clause)
         .then(offset_clause)
         .map(
-            |(
+            move |(
                 (
                     (
                         ((((((distinct, columns), from), joins), where_clause), group_by), having),
@@ -351,6 +396,7 @@ fn select_parser() -> impl Parser<Token, SelectStatement, Error = Simple<Token>>
                 offset,
             )| {
                 SelectStatement {
+                    with_clause: with_clause.clone(),
                     distinct,
                     columns,
                     from,
@@ -861,6 +907,7 @@ fn subquery_select_parser() -> impl Parser<Token, SelectStatement, Error = Simpl
         .then(from_clause)
         .then(where_clause)
         .map(|((columns, from), where_clause)| SelectStatement {
+            with_clause: None,
             distinct: false,
             columns,
             from,

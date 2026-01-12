@@ -72,9 +72,30 @@ pub enum SelectOrSet {
     SetOp(SetOperationStatement),
 }
 
+/// A Common Table Expression (CTE)
+#[derive(Debug, Clone, PartialEq)]
+pub struct Cte {
+    /// Name of the CTE
+    pub name: String,
+    /// Optional column names
+    pub columns: Option<Vec<String>>,
+    /// The query defining the CTE
+    pub query: Box<SelectStatement>,
+}
+
+/// WITH clause containing CTEs
+#[derive(Debug, Clone, PartialEq)]
+pub struct WithClause {
+    /// Whether this is a recursive CTE
+    pub recursive: bool,
+    /// The CTEs in the WITH clause
+    pub ctes: Vec<Cte>,
+}
+
 /// A SELECT statement
 #[derive(Debug, Clone, PartialEq)]
 pub struct SelectStatement {
+    pub with_clause: Option<WithClause>,
     pub distinct: bool,
     pub columns: Vec<SelectColumn>,
     pub from: Option<TableRef>,

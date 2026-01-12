@@ -177,6 +177,10 @@ pub enum Keyword {
     RowNumber,
     Rank,
     DenseRank,
+
+    // CTEs
+    With,
+    Recursive,
 }
 
 /// Error when parsing a keyword fails
@@ -299,6 +303,8 @@ impl std::str::FromStr for Keyword {
             "ROW_NUMBER" => Ok(Self::RowNumber),
             "RANK" => Ok(Self::Rank),
             "DENSE_RANK" => Ok(Self::DenseRank),
+            "WITH" => Ok(Self::With),
+            "RECURSIVE" => Ok(Self::Recursive),
             _ => Err(ParseKeywordError),
         }
     }

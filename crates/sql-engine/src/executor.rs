@@ -1,7 +1,9 @@
 //! Query executor - executes logical plans against storage
 
+use std::collections::HashMap;
+
 use sql_parser::{
-    AggregateFunc, AlterAction, Assignment, BinaryOp, ColumnDef, DataType, Expr,
+    AggregateFunc, AlterAction, Assignment, BinaryOp, ColumnDef, Cte, DataType, Expr,
     ForeignKeyRef as ParserFKRef, JoinType, OrderBy, ReferentialAction as ParserRefAction,
     SetOperator, Statement, TriggerAction, TriggerEvent, TriggerTiming, UnaryOp, WindowFunc,
 };
@@ -10,6 +12,13 @@ use sql_storage::{
     ColumnSchema, DataType as StorageDataType, ForeignKeyRef, MemoryEngine,
     ReferentialAction as StorageRefAction, Row, StorageEngine, StorageError, TableSchema, Value,
 };
+
+/// CTE context - stores materialized CTE results during query execution
+#[derive(Default, Clone)]
+struct CteContext {
+    /// Maps CTE name to (columns, rows)
+    ctes: HashMap<String, (Vec<String>, Vec<Vec<Value>>)>,
+}
 
 /// Result type for execution operations
 pub type ExecResult = Result<QueryResult, ExecError>;
@@ -737,8 +746,63 @@ impl Engine {
 
     /// Execute a SELECT query
     fn execute_query(&self, plan: LogicalPlan) -> ExecResult {
+        self.execute_query_with_cte(plan, &CteContext::default())
+    }
+
+    /// Execute a CTE and return its result as (columns, rows)
+    fn execute_cte(
+        &self,
+        cte: &Cte,
+        ctx: &CteContext,
+    ) -> Result<(Vec<String>, Vec<Vec<Value>>), ExecError> {
+        // Plan and execute the CTE query
+        let plan = sql_planner::plan(Statement::Select(cte.query.clone()))
+            .map_err(|_| ExecError::InvalidExpression("Failed to plan CTE query".to_string()))?;
+
+        let result = self.execute_query_with_cte(plan, ctx)?;
+
+        match result {
+            QueryResult::Select { columns, rows } => {
+                // If the CTE has explicit column names, use those
+                let final_columns = if let Some(ref cte_columns) = cte.columns {
+                    cte_columns.clone()
+                } else {
+                    columns
+                };
+                Ok((final_columns, rows))
+            }
+            _ => Err(ExecError::InvalidExpression(
+                "CTE query must be a SELECT".to_string(),
+            )),
+        }
+    }
+
+    /// Execute a SELECT query with CTE context
+    fn execute_query_with_cte(&self, plan: LogicalPlan, cte_ctx: &CteContext) -> ExecResult {
         match plan {
+            LogicalPlan::WithCte {
+                ctes,
+                recursive: _recursive,
+                input,
+            } => {
+                // Materialize each CTE
+                let mut ctx = cte_ctx.clone();
+                for cte in ctes {
+                    let cte_result = self.execute_cte(&cte, &ctx)?;
+                    ctx.ctes.insert(cte.name.clone(), cte_result);
+                }
+                // Execute the main query with the CTE context
+                self.execute_query_with_cte(*input, &ctx)
+            }
             LogicalPlan::Scan { table } => {
+                // Check if this is a CTE reference first
+                if let Some((columns, rows)) = cte_ctx.ctes.get(&table) {
+                    return Ok(QueryResult::Select {
+                        columns: columns.clone(),
+                        rows: rows.clone(),
+                    });
+                }
+
                 let schema = self.storage.get_schema(&table)?;
                 let column_names: Vec<String> =
                     schema.columns.iter().map(|c| c.name.clone()).collect();
@@ -782,8 +846,8 @@ impl Engine {
                 join_type,
                 on,
             } => {
-                let left_result = self.execute_query(*left)?;
-                let right_result = self.execute_query(*right)?;
+                let left_result = self.execute_query_with_cte(*left, cte_ctx)?;
+                let right_result = self.execute_query_with_cte(*right, cte_ctx)?;
 
                 match (left_result, right_result) {
                     (
@@ -937,7 +1001,7 @@ impl Engine {
                 }
 
                 // Fall back to regular filtering
-                let result = self.execute_query(*input)?;
+                let result = self.execute_query_with_cte(*input, cte_ctx)?;
                 match result {
                     QueryResult::Select { columns, rows } => {
                         let filtered: Vec<Vec<Value>> = rows
@@ -955,7 +1019,7 @@ impl Engine {
                 }
             }
             LogicalPlan::Projection { input, exprs } => {
-                let result = self.execute_query(*input)?;
+                let result = self.execute_query_with_cte(*input, cte_ctx)?;
                 match result {
                     QueryResult::Select { columns, rows } => {
                         // Handle SELECT *
@@ -1027,7 +1091,7 @@ impl Engine {
                 }
             }
             LogicalPlan::Sort { input, order_by } => {
-                let result = self.execute_query(*input)?;
+                let result = self.execute_query_with_cte(*input, cte_ctx)?;
                 match result {
                     QueryResult::Select { columns, mut rows } => {
                         // Sort by first order_by expression
@@ -1053,7 +1117,7 @@ impl Engine {
                 limit,
                 offset,
             } => {
-                let result = self.execute_query(*input)?;
+                let result = self.execute_query_with_cte(*input, cte_ctx)?;
                 match result {
                     QueryResult::Select { columns, rows } => {
                         let limited: Vec<Vec<Value>> =
@@ -1067,7 +1131,7 @@ impl Engine {
                 }
             }
             LogicalPlan::Distinct { input } => {
-                let result = self.execute_query(*input)?;
+                let result = self.execute_query_with_cte(*input, cte_ctx)?;
                 match result {
                     QueryResult::Select { columns, rows } => {
                         // Remove duplicate rows using a HashSet-like approach
@@ -1092,8 +1156,8 @@ impl Engine {
                 op,
                 all,
             } => {
-                let left_result = self.execute_query(*left)?;
-                let right_result = self.execute_query(*right)?;
+                let left_result = self.execute_query_with_cte(*left, cte_ctx)?;
+                let right_result = self.execute_query_with_cte(*right, cte_ctx)?;
 
                 match (left_result, right_result) {
                     (
@@ -1166,7 +1230,7 @@ impl Engine {
                 aggregates,
                 having,
             } => {
-                let result = self.execute_query(*input)?;
+                let result = self.execute_query_with_cte(*input, cte_ctx)?;
                 match result {
                     QueryResult::Select { columns, rows } => {
                         // Group the rows
@@ -4680,6 +4744,100 @@ mod tests {
                 assert_eq!(rows[1][1], Value::Int(2)); // Bob score=90, dense_rank=2
                 assert_eq!(rows[2][1], Value::Int(3)); // Charlie score=100, dense_rank=3
                 assert_eq!(rows[3][1], Value::Int(1)); // Diana score=80, dense_rank=1
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_simple_cte() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE employees (id INT, name TEXT, dept TEXT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO employees (id, name, dept) VALUES (1, 'Alice', 'Engineering')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO employees (id, name, dept) VALUES (2, 'Bob', 'Sales')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO employees (id, name, dept) VALUES (3, 'Charlie', 'Engineering')")
+            .unwrap();
+
+        // Simple CTE
+        let result = engine.execute(
+            "WITH engineers AS (SELECT id, name FROM employees WHERE dept = 'Engineering') \
+             SELECT * FROM engineers",
+        );
+        match result.unwrap() {
+            QueryResult::Select { columns, rows } => {
+                assert_eq!(columns, vec!["id", "name"]);
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0][1], Value::Text("Alice".to_string()));
+                assert_eq!(rows[1][1], Value::Text("Charlie".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_cte_with_column_names() {
+        let mut engine = Engine::new();
+
+        engine.execute("CREATE TABLE numbers (val INT)").unwrap();
+        engine
+            .execute("INSERT INTO numbers (val) VALUES (1)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO numbers (val) VALUES (2)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO numbers (val) VALUES (3)")
+            .unwrap();
+
+        // CTE with explicit column names
+        let result = engine.execute(
+            "WITH doubled (value) AS (SELECT val FROM numbers) \
+             SELECT value FROM doubled",
+        );
+        match result.unwrap() {
+            QueryResult::Select { columns, rows } => {
+                assert_eq!(columns, vec!["value"]);
+                assert_eq!(rows.len(), 3);
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_multiple_ctes() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE products (id INT, name TEXT, price INT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO products (id, name, price) VALUES (1, 'Widget', 100)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO products (id, name, price) VALUES (2, 'Gadget', 200)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO products (id, name, price) VALUES (3, 'Thing', 50)")
+            .unwrap();
+
+        // Multiple CTEs
+        let result = engine.execute(
+            "WITH cheap AS (SELECT * FROM products WHERE price < 150), \
+                  expensive AS (SELECT * FROM products WHERE price >= 150) \
+             SELECT name FROM cheap",
+        );
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 2);
+                // Widget (100) and Thing (50) are cheap
             }
             _ => panic!("Expected Select result"),
         }

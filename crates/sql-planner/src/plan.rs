@@ -127,4 +127,12 @@ pub enum LogicalPlan {
     },
     /// Drop an index
     DropIndex { name: String },
+    /// Create a view
+    CreateView {
+        name: String,
+        columns: Option<Vec<String>>,
+        query: Box<LogicalPlan>,
+    },
+    /// Drop a view
+    DropView { name: String },
 }

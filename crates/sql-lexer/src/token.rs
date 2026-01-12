@@ -181,6 +181,9 @@ pub enum Keyword {
     // CTEs
     With,
     Recursive,
+
+    // Views
+    View,
 }
 
 /// Error when parsing a keyword fails
@@ -305,6 +308,7 @@ impl std::str::FromStr for Keyword {
             "DENSE_RANK" => Ok(Self::DenseRank),
             "WITH" => Ok(Self::With),
             "RECURSIVE" => Ok(Self::Recursive),
+            "VIEW" => Ok(Self::View),
             _ => Err(ParseKeywordError),
         }
     }

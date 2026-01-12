@@ -110,11 +110,19 @@ struct Trigger {
     body: Vec<TriggerAction>,
 }
 
+/// Stored view definition
+#[derive(Debug, Clone)]
+struct ViewDefinition {
+    columns: Option<Vec<String>>,
+    query: sql_planner::LogicalPlan,
+}
+
 /// Database engine that executes queries
 pub struct Engine {
     storage: MemoryEngine,
     transaction: TransactionState,
     triggers: Vec<Trigger>,
+    views: HashMap<String, ViewDefinition>,
 }
 
 impl Default for Engine {
@@ -130,6 +138,7 @@ impl Engine {
             storage: MemoryEngine::new(),
             transaction: TransactionState::default(),
             triggers: Vec::new(),
+            views: HashMap::new(),
         }
     }
 
@@ -260,6 +269,25 @@ impl Engine {
             }
             LogicalPlan::DropIndex { name } => {
                 self.storage.drop_index(&name)?;
+                Ok(QueryResult::Success)
+            }
+            // View operations
+            LogicalPlan::CreateView {
+                name,
+                columns,
+                query,
+            } => {
+                self.views.insert(
+                    name,
+                    ViewDefinition {
+                        columns,
+                        query: *query,
+                    },
+                );
+                Ok(QueryResult::Success)
+            }
+            LogicalPlan::DropView { name } => {
+                self.views.remove(&name);
                 Ok(QueryResult::Success)
             }
             _ => self.execute_query(plan),
@@ -801,6 +829,24 @@ impl Engine {
                         columns: columns.clone(),
                         rows: rows.clone(),
                     });
+                }
+
+                // Check if this is a view reference
+                if let Some(view_def) = self.views.get(&table).cloned() {
+                    let result = self.execute_query_with_cte(view_def.query.clone(), cte_ctx)?;
+                    // Apply column renaming if view has explicit columns
+                    if let QueryResult::Select { columns, rows } = result {
+                        let final_columns = if let Some(view_cols) = view_def.columns {
+                            view_cols
+                        } else {
+                            columns
+                        };
+                        return Ok(QueryResult::Select {
+                            columns: final_columns,
+                            rows,
+                        });
+                    }
+                    return Ok(result);
                 }
 
                 let schema = self.storage.get_schema(&table)?;
@@ -1556,6 +1602,7 @@ impl Engine {
             storage: self.storage.clone(),
             transaction: TransactionState::default(),
             triggers: self.triggers.clone(),
+            views: self.views.clone(),
         };
         temp_engine.execute_query(plan)
     }
@@ -4841,5 +4888,88 @@ mod tests {
             }
             _ => panic!("Expected Select result"),
         }
+    }
+
+    #[test]
+    fn test_simple_view() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE employees (id INT, name TEXT, dept TEXT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO employees (id, name, dept) VALUES (1, 'Alice', 'Engineering')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO employees (id, name, dept) VALUES (2, 'Bob', 'Sales')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO employees (id, name, dept) VALUES (3, 'Charlie', 'Engineering')")
+            .unwrap();
+
+        // Create a view
+        let result = engine.execute(
+            "CREATE VIEW engineers AS SELECT id, name FROM employees WHERE dept = 'Engineering'",
+        );
+        assert_eq!(result.unwrap(), QueryResult::Success);
+
+        // Query the view
+        let result = engine.execute("SELECT * FROM engineers");
+        match result.unwrap() {
+            QueryResult::Select { columns, rows } => {
+                assert_eq!(columns, vec!["id", "name"]);
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0][1], Value::Text("Alice".to_string()));
+                assert_eq!(rows[1][1], Value::Text("Charlie".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_view_with_columns() {
+        let mut engine = Engine::new();
+
+        engine.execute("CREATE TABLE numbers (val INT)").unwrap();
+        engine
+            .execute("INSERT INTO numbers (val) VALUES (1)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO numbers (val) VALUES (2)")
+            .unwrap();
+
+        // Create a view with explicit column names
+        let result = engine.execute("CREATE VIEW doubled (value) AS SELECT val FROM numbers");
+        assert_eq!(result.unwrap(), QueryResult::Success);
+
+        // Query the view - column should be renamed
+        let result = engine.execute("SELECT value FROM doubled");
+        match result.unwrap() {
+            QueryResult::Select { columns, rows } => {
+                assert_eq!(columns, vec!["value"]);
+                assert_eq!(rows.len(), 2);
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_drop_view() {
+        let mut engine = Engine::new();
+
+        engine.execute("CREATE TABLE t (val INT)").unwrap();
+        engine.execute("INSERT INTO t (val) VALUES (1)").unwrap();
+
+        // Create and then drop a view
+        engine
+            .execute("CREATE VIEW v AS SELECT val FROM t")
+            .unwrap();
+        let result = engine.execute("SELECT * FROM v");
+        assert!(result.is_ok());
+
+        engine.execute("DROP VIEW v").unwrap();
+        // View should no longer exist - query will fail
+        let result = engine.execute("SELECT * FROM v");
+        assert!(result.is_err());
     }
 }

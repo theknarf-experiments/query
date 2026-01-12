@@ -27,6 +27,10 @@ pub enum Statement {
     CreateIndex(CreateIndexStatement),
     /// DROP INDEX statement
     DropIndex(String),
+    /// CREATE VIEW statement
+    CreateView(CreateViewStatement),
+    /// DROP VIEW statement
+    DropView(String),
     /// BEGIN TRANSACTION
     Begin,
     /// COMMIT TRANSACTION
@@ -375,6 +379,14 @@ pub struct CreateIndexStatement {
     pub name: String,
     pub table: String,
     pub column: String,
+}
+
+/// CREATE VIEW statement
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateViewStatement {
+    pub name: String,
+    pub columns: Option<Vec<String>>,
+    pub query: Box<SelectStatement>,
 }
 
 /// CREATE TRIGGER statement

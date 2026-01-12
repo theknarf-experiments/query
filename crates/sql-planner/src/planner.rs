@@ -1,9 +1,9 @@
 //! Query planner - converts AST statements to logical plans
 
 use sql_parser::{
-    CreateIndexStatement, CreateTableStatement, CreateTriggerStatement, DeleteStatement, Expr,
-    InsertStatement, SelectColumn, SelectOrSet, SelectStatement, SetOperationStatement, Statement,
-    UpdateStatement, WithClause,
+    CreateIndexStatement, CreateTableStatement, CreateTriggerStatement, CreateViewStatement,
+    DeleteStatement, Expr, InsertStatement, SelectColumn, SelectOrSet, SelectStatement,
+    SetOperationStatement, Statement, UpdateStatement, WithClause,
 };
 
 use crate::plan::LogicalPlan;
@@ -40,6 +40,8 @@ pub fn plan(statement: Statement) -> PlanResult {
         }),
         Statement::CreateIndex(create) => plan_create_index(create),
         Statement::DropIndex(name) => Ok(LogicalPlan::DropIndex { name }),
+        Statement::CreateView(create) => plan_create_view(create),
+        Statement::DropView(name) => Ok(LogicalPlan::DropView { name }),
         Statement::Begin => Ok(LogicalPlan::Begin),
         Statement::Commit => Ok(LogicalPlan::Commit),
         Statement::Rollback => Ok(LogicalPlan::Rollback),
@@ -267,6 +269,17 @@ fn plan_create_index(create: CreateIndexStatement) -> PlanResult {
         name: create.name,
         table: create.table,
         column: create.column,
+    })
+}
+
+/// Plan a CREATE VIEW statement
+fn plan_create_view(create: CreateViewStatement) -> PlanResult {
+    // Plan the view query
+    let query_plan = plan_select_core(*create.query)?;
+    Ok(LogicalPlan::CreateView {
+        name: create.name,
+        columns: create.columns,
+        query: Box::new(query_plan),
     })
 }
 

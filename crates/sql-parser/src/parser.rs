@@ -62,8 +62,10 @@ fn statement_parser() -> impl Parser<Token, Statement, Error = Simple<Token>> {
         .or(create_table_parser().map(Statement::CreateTable))
         .or(create_trigger_parser().map(Statement::CreateTrigger))
         .or(create_index_parser().map(Statement::CreateIndex))
+        .or(create_view_parser().map(Statement::CreateView))
         .or(drop_trigger_parser().map(Statement::DropTrigger))
         .or(drop_index_parser().map(Statement::DropIndex))
+        .or(drop_view_parser().map(Statement::DropView))
         .or(drop_table_parser().map(Statement::DropTable))
         .or(alter_table_parser().map(Statement::AlterTable))
         .or(begin_parser())
@@ -274,6 +276,34 @@ fn create_index_parser() -> impl Parser<Token, CreateIndexStatement, Error = Sim
 fn drop_index_parser() -> impl Parser<Token, String, Error = Simple<Token>> {
     just(Token::Keyword(Keyword::Drop))
         .ignore_then(just(Token::Keyword(Keyword::Index)))
+        .ignore_then(identifier())
+}
+
+/// Parse CREATE VIEW name [(columns)] AS SELECT ...
+fn create_view_parser() -> impl Parser<Token, CreateViewStatement, Error = Simple<Token>> {
+    let column_names = identifier()
+        .separated_by(just(Token::Comma))
+        .at_least(1)
+        .delimited_by(just(Token::LParen), just(Token::RParen))
+        .or_not();
+
+    just(Token::Keyword(Keyword::Create))
+        .ignore_then(just(Token::Keyword(Keyword::View)))
+        .ignore_then(identifier())
+        .then(column_names)
+        .then_ignore(just(Token::Keyword(Keyword::As)))
+        .then(select_parser())
+        .map(|((name, columns), query)| CreateViewStatement {
+            name,
+            columns,
+            query: Box::new(query),
+        })
+}
+
+/// Parse DROP VIEW name
+fn drop_view_parser() -> impl Parser<Token, String, Error = Simple<Token>> {
+    just(Token::Keyword(Keyword::Drop))
+        .ignore_then(just(Token::Keyword(Keyword::View)))
         .ignore_then(identifier())
 }
 

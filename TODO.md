@@ -2,4 +2,3 @@
 
 ## Future Enhancements
 
-- [ ] Standardized SQL compliance tests

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc afb7ddb818c6f97068b0b3bff0d99e35f6bbbd7746a69453ffb07c2d5a373894 # shrinks to table_name = "a", columns = [ColumnDef { name: "is", col_type: "INT" }]

@@ -189,10 +189,11 @@ fn stratify(rules: &[Rule]) -> Result<Vec<Vec<Rule>>> {
 - [x] Update all dependent crates to use sql-storage
 - [x] Remove datalog-core from workspace
 
-### Phase 3: Extend LogicalPlan with recursion
-- [ ] Add `Recursive` variant to LogicalPlan
-- [ ] Add `Stratify` variant for negation handling
-- [ ] Keep existing sql-planner functionality
+### Phase 3: Extend LogicalPlan with recursion ✓
+- [x] Add `Recursive` variant to LogicalPlan (for fixpoint evaluation)
+- [x] Add `Stratify` variant for negation handling
+- [x] Add `RecursiveRef` variant for referencing recursive relations
+- [x] Keep existing sql-planner functionality
 
 ### Phase 4: Add Datalog → LogicalPlan compilation
 - [ ] Create datalog-to-plan module in planner

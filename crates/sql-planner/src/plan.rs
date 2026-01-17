@@ -145,4 +145,43 @@ pub enum LogicalPlan {
     DropProcedure { name: String },
     /// Call a stored procedure
     CallProcedure { name: String, args: Vec<Expr> },
+
+    // ===== Recursive query support (for Datalog and SQL recursive CTEs) =====
+
+    /// Recursive fixpoint evaluation
+    ///
+    /// Evaluates a recursive query using semi-naive evaluation:
+    /// 1. Evaluate base case to get initial facts
+    /// 2. Repeatedly evaluate step with new facts (delta) until fixpoint
+    ///
+    /// Used for both Datalog recursive rules and SQL recursive CTEs.
+    Recursive {
+        /// Name of the recursive relation being computed
+        name: String,
+        /// Column names for the recursive relation
+        columns: Vec<String>,
+        /// Base case (non-recursive part)
+        base: Box<LogicalPlan>,
+        /// Recursive step (may reference `name` for recursive calls)
+        step: Box<LogicalPlan>,
+    },
+
+    /// Stratified evaluation for handling negation
+    ///
+    /// Evaluates plans in stratum order. Each stratum is computed to fixpoint
+    /// before moving to the next. This ensures correct semantics for negation:
+    /// a predicate can only be negated if it's fully computed in a lower stratum.
+    Stratify {
+        /// Plans to execute in order (each stratum)
+        strata: Vec<LogicalPlan>,
+    },
+
+    /// Reference to a recursive relation (used within Recursive.step)
+    ///
+    /// During semi-naive evaluation, this is bound to either the full
+    /// relation or the delta (newly derived facts) depending on context.
+    RecursiveRef {
+        /// Name of the recursive relation to reference
+        name: String,
+    },
 }

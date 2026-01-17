@@ -1,0 +1,13 @@
+[package]
+name = "datalog-core"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+test-utils = []
+
+[dependencies]
+datalog-ast = { path = "../datalog-ast" }
+
+[dev-dependencies]
+internment = "0.8"

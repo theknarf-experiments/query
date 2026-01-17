@@ -1,0 +1,11 @@
+[package]
+name = "datalog-builtins"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+datalog-ast = { path = "../datalog-ast" }
+datalog-core = { path = "../datalog-core" }
+
+[dev-dependencies]
+internment = "0.8"

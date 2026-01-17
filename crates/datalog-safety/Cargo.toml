@@ -1,0 +1,10 @@
+[package]
+name = "datalog-safety"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+datalog-ast = { path = "../datalog-ast" }
+
+[dev-dependencies]
+internment = "0.8"

@@ -1,12 +1,21 @@
 [workspace]
 resolver = "2"
 members = [
+    # SQL frontend
     "crates/sql-parser",
     "crates/sql-planner",
     "crates/sql-storage",
     "crates/sql-wal",
     "crates/sql-engine",
     "crates/sql-tests",
+    # Datalog frontend
+    "crates/datalog-ast",
+    "crates/datalog-parser",
+    "crates/datalog-core",
+    "crates/datalog-builtins",
+    "crates/datalog-safety",
+    "crates/datalog-grounding",
+    "crates/datalog-eval",
 ]
 
 [workspace.package]
@@ -19,13 +28,23 @@ license = "MIT"
 # Parsing
 chumsky = "0.9"
 ariadne = "0.4"
+internment = "0.8"
 
-# Internal crates
+# SQL crates
 sql-parser = { path = "crates/sql-parser" }
 sql-planner = { path = "crates/sql-planner" }
 sql-storage = { path = "crates/sql-storage" }
 sql-wal = { path = "crates/sql-wal" }
 sql-engine = { path = "crates/sql-engine" }
+
+# Datalog crates
+datalog-ast = { path = "crates/datalog-ast" }
+datalog-parser = { path = "crates/datalog-parser" }
+datalog-core = { path = "crates/datalog-core" }
+datalog-builtins = { path = "crates/datalog-builtins" }
+datalog-safety = { path = "crates/datalog-safety" }
+datalog-grounding = { path = "crates/datalog-grounding" }
+datalog-eval = { path = "crates/datalog-eval" }
 
 # Testing
 proptest = "1.4"

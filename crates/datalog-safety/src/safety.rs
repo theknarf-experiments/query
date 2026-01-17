@@ -121,10 +121,14 @@ fn collect_vars_from_atom(atom: &Atom, vars: &mut HashSet<Symbol>) {
 }
 
 /// Collect all variables from a term recursively
+/// Variables starting with `_` are treated as anonymous and are not collected.
 fn collect_vars_from_term(term: &Term, vars: &mut HashSet<Symbol>) {
     match term {
         Term::Variable(name) => {
-            vars.insert(*name);
+            // Skip anonymous variables (those starting with _)
+            if !name.as_ref().starts_with('_') {
+                vars.insert(*name);
+            }
         }
         Term::Constant(_) => {
             // Constants don't have variables

@@ -1,23 +1,15 @@
-//! Datalog evaluation strategies
+//! Datalog evaluation
 //!
-//! This module implements multiple evaluation algorithms for Datalog programs:
-//!
-//! # Evaluation Strategies
-//!
-//! - **Naive Evaluation**: Simple fixed-point iteration (re-evaluates all facts)
-//! - **Semi-Naive Evaluation**: Optimized evaluation using deltas (only new facts)
-//! - **Stratified Evaluation**: Handles negation safely by evaluating in strata
-//!
-//! # Constraint Checking
-//!
-//! Constraints are integrity constraints that must not be violated. They filter
-//! out invalid models during evaluation.
+//! This module provides the main entry point for evaluating Datalog programs.
+//! It uses stratified semi-naive evaluation for efficient and correct handling
+//! of recursion and negation.
 //!
 //! # Example
 //!
 //! ```ignore
-//! let result = semi_naive_evaluation(&rules, initial_facts)?;
-//! let result = stratified_evaluation_with_constraints(&rules, &constraints, initial_facts)?;
+//! use datalog_eval::evaluate;
+//!
+//! let result = evaluate(&rules, &constraints, initial_facts)?;
 //! ```
 
 use datalog_ast::{Constraint, Rule};
@@ -83,222 +75,66 @@ impl From<InsertError> for EvaluationError {
     }
 }
 
-/// Naive evaluation: repeatedly apply all rules until fixed point
-/// This is simple but inefficient - it re-evaluates all facts every iteration
-#[allow(dead_code)]
-pub fn naive_evaluation(
-    rules: &[Rule],
-    initial_facts: FactDatabase,
-) -> Result<FactDatabase, InsertError> {
-    let mut db = initial_facts;
-    let mut changed = true;
-
-    while changed {
-        changed = false;
-        let old_size = db.len();
-
-        // Apply each rule and add derived facts
-        for rule in rules {
-            let derived = ground_rule(rule, &db);
-            for fact in derived {
-                if db.insert(fact)? {
-                    changed = true;
-                }
-            }
-        }
-
-        // If no new facts were added, we've reached fixed point
-        if db.len() == old_size {
-            changed = false;
-        }
-    }
-
-    Ok(db)
-}
-
-/// Semi-naive evaluation: only process new facts (delta) each iteration
-/// This is much more efficient for recursive rules
+/// Evaluate a Datalog program to fixed point.
 ///
-/// The key insight: for each rule, we need to ensure at least one literal
-/// uses the delta (new facts), while others can use the full database.
-/// This prevents re-deriving facts from old information.
-pub fn semi_naive_evaluation(
+/// This is the main entry point for Datalog evaluation. It:
+/// 1. Checks that all rules are safe (variables properly bound)
+/// 2. Stratifies the program to handle negation correctly
+/// 3. Evaluates each stratum using semi-naive evaluation
+/// 4. Checks constraints after evaluation
+///
+/// # Arguments
+///
+/// * `rules` - The Datalog rules to evaluate
+/// * `constraints` - Integrity constraints that must not be violated
+/// * `initial_facts` - The initial fact database (EDB - extensional database)
+///
+/// # Returns
+///
+/// The complete fact database including all derived facts (IDB - intensional database)
+///
+/// # Example
+///
+/// ```ignore
+/// // Define rules for transitive closure
+/// // ancestor(X, Y) :- parent(X, Y).
+/// // ancestor(X, Z) :- ancestor(X, Y), parent(Y, Z).
+///
+/// let result = evaluate(&rules, &[], facts)?;
+/// ```
+pub fn evaluate(
     rules: &[Rule],
+    constraints: &[Constraint],
     initial_facts: FactDatabase,
-) -> Result<FactDatabase, InsertError> {
-    let mut db = initial_facts.clone();
-    let mut delta = initial_facts;
+) -> Result<FactDatabase, EvaluationError> {
+    // Check safety first (variables in negation must appear in positive literals, etc.)
+    check_program_safety(rules)?;
 
-    loop {
-        let mut new_delta = FactDatabase::new();
+    // Stratify the program to handle negation correctly
+    let stratification = stratify(rules)?;
 
-        for rule in rules {
-            if rule.body.is_empty() {
-                // No body - always evaluate
-                let derived = ground_rule(rule, &db);
-                for fact in derived {
-                    if db.contains(&fact) || new_delta.contains(&fact) {
-                        continue;
-                    }
-                    new_delta.insert(fact)?;
-                }
-            } else if rule.body.len() == 1 {
-                // Single literal - just use delta
-                let derived = ground_rule(rule, &delta);
-                for fact in derived {
-                    if db.contains(&fact) || new_delta.contains(&fact) {
-                        continue;
-                    }
-                    new_delta.insert(fact)?;
-                }
-            } else {
-                // Multi-literal: use semi-naive grounding
-                // This tries delta at each position
-                let derived = ground_rule_semi_naive(rule, &delta, &db);
-                for fact in derived {
-                    if db.contains(&fact) || new_delta.contains(&fact) {
-                        continue;
-                    }
-                    new_delta.insert(fact)?;
-                }
-            }
-        }
+    let mut db = initial_facts;
 
-        // If no new facts, we've reached fixed point
-        if new_delta.is_empty() {
-            break;
-        }
-
-        let delta_next = new_delta.clone();
-        db.absorb(new_delta);
-        delta = delta_next;
+    // Evaluate each stratum to fixed point before moving to the next
+    for stratum_rules in &stratification.rules_by_stratum {
+        db = semi_naive_evaluate(stratum_rules, db)?;
     }
+
+    // Check constraints after evaluation
+    check_constraints(constraints, &db)?;
 
     Ok(db)
 }
 
-/// Statistics about evaluation performance
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvaluationStats {
-    pub iterations: usize,
-    pub rule_applications: usize,
-    pub facts_derived: usize,
-}
-
-/// Instrumented naive evaluation that tracks statistics
-#[allow(dead_code)]
-pub fn naive_evaluation_instrumented(
-    rules: &[Rule],
-    initial_facts: FactDatabase,
-) -> (FactDatabase, EvaluationStats) {
-    let mut db = initial_facts;
-    let mut changed = true;
-    let mut stats = EvaluationStats {
-        iterations: 0,
-        rule_applications: 0,
-        facts_derived: 0,
-    };
-
-    while changed {
-        changed = false;
-        let old_size = db.len();
-        stats.iterations += 1;
-
-        for rule in rules {
-            stats.rule_applications += 1;
-            let derived = ground_rule(rule, &db);
-            for fact in derived {
-                if db
-                    .insert(fact)
-                    .expect("derived non-ground fact during semi-naive evaluation")
-                {
-                    changed = true;
-                    stats.facts_derived += 1;
-                }
-            }
-        }
-
-        if db.len() == old_size {
-            changed = false;
-        }
-    }
-
-    (db, stats)
-}
-
-/// Instrumented semi-naive evaluation that tracks statistics
-#[allow(dead_code)]
-pub fn semi_naive_evaluation_instrumented(
-    rules: &[Rule],
-    initial_facts: FactDatabase,
-) -> Result<(FactDatabase, EvaluationStats), InsertError> {
-    let mut db = initial_facts.clone();
-    let mut delta = initial_facts;
-    let mut stats = EvaluationStats {
-        iterations: 0,
-        rule_applications: 0,
-        facts_derived: 0,
-    };
-
-    loop {
-        let mut new_delta = FactDatabase::new();
-
-        for rule in rules {
-            stats.rule_applications += 1;
-
-            if rule.body.is_empty() {
-                let derived = ground_rule(rule, &db);
-                for fact in derived {
-                    if db.contains(&fact) || new_delta.contains(&fact) {
-                        continue;
-                    }
-                    new_delta.insert(fact)?;
-                    stats.facts_derived += 1;
-                }
-            } else if rule.body.len() == 1 {
-                let derived = ground_rule(rule, &delta);
-                for fact in derived {
-                    if db.contains(&fact) || new_delta.contains(&fact) {
-                        continue;
-                    }
-                    new_delta.insert(fact)?;
-                    stats.facts_derived += 1;
-                }
-            } else {
-                let derived = ground_rule_semi_naive(rule, &delta, &db);
-                for fact in derived {
-                    if db.contains(&fact) || new_delta.contains(&fact) {
-                        continue;
-                    }
-                    new_delta.insert(fact)?;
-                    stats.facts_derived += 1;
-                }
-            }
-        }
-
-        if new_delta.is_empty() {
-            break;
-        }
-
-        stats.iterations += 1;
-        let delta_next = new_delta.clone();
-        db.absorb(new_delta);
-        delta = delta_next;
-    }
-
-    Ok((db, stats))
-}
-
-/// Check constraints against the database
-/// Returns an error if any constraint is violated
-/// A constraint is violated if its body is satisfied (i.e., there exist substitutions)
+/// Check constraints against the database.
+///
+/// A constraint is violated if its body can be satisfied (i.e., there exist
+/// substitutions that make all literals in the body true).
 pub fn check_constraints(
     constraints: &[Constraint],
     db: &FactDatabase,
 ) -> Result<(), EvaluationError> {
     for constraint in constraints {
-        // Get all substitutions that satisfy the constraint body
         let violations = satisfy_body(&constraint.body, db);
 
         if !violations.is_empty() {
@@ -311,56 +147,47 @@ pub fn check_constraints(
     Ok(())
 }
 
-/// Stratified evaluation with constraints
-/// Evaluates rules stratum by stratum, then checks constraints
-pub fn stratified_evaluation_with_constraints(
-    rules: &[Rule],
-    constraints: &[Constraint],
-    initial_facts: FactDatabase,
-) -> Result<FactDatabase, EvaluationError> {
-    // Check safety first (variables in negation, etc.)
-    check_program_safety(rules)?;
-
-    // Stratify the program
-    let stratification = stratify(rules)?;
-
-    let mut db = initial_facts;
-
-    // Evaluate each stratum to completion before moving to next
-    for stratum_rules in &stratification.rules_by_stratum {
-        // Evaluate this stratum to fixed point using semi-naive
-        db = semi_naive_evaluation(stratum_rules, db).map_err(EvaluationError::from)?;
-    }
-
-    // Check constraints after evaluation
-    check_constraints(constraints, &db)?;
-
-    Ok(db)
-}
-
-/// Stratified evaluation: evaluates program stratum by stratum
-/// This allows safe handling of negation by ensuring negated predicates
-/// are fully computed before being used
+/// Semi-naive evaluation for a set of rules within a single stratum.
 ///
-/// Note: This version doesn't check constraints. Use stratified_evaluation_with_constraints
-/// if you need constraint checking.
-#[allow(dead_code)]
-pub fn stratified_evaluation(
+/// This is an internal function used by `evaluate()`. It processes only
+/// new facts (delta) each iteration to avoid redundant derivations.
+fn semi_naive_evaluate(
     rules: &[Rule],
     initial_facts: FactDatabase,
 ) -> Result<FactDatabase, EvaluationError> {
-    // Check safety first (variables in negation, etc.)
-    check_program_safety(rules)?;
+    let mut db = initial_facts.clone();
+    let mut delta = initial_facts;
 
-    // Stratify the program
-    let stratification = stratify(rules)?;
+    loop {
+        let mut new_delta = FactDatabase::new();
 
-    let mut db = initial_facts;
+        for rule in rules {
+            let derived = if rule.body.is_empty() {
+                // No body - always evaluate (fact-like rule)
+                ground_rule(rule, &db)
+            } else if rule.body.len() == 1 {
+                // Single literal - just use delta
+                ground_rule(rule, &delta)
+            } else {
+                // Multi-literal: use semi-naive grounding
+                ground_rule_semi_naive(rule, &delta, &db)
+            };
 
-    // Evaluate each stratum to completion before moving to next
-    for stratum_rules in &stratification.rules_by_stratum {
-        // Evaluate this stratum to fixed point using semi-naive
-        db = semi_naive_evaluation(stratum_rules, db).map_err(EvaluationError::from)?;
+            for fact in derived {
+                if !db.contains(&fact) && !new_delta.contains(&fact) {
+                    new_delta.insert(fact)?;
+                }
+            }
+        }
+
+        // Fixed point reached when no new facts are derived
+        if new_delta.is_empty() {
+            break;
+        }
+
+        let delta_next = new_delta.clone();
+        db.absorb(new_delta);
+        delta = delta_next;
     }
 
     Ok(db)
@@ -379,6 +206,10 @@ mod tests {
         Term::Variable(sym(name))
     }
 
+    fn atom_term(name: &str) -> Term {
+        Term::Constant(Value::Atom(sym(name)))
+    }
+
     fn make_atom(pred: &str, terms: Vec<Term>) -> Atom {
         Atom {
             predicate: sym(pred),
@@ -387,72 +218,33 @@ mod tests {
     }
 
     #[test]
-    fn test_naive_evaluation() {
+    fn test_simple_derivation() {
         // parent(john, mary). parent(mary, jane).
         // ancestor(X, Y) :- parent(X, Y).
         let mut db = FactDatabase::new();
         db.insert(make_atom(
             "parent",
-            vec![
-                Term::Constant(Value::Atom(sym("john"))),
-                Term::Constant(Value::Atom(sym("mary"))),
-            ],
+            vec![atom_term("john"), atom_term("mary")],
         ))
         .unwrap();
         db.insert(make_atom(
             "parent",
-            vec![
-                Term::Constant(Value::Atom(sym("mary"))),
-                Term::Constant(Value::Atom(sym("jane"))),
-            ],
+            vec![atom_term("mary"), atom_term("jane")],
         ))
         .unwrap();
 
-        let rule = Rule {
+        let rules = vec![Rule {
             head: make_atom("ancestor", vec![var_term("X"), var_term("Y")]),
             body: vec![Literal::Positive(make_atom(
                 "parent",
                 vec![var_term("X"), var_term("Y")],
             ))],
-        };
+        }];
 
-        let result = naive_evaluation(&[rule], db).unwrap();
+        let result = evaluate(&rules, &[], db).unwrap();
 
-        // Should have 2 parent facts + 2 derived ancestor facts
-        assert!(result.len() >= 2);
-    }
-
-    #[test]
-    fn test_semi_naive_evaluation() {
-        // Same test as naive but with semi-naive
-        let mut db = FactDatabase::new();
-        db.insert(make_atom(
-            "parent",
-            vec![
-                Term::Constant(Value::Atom(sym("john"))),
-                Term::Constant(Value::Atom(sym("mary"))),
-            ],
-        ))
-        .unwrap();
-        db.insert(make_atom(
-            "parent",
-            vec![
-                Term::Constant(Value::Atom(sym("mary"))),
-                Term::Constant(Value::Atom(sym("jane"))),
-            ],
-        ))
-        .unwrap();
-
-        let rule = Rule {
-            head: make_atom("ancestor", vec![var_term("X"), var_term("Y")]),
-            body: vec![Literal::Positive(make_atom(
-                "parent",
-                vec![var_term("X"), var_term("Y")],
-            ))],
-        };
-
-        let result = semi_naive_evaluation(&[rule], db).unwrap();
-        assert!(result.len() >= 2);
+        // Should have 2 parent facts + 2 derived ancestor facts = 4
+        assert_eq!(result.len(), 4);
     }
 
     #[test]
@@ -460,30 +252,12 @@ mod tests {
         // ancestor(X, Y) :- parent(X, Y).
         // ancestor(X, Z) :- ancestor(X, Y), parent(Y, Z).
         let mut db = FactDatabase::new();
-        db.insert(make_atom(
-            "parent",
-            vec![
-                Term::Constant(Value::Atom(sym("a"))),
-                Term::Constant(Value::Atom(sym("b"))),
-            ],
-        ))
-        .unwrap();
-        db.insert(make_atom(
-            "parent",
-            vec![
-                Term::Constant(Value::Atom(sym("b"))),
-                Term::Constant(Value::Atom(sym("c"))),
-            ],
-        ))
-        .unwrap();
-        db.insert(make_atom(
-            "parent",
-            vec![
-                Term::Constant(Value::Atom(sym("c"))),
-                Term::Constant(Value::Atom(sym("d"))),
-            ],
-        ))
-        .unwrap();
+        db.insert(make_atom("parent", vec![atom_term("a"), atom_term("b")]))
+            .unwrap();
+        db.insert(make_atom("parent", vec![atom_term("b"), atom_term("c")]))
+            .unwrap();
+        db.insert(make_atom("parent", vec![atom_term("c"), atom_term("d")]))
+            .unwrap();
 
         let rules = vec![
             Rule {
@@ -502,11 +276,88 @@ mod tests {
             },
         ];
 
-        let result = semi_naive_evaluation(&rules, db).unwrap();
+        let result = evaluate(&rules, &[], db).unwrap();
 
-        // Should derive: ancestor(a,b), ancestor(b,c), ancestor(c,d),
-        // ancestor(a,c), ancestor(b,d), ancestor(a,d)
-        // Plus the 3 parent facts = at least 9 facts
-        assert!(result.len() >= 6);
+        // 3 parent facts + 6 ancestor facts (a->b, b->c, c->d, a->c, b->d, a->d) = 9
+        assert_eq!(result.len(), 9);
+    }
+
+    #[test]
+    fn test_negation_with_stratification() {
+        // person(alice). person(bob). parent(alice, charlie).
+        // childless(X) :- person(X), not parent(X, _).
+        let mut db = FactDatabase::new();
+        db.insert(make_atom("person", vec![atom_term("alice")]))
+            .unwrap();
+        db.insert(make_atom("person", vec![atom_term("bob")]))
+            .unwrap();
+        db.insert(make_atom(
+            "parent",
+            vec![atom_term("alice"), atom_term("charlie")],
+        ))
+        .unwrap();
+
+        let rules = vec![Rule {
+            head: make_atom("childless", vec![var_term("X")]),
+            body: vec![
+                Literal::Positive(make_atom("person", vec![var_term("X")])),
+                Literal::Negative(make_atom("parent", vec![var_term("X"), var_term("_Y")])),
+            ],
+        }];
+
+        let result = evaluate(&rules, &[], db).unwrap();
+
+        // Should derive childless(bob) but not childless(alice)
+        // 2 person + 1 parent + 1 childless = 4
+        assert_eq!(result.len(), 4);
+    }
+
+    #[test]
+    fn test_constraint_violation() {
+        // Constraint: :- dangerous(X).
+        let mut db = FactDatabase::new();
+        db.insert(make_atom("dangerous", vec![atom_term("bomb")]))
+            .unwrap();
+
+        let constraints = vec![Constraint {
+            body: vec![Literal::Positive(make_atom(
+                "dangerous",
+                vec![var_term("X")],
+            ))],
+        }];
+
+        let result = evaluate(&[], &constraints, db);
+
+        assert!(matches!(
+            result,
+            Err(EvaluationError::ConstraintViolation { .. })
+        ));
+    }
+
+    #[test]
+    fn test_cycle_through_negation_error() {
+        // p(X) :- base(X), not q(X).
+        // q(X) :- base(X), not p(X).
+        // These rules are safe (X bound by base) but form a cycle through negation
+        let rules = vec![
+            Rule {
+                head: make_atom("p", vec![var_term("X")]),
+                body: vec![
+                    Literal::Positive(make_atom("base", vec![var_term("X")])),
+                    Literal::Negative(make_atom("q", vec![var_term("X")])),
+                ],
+            },
+            Rule {
+                head: make_atom("q", vec![var_term("X")]),
+                body: vec![
+                    Literal::Positive(make_atom("base", vec![var_term("X")])),
+                    Literal::Negative(make_atom("p", vec![var_term("X")])),
+                ],
+            },
+        ];
+
+        let result = evaluate(&rules, &[], FactDatabase::new());
+
+        assert!(matches!(result, Err(EvaluationError::Stratification(_))));
     }
 }

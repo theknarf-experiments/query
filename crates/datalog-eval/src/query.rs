@@ -17,7 +17,7 @@
 //! ```
 
 use datalog_parser::{Query, Symbol};
-use datalog_core::{FactDatabase, Substitution};
+use sql_storage::{FactDatabase, Substitution};
 use datalog_grounding::satisfy_body;
 use std::collections::HashSet;
 

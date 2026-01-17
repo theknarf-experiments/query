@@ -18,7 +18,7 @@
 //! let results = db.query(&pattern_with_variables);
 //! ```
 
-use crate::unification::{unify_atoms, Substitution};
+use crate::datalog_unification::{unify_atoms, Substitution};
 use datalog_parser::{Atom, Symbol, Term};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;

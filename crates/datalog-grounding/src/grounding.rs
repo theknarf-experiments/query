@@ -21,7 +21,7 @@
 
 use datalog_parser::{Atom, Literal, Rule, Term};
 use datalog_builtins as builtins;
-use datalog_core::{FactDatabase, Substitution};
+use sql_storage::{FactDatabase, Substitution};
 
 #[cfg(test)]
 mod allocation_tracker {

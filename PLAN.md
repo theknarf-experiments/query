@@ -7,21 +7,21 @@ Unify SQL and Datalog frontends to:
 2. Reuse semi-naive stratified evaluation for SQL recursive CTEs
 3. Share optimizations between both query languages
 
-## Current Architecture (13 crates)
+## Current Architecture (11 crates, down from 13)
 
 ```
 SQL Frontend:
-sql-parser ──► sql-planner ──► sql-engine ◄── sql-storage
+sql-parser ──► sql-planner ──► sql-engine ◄── sql-storage (includes Datalog storage)
                                     │
                                sql-tests ◄─── sql-wal
 
-Datalog Frontend (separate):
-datalog-ast ──► datalog-parser
-     │
-     ├──► datalog-core ──► datalog-builtins ──► datalog-grounding
-     │                                                │
-     └──► datalog-safety ────────────────────► datalog-eval
+Datalog Frontend:
+datalog-parser ──► datalog-builtins ──► datalog-grounding
+       │                                      │
+       └──► datalog-safety ──────────► datalog-eval
 ```
+
+Note: datalog-ast merged into datalog-parser, datalog-core merged into sql-storage.
 
 ## Target Architecture (8 crates)
 
@@ -178,18 +178,16 @@ fn stratify(rules: &[Rule]) -> Result<Vec<Vec<Rule>>> {
 
 ## Migration Steps
 
-### Phase 1: Merge datalog-ast into datalog-parser
+### Phase 1: Merge datalog-ast into datalog-parser ✓
 - [x] Currently datalog-ast is separate
-- [ ] Fold AST types into datalog-parser (they're tightly coupled)
-- [ ] Update imports in other datalog crates
+- [x] Fold AST types into datalog-parser (they're tightly coupled)
+- [x] Update imports in other datalog crates
 
-### Phase 2: Create unified storage crate
-- [ ] Create new `storage` crate
-- [ ] Define unified `Relation`, `Row`, `Value` types
-- [ ] Port sql-storage functionality
-- [ ] Port datalog-core's Database/HashSet
-- [ ] Update sql-engine to use new storage
-- [ ] Update datalog-eval to use new storage
+### Phase 2: Create unified storage crate ✓
+- [x] Merge datalog-core into sql-storage (keeping sql-storage name)
+- [x] Port datalog-core's FactDatabase, Substitution, ConstantEnv
+- [x] Update all dependent crates to use sql-storage
+- [x] Remove datalog-core from workspace
 
 ### Phase 3: Extend LogicalPlan with recursion
 - [ ] Add `Recursive` variant to LogicalPlan

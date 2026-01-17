@@ -3,8 +3,13 @@ name = "sql-storage"
 version.workspace = true
 edition.workspace = true
 
+[features]
+test-utils = []
+
 [dependencies]
 serde = { workspace = true }
+datalog-parser = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+internment = { workspace = true }

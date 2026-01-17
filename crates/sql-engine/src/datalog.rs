@@ -20,7 +20,7 @@
 //! ```
 
 use datalog_parser::{Atom, Constraint, Literal, Query, Rule, Symbol, Term, Value as DValue, SrcId};
-use datalog_core::FactDatabase;
+use sql_storage::FactDatabase;
 use datalog_eval::{evaluate, EvaluationError};
 use sql_storage::{StorageEngine, Value as SValue};
 

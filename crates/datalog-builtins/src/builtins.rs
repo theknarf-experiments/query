@@ -18,7 +18,7 @@
 //! During grounding, built-ins are evaluated to filter or compute values.
 
 use datalog_parser::{Atom, Term, Value};
-use datalog_core::Substitution;
+use sql_storage::Substitution;
 
 /// Comparison operators
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

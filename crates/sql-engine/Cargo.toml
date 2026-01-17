@@ -13,7 +13,6 @@ csv = { workspace = true }
 
 # Datalog support
 datalog-parser = { path = "../datalog-parser" }
-datalog-core = { path = "../datalog-core" }
 datalog-grounding = { path = "../datalog-grounding" }
 datalog-eval = { path = "../datalog-eval" }
 internment = "0.8"

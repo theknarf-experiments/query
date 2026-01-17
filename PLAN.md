@@ -11,14 +11,21 @@ Unify SQL and Datalog frontends to:
 
 ```
 SQL Frontend:
-sql-parser ──► sql-planner ──► sql-engine ◄── sql-storage (includes Datalog storage)
-                                    │
-                               sql-tests ◄─── sql-wal
+sql-parser ──► sql-planner ──► sql-engine ◄── sql-storage
+                    │               │
+                    │          sql-tests ◄─── sql-wal
+                    │
+                    └── (uses datalog-safety for Datalog compilation)
 
-Datalog Frontend:
-datalog-parser ──► datalog-builtins ──► datalog-grounding
-       │                                      │
-       └──► datalog-safety ──────────► datalog-eval
+Datalog Frontend (two execution paths):
+
+Path 1 - Unified (new):
+datalog-parser ──► sql-planner::datalog ──► sql-engine (Recursive nodes)
+
+Path 2 - Direct (legacy):
+datalog-parser ──► datalog-safety ──► datalog-grounding ──► datalog-eval
+                        │                   │
+                        └── datalog-builtins┘
 ```
 
 Note: datalog-ast merged into datalog-parser, datalog-core merged into sql-storage.
@@ -209,13 +216,17 @@ fn stratify(rules: &[Rule]) -> Result<Vec<Vec<Rule>>> {
 - [x] Execute Stratify nodes in stratum order
 - [x] Add RecursiveRef handling via CTE context
 
-### Phase 6: Clean up old crates
-- [ ] Remove datalog-core (merged into storage)
-- [ ] Remove datalog-safety (merged into planner)
-- [ ] Remove datalog-grounding (merged into planner)
-- [ ] Remove datalog-builtins (merged into engine)
-- [ ] Remove datalog-eval (merged into engine)
-- [ ] Update workspace Cargo.toml
+### Phase 6: Clean up old crates ✓
+- [x] datalog-ast: Removed (merged into datalog-parser in Phase 1)
+- [x] datalog-core: Removed (merged into sql-storage in Phase 2)
+- [x] datalog-safety: Kept (used by sql-planner for compilation)
+- [x] datalog-grounding: Kept (provides alternative eval path)
+- [x] datalog-builtins: Kept (provides alternative eval path)
+- [x] datalog-eval: Kept (provides alternative eval path via Engine::execute_datalog)
+
+Note: The remaining Datalog crates provide two execution paths:
+1. New path: compile_datalog() -> LogicalPlan -> SQL engine (unified)
+2. Legacy path: datalog-eval::evaluate() (direct Datalog evaluation)
 
 ### Phase 7: Add SQL recursive CTE support
 - [ ] Parse WITH RECURSIVE in sql-parser

@@ -11,5 +11,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 csv = { workspace = true }
 
+# Datalog support
+datalog-ast = { path = "../datalog-ast" }
+datalog-parser = { path = "../datalog-parser" }
+datalog-core = { path = "../datalog-core" }
+datalog-grounding = { path = "../datalog-grounding" }
+datalog-eval = { path = "../datalog-eval" }
+internment = "0.8"
+
 [dev-dependencies]
 proptest = { workspace = true }

@@ -232,6 +232,30 @@ impl Engine {
         self.execute_plan(plan)
     }
 
+    /// Execute a Datalog program against the database
+    ///
+    /// Datalog queries can access all existing SQL tables as predicates.
+    /// For example, if you have a table `parent(parent, child)`, you can
+    /// query it with `?- parent(X, Y).`
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut engine = Engine::new();
+    /// engine.execute("CREATE TABLE parent (parent TEXT, child TEXT)");
+    /// engine.execute("INSERT INTO parent VALUES ('john', 'mary')");
+    ///
+    /// // Find transitive closure
+    /// let result = engine.execute_datalog(r#"
+    ///     ancestor(X, Y) :- parent(X, Y).
+    ///     ancestor(X, Z) :- ancestor(X, Y), parent(Y, Z).
+    ///     ?- ancestor(X, Y).
+    /// "#)?;
+    /// ```
+    pub fn execute_datalog(&self, program: &str) -> ExecResult {
+        crate::datalog::execute_datalog_program(&self.storage, program).map_err(ExecError::from)
+    }
+
     /// Execute a logical plan
     fn execute_plan(&mut self, plan: LogicalPlan) -> ExecResult {
         match plan {

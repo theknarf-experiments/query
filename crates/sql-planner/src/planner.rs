@@ -2,9 +2,9 @@
 
 use sql_parser::{
     CallProcedureStatement, CreateIndexStatement, CreateProcedureStatement, CreateTableStatement,
-    CreateTriggerStatement, CreateViewStatement, DeleteStatement, Expr, InsertStatement,
-    SelectColumn, SelectOrSet, SelectStatement, SetOperationStatement, Statement, UpdateStatement,
-    WithClause,
+    CreateTriggerStatement, CreateViewStatement, Cte, CteQuery, CteSetOperation, DeleteStatement,
+    Expr, InsertStatement, SelectColumn, SelectOrSet, SelectStatement, SetOperationStatement,
+    SetOperator, Statement, UpdateStatement, WithClause,
 };
 
 use crate::plan::LogicalPlan;
@@ -90,13 +90,253 @@ fn plan_select(select: SelectStatement) -> PlanResult {
 /// Wrap a plan with CTE if WITH clause is present
 fn wrap_with_cte(plan: LogicalPlan, with_clause: Option<WithClause>) -> PlanResult {
     match with_clause {
+        Some(with) if with.recursive => {
+            // Handle recursive CTEs by compiling to Recursive nodes
+            compile_recursive_ctes(plan, with.ctes)
+        }
         Some(with) => Ok(LogicalPlan::WithCte {
             ctes: with.ctes,
-            recursive: with.recursive,
+            recursive: false,
             input: Box::new(plan),
         }),
         None => Ok(plan),
     }
+}
+
+/// Compile recursive CTEs into appropriate LogicalPlan nodes
+fn compile_recursive_ctes(plan: LogicalPlan, ctes: Vec<Cte>) -> PlanResult {
+    // Find the first recursive CTE (one that references itself)
+    let recursive_idx = ctes.iter().position(cte_references_self);
+
+    match recursive_idx {
+        Some(idx) => {
+            let recursive_cte = &ctes[idx];
+            let pre_ctes: Vec<Cte> = ctes[..idx].to_vec();
+
+            // Compile the recursive CTE into base and step plans
+            let (base, step) = compile_recursive_cte_query(recursive_cte)?;
+
+            // Get column names
+            let columns = recursive_cte.columns.clone();
+
+            Ok(LogicalPlan::WithRecursiveCte {
+                name: recursive_cte.name.clone(),
+                columns,
+                base: Box::new(base),
+                step: Box::new(step),
+                pre_ctes,
+                input: Box::new(plan),
+            })
+        }
+        None => {
+            // No recursive CTEs - just use regular CTE handling
+            Ok(LogicalPlan::WithCte {
+                ctes,
+                recursive: true,
+                input: Box::new(plan),
+            })
+        }
+    }
+}
+
+/// Check if a CTE references itself (is recursive)
+fn cte_references_self(cte: &Cte) -> bool {
+    cte_query_references_table(&cte.query, &cte.name)
+}
+
+/// Check if a CteQuery references a given table name
+fn cte_query_references_table(query: &CteQuery, table_name: &str) -> bool {
+    match query {
+        CteQuery::Select(select) => select_references_table(select, table_name),
+        CteQuery::SetOp(set_op) => {
+            cte_query_references_table(&set_op.left, table_name)
+                || cte_query_references_table(&set_op.right, table_name)
+        }
+    }
+}
+
+/// Check if a SELECT statement references a given table name
+fn select_references_table(query: &SelectStatement, table_name: &str) -> bool {
+    // Check FROM clause
+    if let Some(ref table_ref) = query.from {
+        if table_ref.name == table_name {
+            return true;
+        }
+    }
+
+    // Check JOINs
+    for join in &query.joins {
+        if join.table.name == table_name {
+            return true;
+        }
+    }
+
+    // Check subqueries in WHERE clause
+    if let Some(ref where_clause) = query.where_clause {
+        if expr_references_table(where_clause, table_name) {
+            return true;
+        }
+    }
+
+    // Check nested WITH clause
+    if let Some(ref with) = query.with_clause {
+        for nested_cte in &with.ctes {
+            if cte_query_references_table(&nested_cte.query, table_name) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Check if an expression references a table (via subqueries)
+fn expr_references_table(expr: &Expr, table_name: &str) -> bool {
+    match expr {
+        Expr::Subquery(select) => select_references_table(select, table_name),
+        Expr::InSubquery { subquery, .. } => select_references_table(subquery, table_name),
+        Expr::Exists(select) => select_references_table(select, table_name),
+        Expr::BinaryOp { left, right, .. } => {
+            expr_references_table(left, table_name) || expr_references_table(right, table_name)
+        }
+        Expr::UnaryOp { expr, .. } => expr_references_table(expr, table_name),
+        _ => false,
+    }
+}
+
+/// Compile a recursive CTE query into base and step LogicalPlan nodes
+///
+/// For a proper recursive CTE like:
+///   WITH RECURSIVE x(n) AS (
+///       SELECT 1             -- base case
+///       UNION ALL
+///       SELECT n + 1 FROM x  -- recursive step
+///   )
+///
+/// This function separates the base case (non-recursive) from the step (recursive).
+fn compile_recursive_cte_query(cte: &Cte) -> Result<(LogicalPlan, LogicalPlan), PlanError> {
+    let cte_name = &cte.name;
+
+    match &cte.query {
+        CteQuery::SetOp(set_op) => {
+            // This is a UNION/UNION ALL - separate base and recursive parts
+            let (base_queries, step_queries) = separate_base_and_step(set_op, cte_name);
+
+            if base_queries.is_empty() {
+                return Err(PlanError::InvalidLimit(
+                    "Recursive CTE must have a non-recursive base case".to_string(),
+                ));
+            }
+
+            // Plan base case (union of all non-recursive queries)
+            let base = plan_cte_queries(&base_queries)?;
+
+            // Plan step case (union of all recursive queries)
+            let step = if step_queries.is_empty() {
+                // No recursive step - this shouldn't happen for a recursive CTE
+                LogicalPlan::Scan {
+                    table: "__empty__".to_string(),
+                }
+            } else {
+                plan_cte_queries(&step_queries)?
+            };
+
+            Ok((base, step))
+        }
+        CteQuery::Select(select) => {
+            // Single SELECT that references itself - this is just the step
+            // with an empty base (unusual but handle it)
+            if select_references_table(select, cte_name) {
+                let step = plan_select_core((**select).clone())?;
+                Ok((
+                    LogicalPlan::Scan {
+                        table: "__empty__".to_string(),
+                    },
+                    step,
+                ))
+            } else {
+                // Not actually recursive
+                let base = plan_select_core((**select).clone())?;
+                Ok((
+                    base,
+                    LogicalPlan::Scan {
+                        table: "__empty__".to_string(),
+                    },
+                ))
+            }
+        }
+    }
+}
+
+/// Separate a CTE set operation into base (non-recursive) and step (recursive) queries
+fn separate_base_and_step(
+    set_op: &CteSetOperation,
+    cte_name: &str,
+) -> (Vec<SelectStatement>, Vec<SelectStatement>) {
+    let mut base_queries = Vec::new();
+    let mut step_queries = Vec::new();
+
+    collect_union_members(
+        &CteQuery::SetOp(Box::new(set_op.clone())),
+        cte_name,
+        &mut base_queries,
+        &mut step_queries,
+    );
+
+    (base_queries, step_queries)
+}
+
+/// Recursively collect all SELECT statements from a CteQuery, categorizing them
+fn collect_union_members(
+    query: &CteQuery,
+    cte_name: &str,
+    base: &mut Vec<SelectStatement>,
+    step: &mut Vec<SelectStatement>,
+) {
+    match query {
+        CteQuery::Select(select) => {
+            if select_references_table(select, cte_name) {
+                step.push((**select).clone());
+            } else {
+                base.push((**select).clone());
+            }
+        }
+        CteQuery::SetOp(set_op) => {
+            collect_union_members(&set_op.left, cte_name, base, step);
+            collect_union_members(&set_op.right, cte_name, base, step);
+        }
+    }
+}
+
+/// Plan a list of SELECT statements as a UNION ALL
+fn plan_cte_queries(queries: &[SelectStatement]) -> PlanResult {
+    if queries.is_empty() {
+        return Ok(LogicalPlan::Scan {
+            table: "__empty__".to_string(),
+        });
+    }
+
+    let mut plans: Vec<LogicalPlan> = queries
+        .iter()
+        .map(|q| plan_select_core(q.clone()))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if plans.len() == 1 {
+        return Ok(plans.remove(0));
+    }
+
+    // Combine with UNION ALL
+    let mut result = plans.remove(0);
+    for plan in plans {
+        result = LogicalPlan::SetOperation {
+            left: Box::new(result),
+            right: Box::new(plan),
+            op: SetOperator::Union,
+            all: true,
+        };
+    }
+
+    Ok(result)
 }
 
 /// Plan the core of a SELECT statement (without CTE handling)

@@ -89,8 +89,30 @@ pub struct Cte {
     pub name: String,
     /// Optional column names
     pub columns: Option<Vec<String>>,
-    /// The query defining the CTE
-    pub query: Box<SelectStatement>,
+    /// The query defining the CTE (can be SELECT or UNION/INTERSECT/EXCEPT)
+    pub query: CteQuery,
+}
+
+/// A CTE query - either a simple SELECT or a set operation
+#[derive(Debug, Clone, PartialEq)]
+pub enum CteQuery {
+    /// Simple SELECT statement
+    Select(Box<SelectStatement>),
+    /// Set operation (UNION, INTERSECT, EXCEPT)
+    SetOp(Box<CteSetOperation>),
+}
+
+/// A set operation within a CTE (similar to SetOperationStatement but recursive)
+#[derive(Debug, Clone, PartialEq)]
+pub struct CteSetOperation {
+    /// Left side of the operation
+    pub left: CteQuery,
+    /// Right side of the operation
+    pub right: CteQuery,
+    /// The type of set operation
+    pub op: SetOperator,
+    /// Whether to keep duplicates (UNION ALL, etc.)
+    pub all: bool,
 }
 
 /// WITH clause containing CTEs

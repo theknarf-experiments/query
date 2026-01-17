@@ -1055,6 +1055,80 @@ mod cte {
         );
         assert_eq!(rows.len(), 2);
     }
+
+    #[test]
+    fn test_recursive_cte_simple_sequence() {
+        // Generate numbers 1 to 5 using recursive CTE
+        let mut engine = Engine::new();
+
+        let rows = query_rows(
+            &mut engine,
+            "WITH RECURSIVE nums(n) AS (
+                SELECT 1
+                UNION ALL
+                SELECT n + 1 FROM nums WHERE n < 5
+            ) SELECT n FROM nums",
+        );
+
+        assert_eq!(rows.len(), 5);
+        // Check we got 1, 2, 3, 4, 5
+        let values: Vec<i64> = rows
+            .iter()
+            .map(|r| match &r[0] {
+                Value::Int(i) => *i,
+                _ => panic!("Expected Int"),
+            })
+            .collect();
+        assert!(values.contains(&1));
+        assert!(values.contains(&2));
+        assert!(values.contains(&3));
+        assert!(values.contains(&4));
+        assert!(values.contains(&5));
+    }
+
+    #[test]
+    fn test_recursive_cte_graph_traversal() {
+        // Test graph traversal: find all nodes reachable from node 1
+        let mut engine = Engine::new();
+        exec(&mut engine, "CREATE TABLE edges (src INT, dst INT)");
+        exec(&mut engine, "INSERT INTO edges VALUES (1, 2)");
+        exec(&mut engine, "INSERT INTO edges VALUES (2, 3)");
+        exec(&mut engine, "INSERT INTO edges VALUES (3, 4)");
+        exec(&mut engine, "INSERT INTO edges VALUES (1, 5)");
+
+        let rows = query_rows(
+            &mut engine,
+            "WITH RECURSIVE reachable(node) AS (
+                SELECT 1
+                UNION ALL
+                SELECT e.dst FROM edges e JOIN reachable r ON e.src = r.node
+            ) SELECT node FROM reachable",
+        );
+
+        // Should find 1, 2, 3, 4, 5
+        assert_eq!(rows.len(), 5);
+    }
+
+    #[test]
+    fn test_recursive_cte_fibonacci() {
+        // Test recursive CTE with arithmetic: Fibonacci sequence
+        let mut engine = Engine::new();
+
+        let rows = query_rows(
+            &mut engine,
+            "WITH RECURSIVE fib(a, b) AS (
+                SELECT 0, 1
+                UNION ALL
+                SELECT b, a + b FROM fib WHERE b < 50
+            ) SELECT a FROM fib",
+        );
+
+        // Should generate Fibonacci numbers: 0, 1, 1, 2, 3, 5, 8, 13, 21, 34
+        assert!(rows.len() >= 8); // At least 8 Fibonacci numbers before reaching 50
+
+        // First value should be 0
+        assert_eq!(rows[0][0], Value::Int(0));
+    }
 }
 
 // =============================================================================

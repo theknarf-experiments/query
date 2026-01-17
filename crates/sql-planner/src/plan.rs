@@ -147,7 +147,6 @@ pub enum LogicalPlan {
     CallProcedure { name: String, args: Vec<Expr> },
 
     // ===== Recursive query support (for Datalog and SQL recursive CTEs) =====
-
     /// Recursive fixpoint evaluation
     ///
     /// Evaluates a recursive query using semi-naive evaluation:
@@ -183,5 +182,25 @@ pub enum LogicalPlan {
     RecursiveRef {
         /// Name of the recursive relation to reference
         name: String,
+    },
+
+    /// WITH RECURSIVE CTE - computes a recursive CTE and binds it for the main query
+    ///
+    /// This is a high-level node that combines:
+    /// 1. Computing the recursive CTE using semi-naive evaluation
+    /// 2. Binding the result as a CTE for the main query
+    WithRecursiveCte {
+        /// Name of the recursive CTE
+        name: String,
+        /// Column names for the CTE (optional)
+        columns: Option<Vec<String>>,
+        /// The base case plan (non-recursive part)
+        base: Box<LogicalPlan>,
+        /// The recursive step plan (references the CTE name)
+        step: Box<LogicalPlan>,
+        /// Non-recursive CTEs defined before this one
+        pre_ctes: Vec<sql_parser::Cte>,
+        /// The main query that uses the CTE
+        input: Box<LogicalPlan>,
     },
 }

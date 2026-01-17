@@ -16,9 +16,9 @@
 //! // Returns: [{X -> john}, {X -> alice}]
 //! ```
 
+use datalog_grounding::satisfy_body;
 use datalog_parser::{Query, Symbol};
 use sql_storage::{FactDatabase, Substitution};
-use datalog_grounding::satisfy_body;
 use std::collections::HashSet;
 
 /// Result of query evaluation - list of substitutions that satisfy the query

@@ -19,8 +19,8 @@
 //! let groundings = ground_rule(&rule, &db, &const_env);
 //! ```
 
-use datalog_parser::{Atom, Literal, Rule, Term};
 use datalog_builtins as builtins;
+use datalog_parser::{Atom, Literal, Rule, Term};
 use sql_storage::{FactDatabase, Substitution};
 
 #[cfg(test)]

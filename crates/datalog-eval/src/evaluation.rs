@@ -12,10 +12,10 @@
 //! let result = evaluate(&rules, &constraints, initial_facts)?;
 //! ```
 
-use datalog_parser::{Constraint, Rule};
-use sql_storage::{FactDatabase, InsertError};
 use datalog_grounding::{ground_rule, ground_rule_semi_naive, satisfy_body};
+use datalog_parser::{Constraint, Rule};
 use datalog_safety::{check_program_safety, stratify, SafetyError, StratificationError};
+use sql_storage::{FactDatabase, InsertError};
 
 /// Errors that can occur during evaluation
 #[derive(Debug, Clone, PartialEq, Eq)]

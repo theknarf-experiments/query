@@ -228,10 +228,10 @@ Note: The remaining Datalog crates provide two execution paths:
 1. New path: compile_datalog() -> LogicalPlan -> SQL engine (unified)
 2. Legacy path: datalog-eval::evaluate() (direct Datalog evaluation)
 
-### Phase 7: Add SQL recursive CTE support
-- [ ] Parse WITH RECURSIVE in sql-parser
-- [ ] Compile recursive CTEs to Recursive LogicalPlan
-- [ ] Verify shared semi-naive execution works
+### Phase 7: Add SQL recursive CTE support ✓
+- [x] Parse WITH RECURSIVE in sql-parser (extended CTE query to support UNION)
+- [x] Compile recursive CTEs to Recursive LogicalPlan (WithRecursiveCte node)
+- [x] Verify shared semi-naive execution works (tests pass for sequences, graphs, Fibonacci)
 
 ## Testing Strategy
 

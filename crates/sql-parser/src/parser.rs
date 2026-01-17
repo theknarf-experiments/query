@@ -93,7 +93,7 @@ fn statement_parser() -> impl Parser<Token, Statement, Error = Simple<Token>> {
         .boxed()
 }
 
-/// Parse a single CTE definition: name [(columns)] AS (SELECT ...)
+/// Parse a single CTE definition: name [(columns)] AS (SELECT ... [UNION ...])
 fn cte_parser() -> impl Parser<Token, Cte, Error = Simple<Token>> {
     let column_names = identifier()
         .separated_by(just(Token::Comma))
@@ -104,11 +104,43 @@ fn cte_parser() -> impl Parser<Token, Cte, Error = Simple<Token>> {
     identifier()
         .then(column_names)
         .then_ignore(just(Token::Keyword(Keyword::As)))
-        .then(select_parser().delimited_by(just(Token::LParen), just(Token::RParen)))
+        .then(cte_query_parser().delimited_by(just(Token::LParen), just(Token::RParen)))
         .map(|((name, columns), query)| Cte {
             name,
             columns,
-            query: Box::new(query),
+            query,
+        })
+}
+
+/// Parse a CTE query (SELECT possibly followed by UNION/INTERSECT/EXCEPT)
+fn cte_query_parser() -> impl Parser<Token, CteQuery, Error = Simple<Token>> {
+    // Parse set operator (UNION, INTERSECT, EXCEPT) with optional ALL
+    let set_op = just(Token::Keyword(Keyword::Union))
+        .to(SetOperator::Union)
+        .or(just(Token::Keyword(Keyword::Intersect)).to(SetOperator::Intersect))
+        .or(just(Token::Keyword(Keyword::Except)).to(SetOperator::Except))
+        .then(just(Token::Keyword(Keyword::All)).or_not())
+        .map(|(op, all)| (op, all.is_some()));
+
+    // Parse SELECT possibly followed by set operations
+    select_parser()
+        .then(set_op.then(select_parser()).repeated())
+        .map(|(first, set_ops)| {
+            if set_ops.is_empty() {
+                CteQuery::Select(Box::new(first))
+            } else {
+                // Build the set operation chain
+                let mut current = CteQuery::Select(Box::new(first));
+                for ((op, all), select) in set_ops {
+                    current = CteQuery::SetOp(Box::new(CteSetOperation {
+                        left: current,
+                        right: CteQuery::Select(Box::new(select)),
+                        op,
+                        all,
+                    }));
+                }
+                current
+            }
         })
 }
 
@@ -560,14 +592,16 @@ fn select_parser_impl(
 
 /// Parse a SELECT column (either * or expression with optional alias)
 fn select_column_parser() -> BoxedParser<'static, Token, SelectColumn, Simple<Token>> {
-    just(Token::Star).to(SelectColumn::Star).or(expr_parser()
-        .then(
-            just(Token::Keyword(Keyword::As))
-                .ignore_then(identifier())
-                .or_not(),
-        )
-        .map(|(expr, alias)| SelectColumn::Expr { expr, alias }))
-    .boxed()
+    just(Token::Star)
+        .to(SelectColumn::Star)
+        .or(expr_parser()
+            .then(
+                just(Token::Keyword(Keyword::As))
+                    .ignore_then(identifier())
+                    .or_not(),
+            )
+            .map(|(expr, alias)| SelectColumn::Expr { expr, alias }))
+        .boxed()
 }
 
 /// Parse a table reference
@@ -970,7 +1004,8 @@ fn subquery_select_parser() -> BoxedParser<'static, Token, SelectStatement, Simp
     subquery_select_parser_impl().boxed()
 }
 
-fn subquery_select_parser_impl() -> impl Parser<Token, SelectStatement, Error = Simple<Token>> + Clone {
+fn subquery_select_parser_impl(
+) -> impl Parser<Token, SelectStatement, Error = Simple<Token>> + Clone {
     let select_kw = just(Token::Keyword(Keyword::Select));
     let from_kw = just(Token::Keyword(Keyword::From));
     let where_kw = just(Token::Keyword(Keyword::Where));

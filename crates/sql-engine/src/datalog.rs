@@ -19,9 +19,11 @@
 //! "#)?;
 //! ```
 
-use datalog_parser::{Atom, Constraint, Literal, Query, Rule, Symbol, Term, Value as DValue, SrcId};
-use sql_storage::FactDatabase;
 use datalog_eval::{evaluate, EvaluationError};
+use datalog_parser::{
+    Atom, Constraint, Literal, Query, Rule, SrcId, Symbol, Term, Value as DValue,
+};
+use sql_storage::FactDatabase;
 use sql_storage::{StorageEngine, Value as SValue};
 
 use crate::{ExecError, QueryResult};

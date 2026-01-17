@@ -897,9 +897,8 @@ impl Engine {
         cte: &Cte,
         ctx: &CteContext,
     ) -> Result<(Vec<String>, Vec<Vec<Value>>), ExecError> {
-        // Plan and execute the CTE query
-        let plan = sql_planner::plan(Statement::Select(cte.query.clone()))
-            .map_err(|_| ExecError::InvalidExpression("Failed to plan CTE query".to_string()))?;
+        // Plan and execute the CTE query based on its type
+        let plan = self.plan_cte_query(&cte.query)?;
 
         let result = self.execute_query_with_cte(plan, ctx)?;
 
@@ -917,6 +916,37 @@ impl Engine {
                 "CTE query must be a SELECT".to_string(),
             )),
         }
+    }
+
+    /// Plan a CTE query (handles both simple SELECT and set operations)
+    fn plan_cte_query(&self, query: &sql_parser::CteQuery) -> Result<LogicalPlan, ExecError> {
+        match query {
+            sql_parser::CteQuery::Select(select) => {
+                sql_planner::plan(Statement::Select(select.clone())).map_err(|_| {
+                    ExecError::InvalidExpression("Failed to plan CTE SELECT".to_string())
+                })
+            }
+            sql_parser::CteQuery::SetOp(set_op) => {
+                // Convert CteSetOperation to a LogicalPlan SetOperation
+                self.plan_cte_set_op(set_op)
+            }
+        }
+    }
+
+    /// Plan a CTE set operation (UNION/INTERSECT/EXCEPT within a CTE)
+    fn plan_cte_set_op(
+        &self,
+        set_op: &sql_parser::CteSetOperation,
+    ) -> Result<LogicalPlan, ExecError> {
+        let left = self.plan_cte_query(&set_op.left)?;
+        let right = self.plan_cte_query(&set_op.right)?;
+
+        Ok(LogicalPlan::SetOperation {
+            left: Box::new(left),
+            right: Box::new(right),
+            op: set_op.op.clone(),
+            all: set_op.all,
+        })
     }
 
     /// Execute a SELECT query with CTE context
@@ -937,6 +967,21 @@ impl Engine {
                 self.execute_query_with_cte(*input, &ctx)
             }
             LogicalPlan::Scan { table } => {
+                // Handle special virtual tables
+                if table == "dual" || table == "__empty__" {
+                    // "dual" is a virtual single-row table for SELECT without FROM
+                    // "__empty__" is used for empty base cases
+                    let rows = if table == "dual" {
+                        vec![vec![Value::Null]] // Single row with a dummy value
+                    } else {
+                        vec![] // Empty table
+                    };
+                    return Ok(QueryResult::Select {
+                        columns: vec!["DUMMY".to_string()],
+                        rows,
+                    });
+                }
+
                 // Check if this is a CTE reference first
                 if let Some((columns, rows)) = cte_ctx.ctes.get(&table) {
                     return Ok(QueryResult::Select {
@@ -1463,7 +1508,11 @@ impl Engine {
                 let base_result = self.execute_query_with_cte(*base, cte_ctx)?;
                 let (base_cols, base_rows) = match base_result {
                     QueryResult::Select { columns, rows } => (columns, rows),
-                    _ => return Err(ExecError::InvalidExpression("Recursive base must be a query".to_string())),
+                    _ => {
+                        return Err(ExecError::InvalidExpression(
+                            "Recursive base must be a query".to_string(),
+                        ))
+                    }
                 };
 
                 // Initialize result with base case
@@ -1480,13 +1529,20 @@ impl Engine {
                     }
 
                     // Bind delta to the recursive relation for this iteration
-                    recursive_ctx.ctes.insert(name.clone(), (columns.clone(), delta.clone()));
+                    recursive_ctx
+                        .ctes
+                        .insert(name.clone(), (columns.clone(), delta.clone()));
 
                     // Execute step
-                    let step_result = self.execute_query_with_cte((*step).clone(), &recursive_ctx)?;
+                    let step_result =
+                        self.execute_query_with_cte((*step).clone(), &recursive_ctx)?;
                     let new_rows = match step_result {
                         QueryResult::Select { rows, .. } => rows,
-                        _ => return Err(ExecError::InvalidExpression("Recursive step must be a query".to_string())),
+                        _ => {
+                            return Err(ExecError::InvalidExpression(
+                                "Recursive step must be a query".to_string(),
+                            ))
+                        }
                     };
 
                     // Delta = new rows not already in result
@@ -1503,7 +1559,11 @@ impl Engine {
                 }
 
                 Ok(QueryResult::Select {
-                    columns: if base_cols.is_empty() { columns } else { base_cols },
+                    columns: if base_cols.is_empty() {
+                        columns
+                    } else {
+                        base_cols
+                    },
                     rows: result_rows,
                 })
             }
@@ -1529,8 +1589,88 @@ impl Engine {
                         rows: rows.clone(),
                     })
                 } else {
-                    Err(ExecError::TableNotFound(format!("Recursive relation '{}' not found", name)))
+                    Err(ExecError::TableNotFound(format!(
+                        "Recursive relation '{}' not found",
+                        name
+                    )))
                 }
+            }
+            // WITH RECURSIVE CTE - compute recursive result and bind as CTE
+            LogicalPlan::WithRecursiveCte {
+                name,
+                columns,
+                base,
+                step,
+                pre_ctes,
+                input,
+            } => {
+                // First, materialize any pre-CTEs
+                let mut ctx = cte_ctx.clone();
+                for cte in pre_ctes {
+                    let cte_result = self.execute_cte(&cte, &ctx)?;
+                    ctx.ctes.insert(cte.name.clone(), cte_result);
+                }
+
+                // Execute recursive CTE using semi-naive evaluation
+                // Execute base case
+                let base_result = self.execute_query_with_cte(*base, &ctx)?;
+                let (base_cols, base_rows) = match base_result {
+                    QueryResult::Select { columns, rows } => (columns, rows),
+                    _ => {
+                        return Err(ExecError::InvalidExpression(
+                            "Recursive base must be a query".to_string(),
+                        ))
+                    }
+                };
+
+                // Use explicit column names if provided, otherwise use base columns
+                let cte_columns = columns.unwrap_or(base_cols);
+
+                // Initialize result with base case
+                let mut result_rows = base_rows.clone();
+                let mut delta = base_rows;
+
+                // Create extended CTE context with the recursive relation
+                let mut recursive_ctx = ctx.clone();
+
+                // Iterate until fixpoint
+                loop {
+                    if delta.is_empty() {
+                        break;
+                    }
+
+                    // Bind current delta as the recursive relation
+                    recursive_ctx
+                        .ctes
+                        .insert(name.clone(), (cte_columns.clone(), delta.clone()));
+
+                    // Execute step
+                    let step_result =
+                        self.execute_query_with_cte((*step).clone(), &recursive_ctx)?;
+                    let new_rows = match step_result {
+                        QueryResult::Select { rows, .. } => rows,
+                        _ => {
+                            return Err(ExecError::InvalidExpression(
+                                "Recursive step must be a query".to_string(),
+                            ))
+                        }
+                    };
+
+                    // Compute delta: new rows not already in result
+                    delta = new_rows
+                        .into_iter()
+                        .filter(|row| !result_rows.contains(row))
+                        .collect();
+
+                    // Add new rows to result
+                    result_rows.extend(delta.clone());
+                }
+
+                // Bind the final result as a CTE and execute the main query
+                recursive_ctx
+                    .ctes
+                    .insert(name.clone(), (cte_columns.clone(), result_rows));
+                self.execute_query_with_cte(*input, &recursive_ctx)
             }
             _ => Err(ExecError::InvalidExpression("Unsupported plan".to_string())),
         }

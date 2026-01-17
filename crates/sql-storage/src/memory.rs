@@ -103,7 +103,25 @@ impl StorageEngine for MemoryEngine {
 
         let original_len = table_data.rows.len();
         table_data.rows.retain(|row| !predicate(row));
-        Ok(original_len - table_data.rows.len())
+        let deleted_count = original_len - table_data.rows.len();
+
+        // Rebuild indexes for this table since row positions have shifted
+        if deleted_count > 0 {
+            let table_data = self.tables.get(table).unwrap();
+            for index in self.indexes.values_mut() {
+                if index.table == table {
+                    index.entries.clear();
+                    for (row_idx, row) in table_data.rows.iter().enumerate() {
+                        if let Some(val) = row.get(index.column_idx) {
+                            let hash = value_hash(val);
+                            index.entries.entry(hash).or_default().push(row_idx);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(deleted_count)
     }
 
     fn table_names(&self) -> Vec<String> {
@@ -448,5 +466,84 @@ mod tests {
         assert_eq!(deleted, 1);
         let rows = engine.scan("users").unwrap();
         assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn test_delete_rebuilds_index() {
+        // This test verifies that DELETE correctly rebuilds indexes.
+        // After deleting a row, the index entries should point to correct positions.
+        let mut engine = MemoryEngine::new();
+        let schema = create_users_schema();
+        engine.create_table(schema).unwrap();
+
+        // Insert three rows: Alice (0), Bob (1), Charlie (2)
+        engine
+            .insert(
+                "users",
+                vec![Value::Int(1), Value::Text("Alice".to_string())],
+            )
+            .unwrap();
+        engine
+            .insert("users", vec![Value::Int(2), Value::Text("Bob".to_string())])
+            .unwrap();
+        engine
+            .insert(
+                "users",
+                vec![Value::Int(3), Value::Text("Charlie".to_string())],
+            )
+            .unwrap();
+
+        // Create index on name column
+        engine.create_index("users", "name", "idx_name").unwrap();
+
+        // Verify index works before delete
+        let alice_indices = engine
+            .index_lookup("users", "name", &Value::Text("Alice".to_string()))
+            .unwrap();
+        let alice_rows = engine.get_rows_by_indices("users", &alice_indices).unwrap();
+        assert_eq!(alice_rows.len(), 1);
+        assert_eq!(alice_rows[0][1], Value::Text("Alice".to_string()));
+
+        let charlie_indices = engine
+            .index_lookup("users", "name", &Value::Text("Charlie".to_string()))
+            .unwrap();
+        let charlie_rows = engine
+            .get_rows_by_indices("users", &charlie_indices)
+            .unwrap();
+        assert_eq!(charlie_rows.len(), 1);
+        assert_eq!(charlie_rows[0][1], Value::Text("Charlie".to_string()));
+
+        // Delete Bob (middle row) - this shifts Charlie from index 2 to index 1
+        let deleted = engine
+            .delete("users", |row| matches!(&row[0], Value::Int(id) if *id == 2))
+            .unwrap();
+        assert_eq!(deleted, 1);
+
+        // Verify scan still works (rows are correct)
+        let all_rows = engine.scan("users").unwrap();
+        assert_eq!(all_rows.len(), 2);
+        assert_eq!(all_rows[0][1], Value::Text("Alice".to_string()));
+        assert_eq!(all_rows[1][1], Value::Text("Charlie".to_string()));
+
+        // Now the bug: Charlie's index still points to position 2, but Charlie is now at position 1
+        // Index lookup for Charlie returns [2], but row[2] doesn't exist!
+        let charlie_indices_after = engine
+            .index_lookup("users", "name", &Value::Text("Charlie".to_string()))
+            .unwrap();
+        let charlie_rows_after = engine
+            .get_rows_by_indices("users", &charlie_indices_after)
+            .unwrap();
+
+        // Index lookup should correctly return Charlie's row after delete
+        assert_eq!(
+            charlie_rows_after.len(),
+            1,
+            "Index should return exactly one row for Charlie"
+        );
+        assert_eq!(
+            charlie_rows_after[0][1],
+            Value::Text("Charlie".to_string()),
+            "Index lookup for Charlie should return Charlie's row, not nothing or wrong data"
+        );
     }
 }

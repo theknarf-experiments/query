@@ -203,11 +203,11 @@ fn stratify(rules: &[Rule]) -> Result<Vec<Vec<Rule>>> {
 - [x] Use safety checking from datalog-safety
 - [x] Use stratification for negation handling (Stratify nodes)
 
-### Phase 5: Add semi-naive execution to engine
-- [ ] Port semi-naive algorithm from datalog-eval
-- [ ] Execute Recursive nodes with fixpoint iteration
-- [ ] Execute Stratify nodes in stratum order
-- [ ] Port builtin predicates from datalog-builtins
+### Phase 5: Add semi-naive execution to engine ✓
+- [x] Add semi-naive evaluation for Recursive nodes
+- [x] Execute Recursive nodes with fixpoint iteration (delta-based)
+- [x] Execute Stratify nodes in stratum order
+- [x] Add RecursiveRef handling via CTE context
 
 ### Phase 6: Clean up old crates
 - [ ] Remove datalog-core (merged into storage)

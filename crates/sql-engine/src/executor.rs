@@ -1452,6 +1452,86 @@ impl Engine {
                     other => Ok(other),
                 }
             }
+            // Recursive query evaluation (semi-naive)
+            LogicalPlan::Recursive {
+                name,
+                columns,
+                base,
+                step,
+            } => {
+                // Execute base case
+                let base_result = self.execute_query_with_cte(*base, cte_ctx)?;
+                let (base_cols, base_rows) = match base_result {
+                    QueryResult::Select { columns, rows } => (columns, rows),
+                    _ => return Err(ExecError::InvalidExpression("Recursive base must be a query".to_string())),
+                };
+
+                // Initialize result with base case
+                let mut result_rows = base_rows.clone();
+                let mut delta = base_rows;
+
+                // Create extended CTE context with the recursive relation
+                let mut recursive_ctx = cte_ctx.clone();
+
+                // Iterate until fixpoint
+                loop {
+                    if delta.is_empty() {
+                        break;
+                    }
+
+                    // Bind delta to the recursive relation for this iteration
+                    recursive_ctx.ctes.insert(name.clone(), (columns.clone(), delta.clone()));
+
+                    // Execute step
+                    let step_result = self.execute_query_with_cte((*step).clone(), &recursive_ctx)?;
+                    let new_rows = match step_result {
+                        QueryResult::Select { rows, .. } => rows,
+                        _ => return Err(ExecError::InvalidExpression("Recursive step must be a query".to_string())),
+                    };
+
+                    // Delta = new rows not already in result
+                    let mut new_delta = Vec::new();
+                    for row in new_rows {
+                        if !result_rows.contains(&row) && !new_delta.contains(&row) {
+                            new_delta.push(row);
+                        }
+                    }
+
+                    // Add new delta to result
+                    result_rows.extend(new_delta.clone());
+                    delta = new_delta;
+                }
+
+                Ok(QueryResult::Select {
+                    columns: if base_cols.is_empty() { columns } else { base_cols },
+                    rows: result_rows,
+                })
+            }
+            // Stratified evaluation for negation
+            LogicalPlan::Stratify { strata } => {
+                // Execute each stratum in order
+                let mut final_result = QueryResult::Select {
+                    columns: vec![],
+                    rows: vec![],
+                };
+
+                for stratum in strata {
+                    final_result = self.execute_query_with_cte(stratum, cte_ctx)?;
+                }
+
+                Ok(final_result)
+            }
+            // Reference to recursive relation (resolved via CTE context)
+            LogicalPlan::RecursiveRef { name } => {
+                if let Some((columns, rows)) = cte_ctx.ctes.get(&name) {
+                    Ok(QueryResult::Select {
+                        columns: columns.clone(),
+                        rows: rows.clone(),
+                    })
+                } else {
+                    Err(ExecError::TableNotFound(format!("Recursive relation '{}' not found", name)))
+                }
+            }
             _ => Err(ExecError::InvalidExpression("Unsupported plan".to_string())),
         }
     }

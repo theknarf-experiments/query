@@ -195,13 +195,13 @@ fn stratify(rules: &[Rule]) -> Result<Vec<Vec<Rule>>> {
 - [x] Add `RecursiveRef` variant for referencing recursive relations
 - [x] Keep existing sql-planner functionality
 
-### Phase 4: Add Datalog → LogicalPlan compilation
-- [ ] Create datalog-to-plan module in planner
-- [ ] Compile Datalog atoms to Scan/Filter
-- [ ] Compile rule bodies to Join chains
-- [ ] Compile recursive rules to Recursive nodes
-- [ ] Port safety checking from datalog-safety
-- [ ] Port stratification from datalog-grounding
+### Phase 4: Add Datalog → LogicalPlan compilation ✓
+- [x] Create datalog-to-plan module in planner (sql-planner/src/datalog.rs)
+- [x] Compile Datalog atoms to Scan nodes
+- [x] Compile rule bodies to Join chains with Projection
+- [x] Compile recursive rules to Recursive nodes
+- [x] Use safety checking from datalog-safety
+- [x] Use stratification for negation handling (Stratify nodes)
 
 ### Phase 5: Add semi-naive execution to engine
 - [ ] Port semi-naive algorithm from datalog-eval

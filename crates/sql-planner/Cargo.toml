@@ -5,6 +5,9 @@ edition.workspace = true
 
 [dependencies]
 sql-parser = { workspace = true }
+datalog-parser = { workspace = true }
+datalog-safety = { path = "../datalog-safety" }
 
 [dev-dependencies]
 proptest = { workspace = true }
+internment = { workspace = true }

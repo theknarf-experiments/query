@@ -1,9 +1,9 @@
 //! SQL Parser implementation using Chumsky 0.9
 
 use chumsky::prelude::*;
-use sql_lexer::{Keyword, Span, Token};
 
 use crate::ast::*;
+use crate::lexer::{Keyword, Span, Token};
 
 /// Parse result type
 pub type ParseResult = Result<Statement, Vec<ParseError>>;
@@ -18,7 +18,7 @@ pub struct ParseError {
 /// Parse a SQL string into a Statement
 pub fn parse(input: &str) -> ParseResult {
     // First, lex the input
-    let tokens = sql_lexer::lexer(input).map_err(|errs| {
+    let tokens = crate::lexer::lexer(input).map_err(|errs| {
         errs.into_iter()
             .map(|e| ParseError {
                 message: e.message,

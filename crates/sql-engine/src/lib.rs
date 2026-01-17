@@ -10,7 +10,6 @@ pub use io::{
     export_csv, export_json, import_csv, import_json, ExportData, ExportError, ImportData,
     ImportError,
 };
-pub use sql_lexer;
 pub use sql_parser;
 pub use sql_planner;
 pub use sql_storage;

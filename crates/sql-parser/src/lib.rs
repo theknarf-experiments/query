@@ -1,9 +1,18 @@
 //! SQL Parser using Chumsky
 //!
-//! This crate parses token streams into an AST.
+//! This crate provides a two-phase SQL parsing pipeline:
+//! 1. Lexing: Converting raw SQL text into tokens
+//! 2. Parsing: Converting tokens into an Abstract Syntax Tree (AST)
 
 pub mod ast;
+pub mod lexer;
 pub mod parser;
 
+// Re-export AST types
 pub use ast::*;
+
+// Re-export lexer types
+pub use lexer::{lexer, FloatBits, Keyword, LexError, LexResult, Span, Token};
+
+// Re-export parser types
 pub use parser::{parse, ParseError, ParseResult};

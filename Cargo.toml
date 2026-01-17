@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/sql-lexer",
     "crates/sql-parser",
     "crates/sql-planner",
     "crates/sql-storage",
@@ -22,7 +21,6 @@ chumsky = "0.9"
 ariadne = "0.4"
 
 # Internal crates
-sql-lexer = { path = "crates/sql-lexer" }
 sql-parser = { path = "crates/sql-parser" }
 sql-planner = { path = "crates/sql-planner" }
 sql-storage = { path = "crates/sql-storage" }

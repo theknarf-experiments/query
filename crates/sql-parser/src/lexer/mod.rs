@@ -1,13 +1,13 @@
 //! SQL Lexer using Chumsky
 //!
-//! This crate provides lexical analysis for SQL statements,
+//! This module provides lexical analysis for SQL statements,
 //! converting raw SQL text into a stream of tokens.
 
-mod lexer;
+mod lex;
 mod span;
 mod token;
 
-pub use lexer::lexer;
+pub use lex::lexer;
 pub use span::Span;
 pub use token::{FloatBits, Keyword, Token};
 

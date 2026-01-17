@@ -1,7 +1,8 @@
 //! SQL Lexer implementation using Chumsky 0.9
 
-use crate::token::FloatBits;
-use crate::{Keyword, LexError, LexResult, Span, Token};
+use super::span::Span;
+use super::token::{FloatBits, Keyword, Token};
+use super::{LexError, LexResult};
 use chumsky::prelude::*;
 
 /// Create the SQL lexer

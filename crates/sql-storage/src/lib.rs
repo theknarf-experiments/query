@@ -21,5 +21,5 @@ pub use value::{DateValue, TimeValue, TimestampValue, Value};
 
 // Re-export Datalog storage types
 pub use datalog_constants::ConstantEnv;
-pub use datalog_database::{FactDatabase, InsertError};
+pub use datalog_database::{FactDatabase, InsertError, PredicateSchema};
 pub use datalog_unification::{unify, unify_atoms, Substitution};

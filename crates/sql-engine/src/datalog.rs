@@ -24,7 +24,7 @@ use datalog_parser::{
     Atom, Constraint, Literal, Query, Rule, SrcId, Symbol, Term, Value as DValue,
 };
 use sql_storage::FactDatabase;
-use sql_storage::{StorageEngine, Value as SValue};
+use sql_storage::{PredicateSchema, StorageEngine, Value as SValue};
 
 use crate::{ExecError, QueryResult};
 
@@ -111,11 +111,23 @@ fn term_to_sql_value(term: &Term) -> Option<SValue> {
 }
 
 /// Load a SQL table into a Datalog FactDatabase
+///
+/// This also registers the table's schema with the FactDatabase,
+/// enabling arity validation for facts loaded from SQL tables.
 pub fn load_table_as_facts<S: StorageEngine>(
     storage: &S,
     table: &str,
     db: &mut FactDatabase,
 ) -> Result<(), DatalogError> {
+    // Get schema from storage and register it
+    let table_schema = storage
+        .get_schema(table)
+        .map_err(|_| DatalogError::TableNotFound(table.to_string()))?;
+
+    let pred_schema = PredicateSchema::from_table_schema(table_schema);
+    db.register_schema(pred_schema);
+
+    // Load rows as facts
     let rows = storage
         .scan(table)
         .map_err(|_| DatalogError::TableNotFound(table.to_string()))?;
@@ -130,8 +142,9 @@ pub fn load_table_as_facts<S: StorageEngine>(
 
         let atom = Atom { predicate, terms };
 
-        // Ignore insert errors (e.g., duplicates)
-        let _ = db.insert(atom);
+        // Insert fact - errors are propagated (includes arity validation)
+        db.insert(atom)
+            .map_err(|e| DatalogError::EvaluationError(format!("{}", e)))?;
     }
 
     Ok(())

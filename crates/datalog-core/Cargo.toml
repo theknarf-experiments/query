@@ -7,7 +7,7 @@ edition = "2021"
 test-utils = []
 
 [dependencies]
-datalog-ast = { path = "../datalog-ast" }
+datalog-parser = { path = "../datalog-parser" }
 
 [dev-dependencies]
 internment = "0.8"

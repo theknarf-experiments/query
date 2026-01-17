@@ -21,7 +21,7 @@
 //! // Unsafe: bad(X) :- not good(X).  // X appears only in negation
 //! ```
 
-use datalog_ast::{Atom, Literal, Rule, Symbol, Term};
+use datalog_parser::{Atom, Literal, Rule, Symbol, Term};
 use std::collections::HashSet;
 
 /// Error indicating a rule is unsafe
@@ -149,7 +149,7 @@ fn format_rule(rule: &Rule) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datalog_ast::Value;
+    use datalog_parser::Value;
     use internment::Intern;
 
     fn make_var(name: &str) -> Term {

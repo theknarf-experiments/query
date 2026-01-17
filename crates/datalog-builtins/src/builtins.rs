@@ -17,7 +17,7 @@
 //!
 //! During grounding, built-ins are evaluated to filter or compute values.
 
-use datalog_ast::{Atom, Term, Value};
+use datalog_parser::{Atom, Term, Value};
 use datalog_core::Substitution;
 
 /// Comparison operators
@@ -292,7 +292,7 @@ pub fn parse_builtin(atom: &Atom) -> Option<BuiltIn> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datalog_ast::Symbol;
+    use datalog_parser::Symbol;
 
     fn sym(s: &str) -> Symbol {
         Symbol::new(s.to_string())

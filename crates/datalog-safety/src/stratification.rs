@@ -23,7 +23,7 @@
 //! }
 //! ```
 
-use datalog_ast::{Literal, Rule, Symbol};
+use datalog_parser::{Literal, Rule, Symbol};
 use std::collections::{HashMap, HashSet};
 
 /// Result of stratification analysis
@@ -262,17 +262,17 @@ pub fn stratify(rules: &[Rule]) -> Result<Stratification, StratificationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datalog_ast::{Atom, Literal, Rule};
+    use datalog_parser::{Atom, Literal, Rule};
 
     fn sym(s: &str) -> Symbol {
         Symbol::new(s.to_string())
     }
 
-    fn var_term(name: &str) -> datalog_ast::Term {
-        datalog_ast::Term::Variable(sym(name))
+    fn var_term(name: &str) -> datalog_parser::Term {
+        datalog_parser::Term::Variable(sym(name))
     }
 
-    fn atom(pred: &str, terms: Vec<datalog_ast::Term>) -> Atom {
+    fn atom(pred: &str, terms: Vec<datalog_parser::Term>) -> Atom {
         Atom {
             predicate: sym(pred),
             terms,

@@ -12,9 +12,9 @@ use chumsky::prelude::*;
 use chumsky::stream::Stream;
 use internment::Intern;
 
+use crate::ast::*;
 use crate::token::{lexer, Keyword, LexError, SpannedToken, Token};
 use crate::{Span, SrcId};
-use datalog_ast::*;
 
 type ParserError = Simple<Token, Span>;
 

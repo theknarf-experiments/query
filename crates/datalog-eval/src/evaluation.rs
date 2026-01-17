@@ -12,7 +12,7 @@
 //! let result = evaluate(&rules, &constraints, initial_facts)?;
 //! ```
 
-use datalog_ast::{Constraint, Rule};
+use datalog_parser::{Constraint, Rule};
 use datalog_core::{FactDatabase, InsertError};
 use datalog_grounding::{ground_rule, ground_rule_semi_naive, satisfy_body};
 use datalog_safety::{check_program_safety, stratify, SafetyError, StratificationError};
@@ -196,7 +196,7 @@ fn semi_naive_evaluate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datalog_ast::{Atom, Literal, Symbol, Term, Value};
+    use datalog_parser::{Atom, Literal, Symbol, Term, Value};
 
     fn sym(s: &str) -> Symbol {
         Symbol::new(s.to_string())

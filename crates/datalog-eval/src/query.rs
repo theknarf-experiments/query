@@ -16,7 +16,7 @@
 //! // Returns: [{X -> john}, {X -> alice}]
 //! ```
 
-use datalog_ast::{Query, Symbol};
+use datalog_parser::{Query, Symbol};
 use datalog_core::{FactDatabase, Substitution};
 use datalog_grounding::satisfy_body;
 use std::collections::HashSet;
@@ -54,7 +54,7 @@ pub fn extract_bindings(
 /// Extract all variables from a query
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn query_variables(query: &Query) -> HashSet<Symbol> {
-    use datalog_ast::Term;
+    use datalog_parser::Term;
 
     let mut vars = HashSet::new();
 
@@ -87,7 +87,7 @@ pub fn query_variables(query: &Query) -> HashSet<Symbol> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datalog_ast::{Atom, Literal, Term, Value};
+    use datalog_parser::{Atom, Literal, Term, Value};
 
     fn sym(s: &str) -> Symbol {
         Symbol::new(s.to_string())

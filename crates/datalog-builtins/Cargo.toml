@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-datalog-ast = { path = "../datalog-ast" }
+datalog-parser = { path = "../datalog-parser" }
 datalog-core = { path = "../datalog-core" }
 
 [dev-dependencies]

@@ -2,7 +2,7 @@
 //!
 //! Provides a way to define and substitute named constants in terms and atoms.
 
-use datalog_ast::{Atom, Symbol, Term, Value};
+use datalog_parser::{Atom, Symbol, Term, Value};
 use std::collections::HashMap;
 
 /// Environment storing constant declarations

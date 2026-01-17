@@ -4,11 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-datalog-ast = { path = "../datalog-ast" }
+datalog-parser = { path = "../datalog-parser" }
 datalog-builtins = { path = "../datalog-builtins" }
 datalog-core = { path = "../datalog-core" }
 
 [dev-dependencies]
 datalog-core = { path = "../datalog-core", features = ["test-utils"] }
-datalog-parser = { path = "../datalog-parser" }
 internment = "0.8"

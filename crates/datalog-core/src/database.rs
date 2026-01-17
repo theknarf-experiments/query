@@ -19,7 +19,7 @@
 //! ```
 
 use crate::unification::{unify_atoms, Substitution};
-use datalog_ast::{Atom, Symbol, Term};
+use datalog_parser::{Atom, Symbol, Term};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
@@ -210,7 +210,7 @@ fn is_ground_term(term: &Term) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datalog_ast::Value;
+    use datalog_parser::Value;
     use internment::Intern;
 
     #[test]

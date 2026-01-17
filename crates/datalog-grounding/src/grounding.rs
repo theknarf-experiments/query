@@ -19,7 +19,7 @@
 //! let groundings = ground_rule(&rule, &db, &const_env);
 //! ```
 
-use datalog_ast::{Atom, Literal, Rule, Term};
+use datalog_parser::{Atom, Literal, Rule, Term};
 use datalog_builtins as builtins;
 use datalog_core::{FactDatabase, Substitution};
 
@@ -221,8 +221,8 @@ where
 }
 
 /// Convert AST comparison op to builtins comparison op
-fn comp_op_to_builtin(op: &datalog_ast::ComparisonOp) -> builtins::CompOp {
-    use datalog_ast::ComparisonOp;
+fn comp_op_to_builtin(op: &datalog_parser::ComparisonOp) -> builtins::CompOp {
+    use datalog_parser::ComparisonOp;
     match op {
         ComparisonOp::Equal => builtins::CompOp::Eq,
         ComparisonOp::NotEqual => builtins::CompOp::Neq,
@@ -341,7 +341,7 @@ fn satisfy_body_mixed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datalog_ast::{Atom, Rule, Symbol, Value};
+    use datalog_parser::{Atom, Rule, Symbol, Value};
 
     fn sym(s: &str) -> Symbol {
         Symbol::new(s.to_string())

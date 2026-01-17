@@ -19,10 +19,9 @@
 //! "#)?;
 //! ```
 
-use datalog_ast::{Atom, Constraint, Literal, Query, Rule, Symbol, Term, Value as DValue};
+use datalog_parser::{Atom, Constraint, Literal, Query, Rule, Symbol, Term, Value as DValue, SrcId};
 use datalog_core::FactDatabase;
 use datalog_eval::{evaluate, EvaluationError};
-use datalog_parser::SrcId;
 use sql_storage::{StorageEngine, Value as SValue};
 
 use crate::{ExecError, QueryResult};
@@ -162,16 +161,16 @@ pub fn execute_datalog_program<S: StorageEngine>(
 
     for stmt in program.statements {
         match stmt {
-            datalog_ast::Statement::Fact(fact) => {
+            datalog_parser::Statement::Fact(fact) => {
                 let _ = db.insert(fact.atom);
             }
-            datalog_ast::Statement::Rule(rule) => {
+            datalog_parser::Statement::Rule(rule) => {
                 rules.push(rule);
             }
-            datalog_ast::Statement::Constraint(constraint) => {
+            datalog_parser::Statement::Constraint(constraint) => {
                 constraints.push(constraint);
             }
-            datalog_ast::Statement::Query(query) => {
+            datalog_parser::Statement::Query(query) => {
                 queries.push(query);
             }
         }

@@ -22,11 +22,17 @@
 //! let program = parse_program(program_text, SrcId::empty()).expect("Parse error");
 //! ```
 
+pub mod ast;
 mod parser;
 mod span;
 mod src;
 mod token;
 
+// Re-export AST types at crate root for convenience
+pub use ast::{
+    Atom, ComparisonLiteral, ComparisonOp, Constraint, Fact, Literal, Program, Query, Rule,
+    Statement, Symbol, Term, Value,
+};
 pub use parser::{parse_program, parse_query, ParseError};
 pub use span::Span;
 pub use src::SrcId;

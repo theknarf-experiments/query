@@ -1,0 +1,301 @@
+# Crate Consolidation Plan
+
+## Goal
+
+Unify SQL and Datalog frontends to:
+1. Support both SQL and Datalog as query languages
+2. Reuse semi-naive stratified evaluation for SQL recursive CTEs
+3. Share optimizations between both query languages
+
+## Current Architecture (13 crates)
+
+```
+SQL Frontend:
+sql-parser ──► sql-planner ──► sql-engine ◄── sql-storage
+                                    │
+                               sql-tests ◄─── sql-wal
+
+Datalog Frontend (separate):
+datalog-ast ──► datalog-parser
+     │
+     ├──► datalog-core ──► datalog-builtins ──► datalog-grounding
+     │                                                │
+     └──► datalog-safety ────────────────────► datalog-eval
+```
+
+## Target Architecture (8 crates)
+
+```
+sql-parser ────┐
+               ├──► planner ──► engine ◄── storage
+datalog-parser ┘                  │
+                                  ▼
+                          sql-tests ◄─── sql-wal
+```
+
+### Crate Mapping
+
+| New Crate | Combines | Purpose |
+|-----------|----------|---------|
+| sql-parser | (unchanged) | SQL text → SQL AST |
+| datalog-parser | datalog-ast + datalog-parser | Datalog text → Datalog AST |
+| storage | sql-storage + datalog-core | Unified relation/table model |
+| planner | sql-planner + datalog-safety + datalog-grounding | AST → LogicalPlan with recursion |
+| engine | sql-engine + datalog-eval + datalog-builtins | Plan execution with semi-naive recursion |
+| sql-wal | (unchanged) | Write-ahead log |
+| sql-tests | (unchanged) | Integration tests |
+
+## Key Design Decisions
+
+### 1. Unified Storage Model
+
+Datalog relations and SQL tables are both sets of tuples.
+
+```rust
+// storage/src/lib.rs
+pub struct Relation {
+    pub schema: Schema,
+    pub rows: HashSet<Row>,
+    pub indexes: HashMap<String, Index>,
+}
+
+pub struct Row {
+    pub values: Vec<Value>,
+}
+
+pub enum Value {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Text(String),
+    // Datalog uses interned symbols - consider Intern<String> variant
+}
+```
+
+### 2. Extended LogicalPlan with Recursion
+
+```rust
+// planner/src/plan.rs
+pub enum LogicalPlan {
+    // Existing variants...
+    Scan { table: String },
+    Filter { input: Box<LogicalPlan>, predicate: Expr },
+    Projection { input: Box<LogicalPlan>, exprs: Vec<(Expr, Option<String>)> },
+    Join { left: Box<LogicalPlan>, right: Box<LogicalPlan>, ... },
+    Aggregate { ... },
+    SetOperation { ... },
+
+    // NEW: Recursive query (for both Datalog rules and SQL recursive CTEs)
+    Recursive {
+        /// Name of the recursive relation
+        name: String,
+        /// Column names/schema
+        columns: Vec<String>,
+        /// Base case (non-recursive)
+        base: Box<LogicalPlan>,
+        /// Recursive step (references `name`)
+        step: Box<LogicalPlan>,
+    },
+
+    // NEW: Stratified execution (for negation)
+    Stratify {
+        /// Plans to execute in order (each stratum)
+        strata: Vec<LogicalPlan>,
+    },
+}
+```
+
+### 3. Datalog Compilation to LogicalPlan
+
+Datalog rules compile to relational algebra:
+
+```
+% Datalog rule:
+ancestor(X, Z) :- parent(X, Y), ancestor(Y, Z).
+
+% Compiles to LogicalPlan:
+Recursive {
+    name: "ancestor",
+    columns: ["X", "Z"],
+    base: Scan { table: "parent" },  // or base facts
+    step: Join {
+        left: Scan { table: "parent" },
+        right: Scan { table: "ancestor" },  // recursive reference
+        on: parent.Y = ancestor.X,
+    } -> Project [parent.X, ancestor.Z]
+}
+```
+
+### 4. Semi-Naive Evaluation in Engine
+
+The engine executes `Recursive` nodes using semi-naive evaluation:
+
+```rust
+// engine/src/recursive.rs
+fn evaluate_recursive(
+    name: &str,
+    base: &LogicalPlan,
+    step: &LogicalPlan,
+    ctx: &mut Context,
+) -> Result<Relation> {
+    // 1. Evaluate base case
+    let mut result = evaluate(base, ctx)?;
+    let mut delta = result.clone();
+
+    // 2. Iterate until fixpoint
+    while !delta.is_empty() {
+        // Bind delta to the recursive relation for this iteration
+        ctx.bind_delta(name, &delta);
+
+        // Evaluate step using delta (semi-naive: only new facts)
+        let new_facts = evaluate(step, ctx)?;
+
+        // Delta = new facts not already in result
+        delta = new_facts.difference(&result);
+
+        // Add to result
+        result = result.union(&delta);
+    }
+
+    Ok(result)
+}
+```
+
+### 5. Stratification for Negation
+
+Negation requires stratification - compute relations in dependency order:
+
+```rust
+// planner/src/stratify.rs
+fn stratify(rules: &[Rule]) -> Result<Vec<Vec<Rule>>> {
+    // Build dependency graph
+    // Detect negative cycles (error: not stratifiable)
+    // Topological sort into strata
+    // Rules with negation on R must be in higher stratum than R's definition
+}
+```
+
+## Migration Steps
+
+### Phase 1: Merge datalog-ast into datalog-parser
+- [x] Currently datalog-ast is separate
+- [ ] Fold AST types into datalog-parser (they're tightly coupled)
+- [ ] Update imports in other datalog crates
+
+### Phase 2: Create unified storage crate
+- [ ] Create new `storage` crate
+- [ ] Define unified `Relation`, `Row`, `Value` types
+- [ ] Port sql-storage functionality
+- [ ] Port datalog-core's Database/HashSet
+- [ ] Update sql-engine to use new storage
+- [ ] Update datalog-eval to use new storage
+
+### Phase 3: Extend LogicalPlan with recursion
+- [ ] Add `Recursive` variant to LogicalPlan
+- [ ] Add `Stratify` variant for negation handling
+- [ ] Keep existing sql-planner functionality
+
+### Phase 4: Add Datalog → LogicalPlan compilation
+- [ ] Create datalog-to-plan module in planner
+- [ ] Compile Datalog atoms to Scan/Filter
+- [ ] Compile rule bodies to Join chains
+- [ ] Compile recursive rules to Recursive nodes
+- [ ] Port safety checking from datalog-safety
+- [ ] Port stratification from datalog-grounding
+
+### Phase 5: Add semi-naive execution to engine
+- [ ] Port semi-naive algorithm from datalog-eval
+- [ ] Execute Recursive nodes with fixpoint iteration
+- [ ] Execute Stratify nodes in stratum order
+- [ ] Port builtin predicates from datalog-builtins
+
+### Phase 6: Clean up old crates
+- [ ] Remove datalog-core (merged into storage)
+- [ ] Remove datalog-safety (merged into planner)
+- [ ] Remove datalog-grounding (merged into planner)
+- [ ] Remove datalog-builtins (merged into engine)
+- [ ] Remove datalog-eval (merged into engine)
+- [ ] Update workspace Cargo.toml
+
+### Phase 7: Add SQL recursive CTE support
+- [ ] Parse WITH RECURSIVE in sql-parser
+- [ ] Compile recursive CTEs to Recursive LogicalPlan
+- [ ] Verify shared semi-naive execution works
+
+## Testing Strategy
+
+1. **Keep existing tests passing** throughout migration
+2. **Add integration tests** that run same queries in SQL and Datalog
+3. **Property tests** for semi-naive correctness (compare to naive iteration)
+4. **Stratification tests** for correct negation handling
+
+## File Structure After Migration
+
+```
+crates/
+├── sql-parser/          # SQL parsing (unchanged)
+│   └── src/
+│       ├── ast.rs
+│       ├── parser.rs
+│       └── lib.rs
+│
+├── datalog-parser/      # Datalog parsing (absorbs datalog-ast)
+│   └── src/
+│       ├── ast.rs       # From datalog-ast
+│       ├── parser.rs
+│       └── lib.rs
+│
+├── storage/             # Unified storage (sql-storage + datalog-core)
+│   └── src/
+│       ├── relation.rs  # Relation, Row, Value
+│       ├── index.rs     # Indexing
+│       ├── schema.rs    # Schema types
+│       └── lib.rs
+│
+├── planner/             # Unified planning (sql-planner + datalog-grounding + datalog-safety)
+│   └── src/
+│       ├── plan.rs      # LogicalPlan with Recursive
+│       ├── sql.rs       # SQL AST → LogicalPlan
+│       ├── datalog.rs   # Datalog AST → LogicalPlan
+│       ├── stratify.rs  # Stratification analysis
+│       ├── safety.rs    # Datalog safety checking
+│       ├── optimize.rs  # Plan optimizations
+│       └── lib.rs
+│
+├── engine/              # Unified execution (sql-engine + datalog-eval + datalog-builtins)
+│   └── src/
+│       ├── execute.rs   # Plan execution
+│       ├── recursive.rs # Semi-naive evaluation
+│       ├── expr.rs      # Expression evaluation (includes builtins)
+│       ├── context.rs   # Execution context
+│       └── lib.rs
+│
+├── sql-wal/             # Write-ahead log (unchanged)
+└── sql-tests/           # Integration tests (unchanged)
+```
+
+## Dependencies After Migration
+
+```
+sql-parser ─────────────────────────────┐
+                                        ▼
+datalog-parser ──────────────────────► planner ──► engine
+                                        ▲            ▲
+                                        │            │
+                                     storage ────────┘
+```
+
+```toml
+# planner/Cargo.toml
+[dependencies]
+sql-parser = { path = "../sql-parser" }
+datalog-parser = { path = "../datalog-parser" }
+storage = { path = "../storage" }
+
+# engine/Cargo.toml
+[dependencies]
+planner = { path = "../planner" }
+storage = { path = "../storage" }
+sql-parser = { path = "../sql-parser" }  # For Expr types
+```

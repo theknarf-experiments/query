@@ -1,6 +1,7 @@
 //! SQL Parser implementation using Chumsky 0.9
 
 use chumsky::prelude::*;
+use chumsky::BoxedParser;
 
 use crate::ast::*;
 use crate::lexer::{Keyword, Span, Token};
@@ -55,28 +56,41 @@ fn parse_tokens(tokens: Vec<(Token, Span)>) -> ParseResult {
 
 /// Build the statement parser
 fn statement_parser() -> impl Parser<Token, Statement, Error = Simple<Token>> {
-    select_or_set_op_parser()
-        .or(insert_parser().map(Statement::Insert))
-        .or(update_parser().map(Statement::Update))
-        .or(delete_parser().map(Statement::Delete))
-        .or(create_table_parser().map(Statement::CreateTable))
+    // Use choice() and boxed() to reduce parser type size and stack usage
+    let ddl_parsers = create_table_parser()
+        .map(Statement::CreateTable)
         .or(create_trigger_parser().map(Statement::CreateTrigger))
         .or(create_index_parser().map(Statement::CreateIndex))
         .or(create_view_parser().map(Statement::CreateView))
+        .or(create_procedure_parser().map(Statement::CreateProcedure))
         .or(drop_trigger_parser().map(Statement::DropTrigger))
         .or(drop_index_parser().map(Statement::DropIndex))
         .or(drop_view_parser().map(Statement::DropView))
         .or(drop_table_parser().map(Statement::DropTable))
-        .or(alter_table_parser().map(Statement::AlterTable))
-        .or(create_procedure_parser().map(Statement::CreateProcedure))
         .or(drop_procedure_parser().map(Statement::DropProcedure))
-        .or(call_procedure_parser().map(Statement::CallProcedure))
-        .or(begin_parser())
+        .or(alter_table_parser().map(Statement::AlterTable))
+        .boxed();
+
+    let dml_parsers = insert_parser()
+        .map(Statement::Insert)
+        .or(update_parser().map(Statement::Update))
+        .or(delete_parser().map(Statement::Delete))
+        .boxed();
+
+    let transaction_parsers = begin_parser()
         .or(commit_parser())
         .or(rollback_parser())
         .or(savepoint_parser())
         .or(release_savepoint_parser())
+        .boxed();
+
+    select_or_set_op_parser()
+        .or(dml_parsers)
+        .or(ddl_parsers)
+        .or(call_procedure_parser().map(Statement::CallProcedure))
+        .or(transaction_parsers)
         .then_ignore(just(Token::Semicolon).or_not())
+        .boxed()
 }
 
 /// Parse a single CTE definition: name [(columns)] AS (SELECT ...)
@@ -453,8 +467,8 @@ fn string_literal() -> impl Parser<Token, String, Error = Simple<Token>> + Clone
 }
 
 /// Parse a SELECT statement
-fn select_parser() -> impl Parser<Token, SelectStatement, Error = Simple<Token>> {
-    select_parser_impl(None)
+fn select_parser() -> BoxedParser<'static, Token, SelectStatement, Simple<Token>> {
+    select_parser_impl(None).boxed()
 }
 
 fn select_parser_impl(
@@ -545,7 +559,7 @@ fn select_parser_impl(
 }
 
 /// Parse a SELECT column (either * or expression with optional alias)
-fn select_column_parser() -> impl Parser<Token, SelectColumn, Error = Simple<Token>> + Clone {
+fn select_column_parser() -> BoxedParser<'static, Token, SelectColumn, Simple<Token>> {
     just(Token::Star).to(SelectColumn::Star).or(expr_parser()
         .then(
             just(Token::Keyword(Keyword::As))
@@ -553,6 +567,7 @@ fn select_column_parser() -> impl Parser<Token, SelectColumn, Error = Simple<Tok
                 .or_not(),
         )
         .map(|(expr, alias)| SelectColumn::Expr { expr, alias }))
+    .boxed()
 }
 
 /// Parse a table reference
@@ -568,7 +583,7 @@ fn table_ref_parser() -> impl Parser<Token, TableRef, Error = Simple<Token>> + C
 }
 
 /// Parse a JOIN clause
-fn join_parser() -> impl Parser<Token, Join, Error = Simple<Token>> + Clone {
+fn join_parser() -> BoxedParser<'static, Token, Join, Simple<Token>> {
     let on_kw = just(Token::Keyword(Keyword::On));
 
     // Parse join type
@@ -602,10 +617,11 @@ fn join_parser() -> impl Parser<Token, Join, Error = Simple<Token>> + Clone {
             table,
             on,
         })
+        .boxed()
 }
 
 /// Parse an ORDER BY item
-fn order_by_item_parser() -> impl Parser<Token, OrderBy, Error = Simple<Token>> + Clone {
+fn order_by_item_parser() -> BoxedParser<'static, Token, OrderBy, Simple<Token>> {
     expr_parser()
         .then(
             just(Token::Keyword(Keyword::Desc))
@@ -615,10 +631,12 @@ fn order_by_item_parser() -> impl Parser<Token, OrderBy, Error = Simple<Token>> 
                 .map(|o| o.unwrap_or(false)),
         )
         .map(|(expr, desc)| OrderBy { expr, desc })
+        .boxed()
 }
 
 /// Parse an expression with proper precedence
-fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone {
+/// Returns a BoxedParser to reduce stack frame size and prevent stack overflow
+fn expr_parser() -> BoxedParser<'static, Token, Expr, Simple<Token>> {
     recursive(|expr| {
         let literal = select! {
             Token::Integer(n) => Expr::Integer(n),
@@ -942,11 +960,17 @@ fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone {
                 right: Box::new(right),
             })
     })
+    .boxed()
 }
 
 /// Parse a simplified SELECT statement for use in subqueries
 /// This avoids infinite recursion by using simple_expr_parser instead of expr_parser
-fn subquery_select_parser() -> impl Parser<Token, SelectStatement, Error = Simple<Token>> + Clone {
+/// Returns a BoxedParser to reduce stack frame size
+fn subquery_select_parser() -> BoxedParser<'static, Token, SelectStatement, Simple<Token>> {
+    subquery_select_parser_impl().boxed()
+}
+
+fn subquery_select_parser_impl() -> impl Parser<Token, SelectStatement, Error = Simple<Token>> + Clone {
     let select_kw = just(Token::Keyword(Keyword::Select));
     let from_kw = just(Token::Keyword(Keyword::From));
     let where_kw = just(Token::Keyword(Keyword::Where));
@@ -1061,7 +1085,11 @@ fn identifier() -> impl Parser<Token, String, Error = Simple<Token>> + Clone {
 }
 
 /// Parse an INSERT statement
-fn insert_parser() -> impl Parser<Token, InsertStatement, Error = Simple<Token>> {
+fn insert_parser() -> BoxedParser<'static, Token, InsertStatement, Simple<Token>> {
+    insert_parser_impl().boxed()
+}
+
+fn insert_parser_impl() -> impl Parser<Token, InsertStatement, Error = Simple<Token>> {
     let insert_kw = just(Token::Keyword(Keyword::Insert));
     let into_kw = just(Token::Keyword(Keyword::Into));
     let values_kw = just(Token::Keyword(Keyword::Values));
@@ -1093,7 +1121,7 @@ fn insert_parser() -> impl Parser<Token, InsertStatement, Error = Simple<Token>>
 }
 
 /// Parse an UPDATE statement
-fn update_parser() -> impl Parser<Token, UpdateStatement, Error = Simple<Token>> {
+fn update_parser() -> BoxedParser<'static, Token, UpdateStatement, Simple<Token>> {
     let update_kw = just(Token::Keyword(Keyword::Update));
     let set_kw = just(Token::Keyword(Keyword::Set));
     let where_kw = just(Token::Keyword(Keyword::Where));
@@ -1117,10 +1145,11 @@ fn update_parser() -> impl Parser<Token, UpdateStatement, Error = Simple<Token>>
             assignments,
             where_clause,
         })
+        .boxed()
 }
 
 /// Parse a DELETE statement
-fn delete_parser() -> impl Parser<Token, DeleteStatement, Error = Simple<Token>> {
+fn delete_parser() -> BoxedParser<'static, Token, DeleteStatement, Simple<Token>> {
     let delete_kw = just(Token::Keyword(Keyword::Delete));
     let from_kw = just(Token::Keyword(Keyword::From));
     let where_kw = just(Token::Keyword(Keyword::Where));
@@ -1135,10 +1164,15 @@ fn delete_parser() -> impl Parser<Token, DeleteStatement, Error = Simple<Token>>
             table,
             where_clause,
         })
+        .boxed()
 }
 
 /// Parse a CREATE TABLE statement
-fn create_table_parser() -> impl Parser<Token, CreateTableStatement, Error = Simple<Token>> {
+fn create_table_parser() -> BoxedParser<'static, Token, CreateTableStatement, Simple<Token>> {
+    create_table_parser_impl().boxed()
+}
+
+fn create_table_parser_impl() -> impl Parser<Token, CreateTableStatement, Error = Simple<Token>> {
     let create_kw = just(Token::Keyword(Keyword::Create));
     let table_kw = just(Token::Keyword(Keyword::Table));
 

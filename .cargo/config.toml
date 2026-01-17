@@ -1,0 +1,4 @@
+[env]
+# Chumsky parser combinators need more stack than Rust's 2MB thread default.
+# 4MB is sufficient with our boxed parser optimizations.
+RUST_MIN_STACK = "4194304"

@@ -2093,4 +2093,212 @@ mod tests {
             panic!("Expected Select result");
         }
     }
+
+    // ===== Index Support Tests =====
+
+    #[test]
+    fn test_datalog_with_indexed_column() {
+        use sql_storage::Value;
+
+        let mut engine = Engine::new();
+
+        // Create a table with an index
+        engine
+            .execute("CREATE TABLE employee (id INT, name TEXT, dept TEXT)")
+            .unwrap();
+        engine
+            .execute("CREATE INDEX idx_emp_id ON employee (id)")
+            .unwrap();
+
+        // Insert some data
+        engine
+            .execute("INSERT INTO employee VALUES (1, 'alice', 'eng')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO employee VALUES (2, 'bob', 'eng')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO employee VALUES (3, 'carol', 'sales')")
+            .unwrap();
+
+        // Query with constant on indexed column
+        let result = engine
+            .execute_datalog("?- employee(1, Name, Dept).")
+            .unwrap();
+
+        if let QueryResult::Select { columns, rows } = result {
+            assert_eq!(columns, vec!["Name", "Dept"]);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0], Value::Text("alice".to_string()));
+        } else {
+            panic!("Expected Select result");
+        }
+    }
+
+    #[test]
+    fn test_datalog_transitive_closure_with_indexed_table() {
+        let mut engine = Engine::new();
+
+        // Create edge table with index
+        engine
+            .execute("CREATE TABLE edge (src TEXT, dst TEXT)")
+            .unwrap();
+        engine
+            .execute("CREATE INDEX idx_edge_src ON edge (src)")
+            .unwrap();
+
+        // Create a chain: a -> b -> c -> d -> e
+        engine
+            .execute("INSERT INTO edge VALUES ('a', 'b')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO edge VALUES ('b', 'c')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO edge VALUES ('c', 'd')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO edge VALUES ('d', 'e')")
+            .unwrap();
+
+        // Transitive closure query
+        let result = engine
+            .execute_datalog(
+                r#"
+                path(X, Y) :- edge(X, Y).
+                path(X, Z) :- path(X, Y), edge(Y, Z).
+                ?- path(a, X).
+                "#,
+            )
+            .unwrap();
+
+        if let QueryResult::Select { columns, rows } = result {
+            assert_eq!(columns, vec!["X"]);
+            // a can reach: b, c, d, e
+            assert_eq!(rows.len(), 4);
+        } else {
+            panic!("Expected Select result");
+        }
+    }
+
+    #[test]
+    fn test_datalog_join_with_indexes() {
+        let mut engine = Engine::new();
+
+        // Create two tables with indexes
+        engine
+            .execute("CREATE TABLE person (id INT, name TEXT)")
+            .unwrap();
+        engine
+            .execute("CREATE TABLE works_at (person_id INT, company TEXT)")
+            .unwrap();
+        engine
+            .execute("CREATE INDEX idx_person_id ON person (id)")
+            .unwrap();
+        engine
+            .execute("CREATE INDEX idx_works_person ON works_at (person_id)")
+            .unwrap();
+
+        // Insert data
+        engine
+            .execute("INSERT INTO person VALUES (1, 'alice')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO person VALUES (2, 'bob')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO person VALUES (3, 'carol')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO works_at VALUES (1, 'acme')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO works_at VALUES (2, 'bigcorp')")
+            .unwrap();
+
+        // Join query using Datalog
+        let result = engine
+            .execute_datalog(
+                r#"
+                employee_company(Name, Company) :- person(Id, Name), works_at(Id, Company).
+                ?- employee_company(Name, Company).
+                "#,
+            )
+            .unwrap();
+
+        if let QueryResult::Select { columns, rows } = result {
+            assert_eq!(columns, vec!["Name", "Company"]);
+            assert_eq!(rows.len(), 2);
+        } else {
+            panic!("Expected Select result");
+        }
+    }
+
+    #[test]
+    fn test_datalog_large_dataset_with_index() {
+        use sql_storage::Value;
+
+        let mut engine = Engine::new();
+
+        // Create a table with an index
+        engine
+            .execute("CREATE TABLE numbers (id INT, value INT)")
+            .unwrap();
+        engine
+            .execute("CREATE INDEX idx_numbers_id ON numbers (id)")
+            .unwrap();
+
+        // Insert 1000 rows
+        for i in 0..1000 {
+            engine
+                .execute(&format!("INSERT INTO numbers VALUES ({}, {})", i, i * 2))
+                .unwrap();
+        }
+
+        // Query for a specific ID (should use index)
+        let result = engine.execute_datalog("?- numbers(500, V).").unwrap();
+
+        if let QueryResult::Select { columns, rows } = result {
+            assert_eq!(columns, vec!["V"]);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0], Value::Int(1000)); // 500 * 2
+        } else {
+            panic!("Expected Select result");
+        }
+    }
+
+    #[test]
+    fn test_datalog_derived_predicates_not_storage_backed() {
+        let mut engine = Engine::new();
+
+        // Create base table
+        engine
+            .execute("CREATE TABLE base (a TEXT, b TEXT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO base VALUES ('x', 'y')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO base VALUES ('y', 'z')")
+            .unwrap();
+
+        // Query with derived predicate
+        let result = engine
+            .execute_datalog(
+                r#"
+                derived(A, B) :- base(A, B).
+                derived(A, C) :- derived(A, B), base(B, C).
+                ?- derived(x, X).
+                "#,
+            )
+            .unwrap();
+
+        if let QueryResult::Select { columns, rows } = result {
+            assert_eq!(columns, vec!["X"]);
+            // x -> y (direct) and x -> z (transitive)
+            assert_eq!(rows.len(), 2);
+        } else {
+            panic!("Expected Select result");
+        }
+    }
 }

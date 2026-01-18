@@ -734,4 +734,307 @@ mod tests {
         assert_eq!(pred_schema.column_name(1), Some("email"));
         assert_eq!(pred_schema.column_type(1), Some(&DataType::Text));
     }
+
+    // ===== Storage-Backed Predicate Tests =====
+
+    #[test]
+    fn test_mark_storage_backed() {
+        let mut db = FactDatabase::new();
+        let pred = Intern::new("parent".to_string());
+
+        assert!(!db.is_storage_backed(&pred));
+
+        db.mark_storage_backed(pred);
+
+        assert!(db.is_storage_backed(&pred));
+    }
+
+    #[test]
+    fn test_absorb_merges_storage_backed_predicates() {
+        let mut db1 = FactDatabase::new();
+        let mut db2 = FactDatabase::new();
+
+        let pred1 = Intern::new("table1".to_string());
+        let pred2 = Intern::new("table2".to_string());
+
+        db1.mark_storage_backed(pred1);
+        db2.mark_storage_backed(pred2);
+
+        db1.absorb(db2);
+
+        assert!(db1.is_storage_backed(&pred1));
+        assert!(db1.is_storage_backed(&pred2));
+    }
+
+    #[test]
+    fn test_query_with_storage_uses_local_facts_for_non_storage_backed() {
+        use crate::MemoryEngine;
+
+        let mut db = FactDatabase::new();
+        let storage = MemoryEngine::new();
+
+        // Add a local fact (not storage-backed)
+        let pred = Intern::new("local_fact".to_string());
+        db.insert(Atom {
+            predicate: pred,
+            terms: vec![
+                Term::Constant(Value::Atom(Intern::new("a".to_string()))),
+                Term::Constant(Value::Atom(Intern::new("b".to_string()))),
+            ],
+        })
+        .unwrap();
+
+        // Query with a variable
+        let pattern = Atom {
+            predicate: pred,
+            terms: vec![
+                Term::Variable(Intern::new("X".to_string())),
+                Term::Constant(Value::Atom(Intern::new("b".to_string()))),
+            ],
+        };
+
+        // Should find the local fact
+        let results = db.query_with_storage(&pattern, &storage);
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_query_with_storage_queries_storage_for_storage_backed() {
+        use crate::engine::{ColumnSchema, DataType, TableSchema};
+        use crate::MemoryEngine;
+
+        let mut storage = MemoryEngine::new();
+
+        // Create a table in storage
+        let schema = TableSchema {
+            name: "parent".to_string(),
+            columns: vec![
+                ColumnSchema {
+                    name: "parent_name".to_string(),
+                    data_type: DataType::Text,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+                ColumnSchema {
+                    name: "child_name".to_string(),
+                    data_type: DataType::Text,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+            ],
+            constraints: vec![],
+        };
+        storage.create_table(schema).unwrap();
+
+        // Insert data into storage
+        storage
+            .insert(
+                "parent",
+                vec![
+                    SqlValue::Text("john".to_string()),
+                    SqlValue::Text("mary".to_string()),
+                ],
+            )
+            .unwrap();
+        storage
+            .insert(
+                "parent",
+                vec![
+                    SqlValue::Text("john".to_string()),
+                    SqlValue::Text("bob".to_string()),
+                ],
+            )
+            .unwrap();
+
+        // Set up FactDatabase with storage-backed predicate
+        let mut db = FactDatabase::new();
+        let pred = Intern::new("parent".to_string());
+        db.register_schema(PredicateSchema::from_table_schema(
+            storage.get_schema("parent").unwrap(),
+        ));
+        db.mark_storage_backed(pred);
+
+        // Query for john's children
+        let pattern = Atom {
+            predicate: pred,
+            terms: vec![
+                Term::Constant(Value::Atom(Intern::new("john".to_string()))),
+                Term::Variable(Intern::new("X".to_string())),
+            ],
+        };
+
+        let results = db.query_with_storage(&pattern, &storage);
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_query_with_storage_uses_index_when_available() {
+        use crate::engine::{ColumnSchema, DataType, TableSchema};
+        use crate::MemoryEngine;
+
+        let mut storage = MemoryEngine::new();
+
+        // Create a table
+        let schema = TableSchema {
+            name: "person".to_string(),
+            columns: vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    data_type: DataType::Int,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+                ColumnSchema {
+                    name: "name".to_string(),
+                    data_type: DataType::Text,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+            ],
+            constraints: vec![],
+        };
+        storage.create_table(schema).unwrap();
+
+        // Insert data
+        for i in 0..100 {
+            storage
+                .insert(
+                    "person",
+                    vec![SqlValue::Int(i), SqlValue::Text(format!("person_{}", i))],
+                )
+                .unwrap();
+        }
+
+        // Create an index on the id column
+        storage
+            .create_index("person", "id", "idx_person_id")
+            .unwrap();
+
+        // Set up FactDatabase
+        let mut db = FactDatabase::new();
+        let pred = Intern::new("person".to_string());
+        db.register_schema(PredicateSchema::from_table_schema(
+            storage.get_schema("person").unwrap(),
+        ));
+        db.mark_storage_backed(pred);
+
+        // Query for a specific id (should use the index)
+        let pattern = Atom {
+            predicate: pred,
+            terms: vec![
+                Term::Constant(Value::Integer(42)),
+                Term::Variable(Intern::new("Name".to_string())),
+            ],
+        };
+
+        let results = db.query_with_storage(&pattern, &storage);
+        assert_eq!(results.len(), 1);
+
+        // Verify the result
+        let name = results[0].get(&Intern::new("Name".to_string())).unwrap();
+        assert_eq!(
+            name,
+            &Term::Constant(Value::Atom(Intern::new("person_42".to_string())))
+        );
+    }
+
+    #[test]
+    fn test_query_with_storage_falls_back_to_scan_without_index() {
+        use crate::engine::{ColumnSchema, DataType, TableSchema};
+        use crate::MemoryEngine;
+
+        let mut storage = MemoryEngine::new();
+
+        // Create a table without any indexes
+        let schema = TableSchema {
+            name: "data".to_string(),
+            columns: vec![
+                ColumnSchema {
+                    name: "key".to_string(),
+                    data_type: DataType::Text,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+                ColumnSchema {
+                    name: "value".to_string(),
+                    data_type: DataType::Int,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+            ],
+            constraints: vec![],
+        };
+        storage.create_table(schema).unwrap();
+
+        // Insert data
+        storage
+            .insert(
+                "data",
+                vec![SqlValue::Text("a".to_string()), SqlValue::Int(1)],
+            )
+            .unwrap();
+        storage
+            .insert(
+                "data",
+                vec![SqlValue::Text("b".to_string()), SqlValue::Int(2)],
+            )
+            .unwrap();
+
+        // Set up FactDatabase
+        let mut db = FactDatabase::new();
+        let pred = Intern::new("data".to_string());
+        db.register_schema(PredicateSchema::from_table_schema(
+            storage.get_schema("data").unwrap(),
+        ));
+        db.mark_storage_backed(pred);
+
+        // Query with constant (no index available, falls back to scan)
+        let pattern = Atom {
+            predicate: pred,
+            terms: vec![
+                Term::Constant(Value::Atom(Intern::new("a".to_string()))),
+                Term::Variable(Intern::new("V".to_string())),
+            ],
+        };
+
+        let results = db.query_with_storage(&pattern, &storage);
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_value_conversion_roundtrip() {
+        // Test that values convert correctly between SQL and Datalog
+        let test_cases = vec![
+            (SqlValue::Int(42), Value::Integer(42)),
+            (SqlValue::Float(3.14), Value::Float(3.14)),
+            (SqlValue::Bool(true), Value::Boolean(true)),
+            (
+                SqlValue::Text("hello".to_string()),
+                Value::Atom(Intern::new("hello".to_string())),
+            ),
+        ];
+
+        for (sql_val, expected_datalog) in test_cases {
+            let converted = sql_to_datalog_value(&sql_val);
+            assert_eq!(converted, expected_datalog);
+        }
+    }
 }

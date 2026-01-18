@@ -187,7 +187,7 @@ fn semi_naive_evaluate<S: StorageEngine>(
 
             for fact in derived {
                 // Try to insert - storage UNIQUE constraint handles deduplication
-                if db.insert(fact.clone(), storage)? {
+                if db.insert(fact.clone(), storage)?.is_new() {
                     // Only truly new facts go into the next iteration's delta
                     new_delta.insert(fact);
                 }

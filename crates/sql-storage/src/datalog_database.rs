@@ -130,6 +130,27 @@ impl fmt::Display for InsertError {
 
 impl Error for InsertError {}
 
+/// Outcome of a successful insert operation
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsertOutcome {
+    /// The fact was newly inserted (did not exist before)
+    Inserted,
+    /// The fact already existed (duplicate, no change)
+    Duplicate,
+}
+
+impl InsertOutcome {
+    /// Returns true if the fact was newly inserted
+    pub fn is_new(&self) -> bool {
+        matches!(self, InsertOutcome::Inserted)
+    }
+
+    /// Returns true if the fact was a duplicate
+    pub fn is_duplicate(&self) -> bool {
+        matches!(self, InsertOutcome::Duplicate)
+    }
+}
+
 #[cfg(any(test, feature = "test-utils"))]
 thread_local! {
     static TRACK_GROUND_QUERIES: Cell<bool> = const { Cell::new(false) };
@@ -283,13 +304,14 @@ impl FactDatabase {
 
     /// Insert a ground fact into storage
     ///
-    /// Returns Ok(true) if the fact was new, Ok(false) if it already existed.
+    /// Returns `Ok(InsertOutcome::Inserted)` if the fact was new,
+    /// `Ok(InsertOutcome::Duplicate)` if it already existed.
     /// Uses UNIQUE constraints for O(1) deduplication.
     pub fn insert<S: StorageEngine>(
         &mut self,
         atom: Atom,
         storage: &mut S,
-    ) -> Result<bool, InsertError> {
+    ) -> Result<InsertOutcome, InsertError> {
         // Check that atom is ground (no variables)
         if !is_ground(&atom) {
             return Err(InsertError::NonGroundAtom(atom));
@@ -319,8 +341,10 @@ impl FactDatabase {
         // Convert atom to row and insert into storage
         let row = atom_to_row(&atom);
         match storage.insert(predicate_name, row) {
-            Ok(()) => Ok(true), // New fact inserted
-            Err(crate::engine::StorageError::ConstraintViolation(_)) => Ok(false), // Duplicate
+            Ok(()) => Ok(InsertOutcome::Inserted),
+            Err(crate::engine::StorageError::ConstraintViolation(_)) => {
+                Ok(InsertOutcome::Duplicate)
+            }
             Err(e) => Err(InsertError::StorageError(format!("{:?}", e))),
         }
     }

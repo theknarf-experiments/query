@@ -98,10 +98,6 @@ impl Default for DatalogContext {
     }
 }
 
-/// Type alias for backwards compatibility during migration
-#[deprecated(note = "Use DatalogContext instead")]
-pub type FactDatabase = DatalogContext;
-
 /// Error type for failed fact insertions
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InsertError {
@@ -925,7 +921,7 @@ mod tests {
             )
             .unwrap();
 
-        // Set up FactDatabase with storage-backed predicate
+        // Set up DatalogContext with storage-backed predicate
         let mut db = DatalogContext::new();
         let pred = Intern::new("parent".to_string());
         db.register_schema(PredicateSchema::from_table_schema(
@@ -995,7 +991,7 @@ mod tests {
             .create_index("person", "id", "idx_person_id")
             .unwrap();
 
-        // Set up FactDatabase
+        // Set up DatalogContext
         let mut db = DatalogContext::new();
         let pred = Intern::new("person".to_string());
         db.register_schema(PredicateSchema::from_table_schema(
@@ -1071,7 +1067,7 @@ mod tests {
             )
             .unwrap();
 
-        // Set up FactDatabase
+        // Set up DatalogContext
         let mut db = DatalogContext::new();
         let pred = Intern::new("data".to_string());
         db.register_schema(PredicateSchema::from_table_schema(

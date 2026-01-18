@@ -436,6 +436,87 @@ fn is_ground_term(term: &Term) -> bool {
     }
 }
 
+// ============================================================================
+// Derived Predicate Storage Support
+// ============================================================================
+//
+// These functions enable storing derived Datalog facts (IDB) in the storage
+// engine alongside SQL tables (EDB), creating a unified storage layer.
+
+use crate::engine::{StorageError, TableConstraint};
+
+/// Create a schema for a derived predicate based on arity
+///
+/// All columns use Text type to accommodate Datalog atoms.
+/// A UNIQUE constraint on all columns ensures deduplication (set semantics).
+pub fn create_derived_schema(predicate: &str, arity: usize) -> TableSchema {
+    TableSchema {
+        name: predicate.to_string(),
+        columns: (0..arity)
+            .map(|i| ColumnSchema {
+                name: format!("col{}", i),
+                data_type: DataType::Text,
+                nullable: true,
+                primary_key: false,
+                unique: false,
+                default: None,
+                references: None,
+            })
+            .collect(),
+        // UNIQUE constraint on all columns for deduplication
+        constraints: vec![TableConstraint::Unique {
+            columns: (0..arity).map(|i| format!("col{}", i)).collect(),
+        }],
+    }
+}
+
+/// Ensure a table exists for a derived predicate
+///
+/// Creates the table if it doesn't exist. Uses the arity to determine schema.
+/// Returns Ok(true) if table was created, Ok(false) if it already existed.
+pub fn ensure_derived_table<S: StorageEngine>(
+    storage: &mut S,
+    predicate: &str,
+    arity: usize,
+) -> Result<bool, StorageError> {
+    // Check if table exists by trying to get schema
+    if storage.get_schema(predicate).is_ok() {
+        return Ok(false); // Already exists
+    }
+
+    let schema = create_derived_schema(predicate, arity);
+    storage.create_table(schema)?;
+    Ok(true) // Created
+}
+
+/// Convert a Datalog fact (Atom) to a SQL row for storage
+///
+/// Panics if the atom contains variables (must be ground).
+pub fn atom_to_row(atom: &Atom) -> Row {
+    atom.terms
+        .iter()
+        .map(|term| match term {
+            Term::Constant(value) => datalog_to_sql_value(value),
+            Term::Variable(v) => panic!("Cannot convert variable {} to SQL value", v.as_ref()),
+            Term::Compound(_, _) => {
+                // Serialize compound terms as text
+                SqlValue::Text(format!("{:?}", term))
+            }
+        })
+        .collect()
+}
+
+/// Convert a SQL row to a Datalog fact for a given predicate
+pub fn row_to_atom(predicate: &str, row: &Row) -> Atom {
+    Atom {
+        predicate: Symbol::new(predicate.to_string()),
+        terms: row
+            .iter()
+            .map(|v| Term::Constant(sql_to_datalog_value(v)))
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

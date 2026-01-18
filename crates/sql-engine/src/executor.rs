@@ -254,8 +254,8 @@ impl Engine {
     ///     ?- ancestor(X, Y).
     /// "#)?;
     /// ```
-    pub fn execute_datalog(&self, program: &str) -> ExecResult {
-        crate::datalog::execute_datalog_program(&self.storage, program).map_err(ExecError::from)
+    pub fn execute_datalog(&mut self, program: &str) -> ExecResult {
+        crate::datalog::execute_datalog_program(&mut self.storage, program).map_err(ExecError::from)
     }
 
     /// Execute a logical plan

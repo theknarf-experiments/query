@@ -18,10 +18,12 @@ use datalog_grounding::{
 };
 use datalog_parser::{Constraint, Rule};
 use datalog_safety::{check_program_safety, stratify, SafetyError, StratificationError};
-use sql_storage::{FactDatabase, InsertError, StorageEngine};
+use sql_storage::{
+    atom_to_row, ensure_derived_table, FactDatabase, InsertError, StorageEngine, StorageError,
+};
 
 /// Errors that can occur during evaluation
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum EvaluationError {
     /// Program violates safety rules
     Safety(SafetyError),
@@ -34,6 +36,8 @@ pub enum EvaluationError {
         constraint: String,
         violation_count: usize,
     },
+    /// Storage error when writing derived facts
+    Storage(StorageError),
 }
 
 impl std::fmt::Display for EvaluationError {
@@ -54,6 +58,7 @@ impl std::fmt::Display for EvaluationError {
                     constraint, violation_count
                 )
             }
+            EvaluationError::Storage(e) => write!(f, "Storage error: {:?}", e),
         }
     }
 }
@@ -75,6 +80,12 @@ impl From<StratificationError> for EvaluationError {
 impl From<InsertError> for EvaluationError {
     fn from(e: InsertError) -> Self {
         EvaluationError::Derivation(e)
+    }
+}
+
+impl From<StorageError> for EvaluationError {
+    fn from(e: StorageError) -> Self {
+        EvaluationError::Storage(e)
     }
 }
 
@@ -223,7 +234,7 @@ pub fn evaluate_with_storage<S: StorageEngine>(
     rules: &[Rule],
     constraints: &[Constraint],
     initial_facts: FactDatabase,
-    storage: &S,
+    storage: &mut S,
 ) -> Result<FactDatabase, EvaluationError> {
     // Check safety first
     check_program_safety(rules)?;
@@ -248,7 +259,7 @@ pub fn evaluate_with_storage<S: StorageEngine>(
 fn check_constraints_with_storage<S: StorageEngine>(
     constraints: &[Constraint],
     db: &FactDatabase,
-    storage: &S,
+    storage: &mut S,
 ) -> Result<(), EvaluationError> {
     for constraint in constraints {
         let violations = satisfy_body_with_storage(&constraint.body, db, storage);
@@ -264,10 +275,14 @@ fn check_constraints_with_storage<S: StorageEngine>(
 }
 
 /// Semi-naive evaluation with storage support.
+///
+/// Derived facts are stored in the storage engine for unified access.
+/// Storage-backed predicates (SQL tables) remain unchanged - only IDB
+/// (derived predicates) are written to storage.
 fn semi_naive_evaluate_with_storage<S: StorageEngine>(
     rules: &[Rule],
     initial_facts: FactDatabase,
-    storage: &S,
+    storage: &mut S,
 ) -> Result<FactDatabase, EvaluationError> {
     let mut db = initial_facts.clone();
     let mut delta = initial_facts;
@@ -289,6 +304,25 @@ fn semi_naive_evaluate_with_storage<S: StorageEngine>(
 
             for fact in derived {
                 if !db.contains(&fact) && !new_delta.contains(&fact) {
+                    // Store derived facts in storage for unified access
+                    // Only for non-storage-backed predicates (derived predicates)
+                    if !db.is_storage_backed(&fact.predicate) {
+                        // Ensure table exists for this derived predicate
+                        ensure_derived_table(storage, fact.predicate.as_ref(), fact.terms.len())?;
+
+                        // Insert into storage - UNIQUE constraint handles deduplication
+                        let row = atom_to_row(&fact);
+                        match storage.insert(fact.predicate.as_ref(), row) {
+                            Ok(()) => {}
+                            Err(StorageError::ConstraintViolation(_)) => {
+                                // Duplicate - already exists in storage, skip
+                                continue;
+                            }
+                            Err(e) => return Err(e.into()),
+                        }
+                    }
+
+                    // Track in local delta for semi-naive optimization
                     new_delta.insert(fact)?;
                 }
             }

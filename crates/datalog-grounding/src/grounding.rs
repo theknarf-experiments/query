@@ -350,7 +350,7 @@ fn satisfy_body_mixed(
 pub fn ground_rule_with_storage<S: StorageEngine>(
     rule: &Rule,
     db: &FactDatabase,
-    storage: &S,
+    storage: &mut S,
 ) -> Vec<Atom> {
     let mut results = Vec::new();
 
@@ -370,7 +370,7 @@ pub fn ground_rule_with_storage<S: StorageEngine>(
 pub fn satisfy_body_with_storage<S: StorageEngine>(
     body: &[Literal],
     db: &FactDatabase,
-    storage: &S,
+    storage: &mut S,
 ) -> Vec<Substitution> {
     satisfy_body_with_storage_recursive(body, db, storage, None, 0, &Substitution::new())
 }
@@ -378,7 +378,7 @@ pub fn satisfy_body_with_storage<S: StorageEngine>(
 fn satisfy_body_with_storage_recursive<S: StorageEngine>(
     body: &[Literal],
     full_db: &FactDatabase,
-    storage: &S,
+    storage: &mut S,
     delta: Option<&FactDatabase>,
     index: usize,
     current_subst: &Substitution,
@@ -487,7 +487,7 @@ fn satisfy_body_with_storage_recursive<S: StorageEngine>(
 
 fn database_has_match_with_storage<S: StorageEngine>(
     db: &FactDatabase,
-    storage: &S,
+    storage: &mut S,
     atom: &Atom,
 ) -> bool {
     // For storage-backed predicates, we need to query storage
@@ -506,7 +506,7 @@ pub fn ground_rule_semi_naive_with_storage<S: StorageEngine>(
     rule: &Rule,
     delta: &FactDatabase,
     full_db: &FactDatabase,
-    storage: &S,
+    storage: &mut S,
 ) -> Vec<Atom> {
     let mut results = Vec::new();
 
@@ -533,7 +533,7 @@ fn satisfy_body_mixed_with_storage<S: StorageEngine>(
     body: &[Literal],
     delta: &FactDatabase,
     full_db: &FactDatabase,
-    storage: &S,
+    storage: &mut S,
     delta_pos: usize,
 ) -> Vec<Substitution> {
     satisfy_body_with_storage_mixed_recursive(
@@ -550,7 +550,7 @@ fn satisfy_body_mixed_with_storage<S: StorageEngine>(
 fn satisfy_body_with_storage_mixed_recursive<S: StorageEngine>(
     body: &[Literal],
     full_db: &FactDatabase,
-    storage: &S,
+    storage: &mut S,
     delta: Option<&FactDatabase>,
     delta_pos: usize,
     index: usize,

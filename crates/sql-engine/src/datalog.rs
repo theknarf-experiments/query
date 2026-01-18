@@ -101,7 +101,7 @@ fn term_to_sql_value(term: &Term) -> Option<SValue> {
 /// - No data duplication between SQL and Datalog storage
 /// - Automatic updates when SQL data changes
 pub fn load_table_as_facts<S: StorageEngine>(
-    storage: &S,
+    storage: &mut S,
     table: &str,
     db: &mut FactDatabase,
 ) -> Result<(), DatalogError> {
@@ -130,7 +130,7 @@ pub fn load_table_as_facts<S: StorageEngine>(
 ///
 /// SQL tables are automatically loaded as facts based on predicates used in the program.
 pub fn execute_datalog_program<S: StorageEngine>(
-    storage: &S,
+    storage: &mut S,
     program_text: &str,
 ) -> Result<QueryResult, DatalogError> {
     // Parse the Datalog program
@@ -226,7 +226,7 @@ fn collect_predicates(
 fn execute_query<S: StorageEngine>(
     db: &FactDatabase,
     query: &Query,
-    storage: &S,
+    storage: &mut S,
 ) -> Result<QueryResult, DatalogError> {
     // Find all variables in the query
     let variables = collect_query_variables(query);
@@ -318,6 +318,7 @@ fn collect_term_variables(term: &Term, vars: &mut Vec<Symbol>) {
 #[cfg(test)]
 mod tests {
     use crate::{Engine, QueryResult};
+    use sql_storage::Value;
 
     fn setup_test_db() -> Engine {
         let mut engine = Engine::new();
@@ -339,7 +340,7 @@ mod tests {
 
     #[test]
     fn test_simple_query() {
-        let engine = setup_test_db();
+        let mut engine = setup_test_db();
 
         let result = engine
             .execute_datalog(
@@ -359,7 +360,7 @@ mod tests {
 
     #[test]
     fn test_transitive_closure() {
-        let engine = setup_test_db();
+        let mut engine = setup_test_db();
 
         let result = engine
             .execute_datalog(
@@ -383,7 +384,7 @@ mod tests {
 
     #[test]
     fn test_query_with_constant() {
-        let engine = setup_test_db();
+        let mut engine = setup_test_db();
 
         let result = engine
             .execute_datalog(
@@ -406,7 +407,7 @@ mod tests {
 
     #[test]
     fn test_negation() {
-        let engine = setup_test_db();
+        let mut engine = setup_test_db();
 
         let result = engine
             .execute_datalog(
@@ -565,7 +566,7 @@ mod tests {
     #[test]
     fn test_query_with_join() {
         // Grandparent query: join parent with itself
-        let engine = setup_test_db();
+        let mut engine = setup_test_db();
 
         let result = engine
             .execute_datalog(
@@ -588,7 +589,7 @@ mod tests {
     #[test]
     fn test_query_with_three_way_join() {
         // Great-grandparent: three-way join
-        let engine = setup_test_db();
+        let mut engine = setup_test_db();
 
         let result = engine
             .execute_datalog(
@@ -671,7 +672,7 @@ mod tests {
 
     #[test]
     fn test_facts_only_no_rules() {
-        let engine = setup_test_db();
+        let mut engine = setup_test_db();
 
         // Just query existing facts, no rules
         let result = engine
@@ -693,7 +694,7 @@ mod tests {
 
     #[test]
     fn test_ground_query_true() {
-        let engine = setup_test_db();
+        let mut engine = setup_test_db();
 
         // Query a specific fact that exists
         let result = engine
@@ -715,7 +716,7 @@ mod tests {
 
     #[test]
     fn test_ground_query_false() {
-        let engine = setup_test_db();
+        let mut engine = setup_test_db();
 
         // Query a specific fact that doesn't exist
         let result = engine
@@ -882,7 +883,7 @@ mod tests {
 
     #[test]
     fn test_anonymous_variables() {
-        let engine = setup_test_db();
+        let mut engine = setup_test_db();
 
         let result = engine
             .execute_datalog(
@@ -1796,7 +1797,7 @@ mod tests {
 
     #[test]
     fn test_program_with_line_comments() {
-        let engine = setup_test_db();
+        let mut engine = setup_test_db();
 
         // Program with % line comments
         let result = engine
@@ -2297,6 +2298,111 @@ mod tests {
             assert_eq!(columns, vec!["X"]);
             // x -> y (direct) and x -> z (transitive)
             assert_eq!(rows.len(), 2);
+        } else {
+            panic!("Expected Select result");
+        }
+    }
+
+    #[test]
+    fn test_derived_facts_stored_in_storage() {
+        let mut engine = Engine::new();
+
+        // Create base table
+        engine
+            .execute("CREATE TABLE edge (src TEXT, dst TEXT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO edge VALUES ('a', 'b'), ('b', 'c'), ('c', 'd')")
+            .unwrap();
+
+        // Run Datalog program with derived predicate
+        engine
+            .execute_datalog(
+                r#"
+                path(X, Y) :- edge(X, Y).
+                path(X, Z) :- path(X, Y), edge(Y, Z).
+                ?- path(X, Y).
+                "#,
+            )
+            .unwrap();
+
+        // Verify derived facts are stored in storage by querying via SQL
+        // The 'path' table should have been created and populated
+        let result = engine.execute("SELECT * FROM path ORDER BY col0, col1");
+        assert!(result.is_ok(), "path table should exist in storage");
+
+        if let QueryResult::Select { columns, rows } = result.unwrap() {
+            // Should have 6 path facts: a->b, b->c, c->d (direct) + a->c, b->d (2-hop) + a->d (3-hop)
+            assert_eq!(rows.len(), 6, "Expected 6 derived path facts in storage");
+            assert_eq!(columns, vec!["col0", "col1"]); // Auto-generated column names
+        } else {
+            panic!("Expected Select result");
+        }
+    }
+
+    #[test]
+    fn test_derived_facts_deduplication() {
+        let mut engine = Engine::new();
+
+        // Create base table with data that would produce duplicates
+        engine
+            .execute("CREATE TABLE link (x TEXT, y TEXT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO link VALUES ('a', 'b'), ('a', 'b')") // Duplicate base facts
+            .unwrap();
+
+        // Run Datalog program
+        engine
+            .execute_datalog(
+                r#"
+                derived(X, Y) :- link(X, Y).
+                ?- derived(X, Y).
+                "#,
+            )
+            .unwrap();
+
+        // Verify deduplication: even though there are 2 identical base facts,
+        // the derived table should have only 1 fact due to UNIQUE constraint
+        let result = engine.execute("SELECT * FROM derived").unwrap();
+
+        if let QueryResult::Select { rows, .. } = result {
+            // The UNIQUE constraint should deduplicate
+            assert_eq!(rows.len(), 1, "Derived facts should be deduplicated");
+        } else {
+            panic!("Expected Select result");
+        }
+    }
+
+    #[test]
+    fn test_sql_query_on_derived_datalog_predicate() {
+        let mut engine = Engine::new();
+
+        // Create base table
+        engine.execute("CREATE TABLE person (name TEXT)").unwrap();
+        engine
+            .execute("INSERT INTO person VALUES ('alice'), ('bob')")
+            .unwrap();
+
+        // Run Datalog program to derive facts
+        engine
+            .execute_datalog(
+                r#"
+                greeted(X) :- person(X).
+                ?- greeted(X).
+                "#,
+            )
+            .unwrap();
+
+        // Now query the derived predicate using SQL
+        let result = engine
+            .execute("SELECT col0 AS name FROM greeted ORDER BY col0")
+            .unwrap();
+
+        if let QueryResult::Select { rows, .. } = result {
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0][0], Value::Text("alice".to_string()));
+            assert_eq!(rows[1][0], Value::Text("bob".to_string()));
         } else {
             panic!("Expected Select result");
         }

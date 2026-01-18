@@ -24,6 +24,7 @@
 
 use crate::datalog_unification::{unify_atoms, Substitution};
 use crate::engine::{ColumnSchema, DataType, Row, StorageEngine, TableSchema};
+use crate::value::JsonValue;
 use crate::Value as SqlValue;
 use datalog_parser::{Atom, Symbol, Term, Value as DatalogValue};
 use std::collections::{HashMap, HashSet};
@@ -278,11 +279,8 @@ impl DatalogContext {
     fn unify_rows_with_pattern(&self, pattern: &Atom, rows: &[Row]) -> Vec<Substitution> {
         let mut results = Vec::new();
         for row in rows {
-            // Convert row to atom
-            let terms: Vec<Term> = row
-                .iter()
-                .map(|v| Term::Constant(sql_to_datalog_value(v)))
-                .collect();
+            // Convert row to atom (handles JSON → compound term conversion)
+            let terms: Vec<Term> = row.iter().map(sql_value_to_term).collect();
             let fact = Atom {
                 predicate: pattern.predicate,
                 terms,
@@ -550,28 +548,180 @@ pub fn ensure_derived_table<S: StorageEngine>(
 /// Convert a Datalog fact (Atom) to a SQL row for storage
 ///
 /// Panics if the atom contains variables (must be ground).
+/// Compound terms are encoded as JSON for proper round-tripping.
 pub fn atom_to_row(atom: &Atom) -> Row {
-    atom.terms
-        .iter()
-        .map(|term| match term {
-            Term::Constant(value) => datalog_to_sql_value(value),
-            Term::Variable(v) => panic!("Cannot convert variable {} to SQL value", v.as_ref()),
-            Term::Compound(_, _) => {
-                // Serialize compound terms as text
-                SqlValue::Text(format!("{:?}", term))
-            }
-        })
-        .collect()
+    atom.terms.iter().map(term_to_sql_value).collect()
 }
 
 /// Convert a SQL row to a Datalog fact for a given predicate
 pub fn row_to_atom(predicate: &str, row: &Row) -> Atom {
     Atom {
         predicate: Symbol::new(predicate.to_string()),
-        terms: row
-            .iter()
-            .map(|v| Term::Constant(sql_to_datalog_value(v)))
-            .collect(),
+        terms: row.iter().map(sql_value_to_term).collect(),
+    }
+}
+
+/// Convert a SQL Value to a Datalog Term
+///
+/// JSON values are decoded back to compound terms.
+/// Other values become constants.
+pub fn sql_value_to_term(value: &SqlValue) -> Term {
+    match value {
+        SqlValue::Json(json) => json_to_term(json),
+        other => Term::Constant(sql_to_datalog_value(other)),
+    }
+}
+
+/// Convert a Datalog Term to a SQL Value
+///
+/// Compound terms are encoded as JSON.
+/// Constants are converted to their SQL equivalents.
+pub fn term_to_sql_value(term: &Term) -> SqlValue {
+    match term {
+        Term::Constant(value) => datalog_to_sql_value(value),
+        Term::Variable(v) => panic!("Cannot convert variable {} to SQL value", v.as_ref()),
+        Term::Compound(_, _) => SqlValue::Json(term_to_json(term)),
+    }
+}
+
+/// Convert a Datalog Term to JsonValue
+///
+/// Encoding:
+/// - Compound terms: `{"f": "functor", "a": [arg1, arg2, ...]}`
+/// - Atoms: `{"t": "a", "v": "name"}`
+/// - Integers: `{"t": "i", "v": 42}`
+/// - Floats: `{"t": "f", "v": 3.14}`
+/// - Booleans: `{"t": "b", "v": true}`
+/// - Strings: `{"t": "s", "v": "text"}`
+pub fn term_to_json(term: &Term) -> JsonValue {
+    match term {
+        Term::Compound(functor, args) => {
+            let json_args: Vec<JsonValue> = args.iter().map(term_to_json).collect();
+            JsonValue::Object(vec![
+                ("f".to_string(), JsonValue::String(functor.as_ref().clone())),
+                ("a".to_string(), JsonValue::Array(json_args)),
+            ])
+        }
+        Term::Constant(value) => match value {
+            DatalogValue::Atom(s) => JsonValue::Object(vec![
+                ("t".to_string(), JsonValue::String("a".to_string())),
+                ("v".to_string(), JsonValue::String(s.as_ref().clone())),
+            ]),
+            DatalogValue::Integer(n) => JsonValue::Object(vec![
+                ("t".to_string(), JsonValue::String("i".to_string())),
+                ("v".to_string(), JsonValue::Number(*n as f64)),
+            ]),
+            DatalogValue::Float(f) => JsonValue::Object(vec![
+                ("t".to_string(), JsonValue::String("f".to_string())),
+                ("v".to_string(), JsonValue::Number(*f)),
+            ]),
+            DatalogValue::Boolean(b) => JsonValue::Object(vec![
+                ("t".to_string(), JsonValue::String("b".to_string())),
+                ("v".to_string(), JsonValue::Bool(*b)),
+            ]),
+            DatalogValue::String(s) => JsonValue::Object(vec![
+                ("t".to_string(), JsonValue::String("s".to_string())),
+                ("v".to_string(), JsonValue::String(s.as_ref().clone())),
+            ]),
+        },
+        Term::Variable(v) => panic!("Cannot convert variable {} to JSON", v.as_ref()),
+    }
+}
+
+/// Convert JsonValue back to a Datalog Term
+///
+/// Decodes JSON according to the encoding in `term_to_json`.
+pub fn json_to_term(json: &JsonValue) -> Term {
+    match json {
+        JsonValue::Object(pairs) => {
+            // Check if it's a compound term (has "f" and "a" keys)
+            let has_functor = pairs.iter().any(|(k, _)| k == "f");
+            let has_args = pairs.iter().any(|(k, _)| k == "a");
+
+            if has_functor && has_args {
+                // Compound term
+                let functor = pairs
+                    .iter()
+                    .find(|(k, _)| k == "f")
+                    .and_then(|(_, v)| match v {
+                        JsonValue::String(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .expect("compound term must have string functor");
+
+                let args = pairs
+                    .iter()
+                    .find(|(k, _)| k == "a")
+                    .and_then(|(_, v)| match v {
+                        JsonValue::Array(arr) => Some(arr.iter().map(json_to_term).collect()),
+                        _ => None,
+                    })
+                    .expect("compound term must have array arguments");
+
+                Term::Compound(Symbol::new(functor), args)
+            } else {
+                // Constant value (has "t" and "v" keys)
+                let type_tag = pairs
+                    .iter()
+                    .find(|(k, _)| k == "t")
+                    .and_then(|(_, v)| match v {
+                        JsonValue::String(s) => Some(s.as_str()),
+                        _ => None,
+                    })
+                    .expect("constant must have type tag");
+
+                let value = pairs
+                    .iter()
+                    .find(|(k, _)| k == "v")
+                    .map(|(_, v)| v)
+                    .expect("constant must have value");
+
+                match type_tag {
+                    "a" => {
+                        // Atom
+                        if let JsonValue::String(s) = value {
+                            Term::Constant(DatalogValue::Atom(Symbol::new(s.clone())))
+                        } else {
+                            panic!("atom value must be string")
+                        }
+                    }
+                    "i" => {
+                        // Integer
+                        if let JsonValue::Number(n) = value {
+                            Term::Constant(DatalogValue::Integer(*n as i64))
+                        } else {
+                            panic!("integer value must be number")
+                        }
+                    }
+                    "f" => {
+                        // Float
+                        if let JsonValue::Number(n) = value {
+                            Term::Constant(DatalogValue::Float(*n))
+                        } else {
+                            panic!("float value must be number")
+                        }
+                    }
+                    "b" => {
+                        // Boolean
+                        if let JsonValue::Bool(b) = value {
+                            Term::Constant(DatalogValue::Boolean(*b))
+                        } else {
+                            panic!("boolean value must be bool")
+                        }
+                    }
+                    "s" => {
+                        // String
+                        if let JsonValue::String(s) = value {
+                            Term::Constant(DatalogValue::String(Symbol::new(s.clone())))
+                        } else {
+                            panic!("string value must be string")
+                        }
+                    }
+                    other => panic!("unknown type tag: {}", other),
+                }
+            }
+        }
+        _ => panic!("expected JSON object for term, got {:?}", json),
     }
 }
 
@@ -1123,5 +1273,237 @@ mod tests {
             let converted = sql_to_datalog_value(&sql_val);
             assert_eq!(converted, expected_datalog);
         }
+    }
+
+    // ===== JSON Compound Term Serialization Tests =====
+
+    #[test]
+    fn test_term_to_json_atom() {
+        let term = Term::Constant(Value::Atom(Intern::new("foo".to_string())));
+        let json = term_to_json(&term);
+
+        // Should be {"t": "a", "v": "foo"}
+        assert_eq!(
+            json.extract("$.t"),
+            Some(&JsonValue::String("a".to_string()))
+        );
+        assert_eq!(
+            json.extract("$.v"),
+            Some(&JsonValue::String("foo".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_term_to_json_integer() {
+        let term = Term::Constant(Value::Integer(42));
+        let json = term_to_json(&term);
+
+        assert_eq!(
+            json.extract("$.t"),
+            Some(&JsonValue::String("i".to_string()))
+        );
+        assert_eq!(json.extract("$.v"), Some(&JsonValue::Number(42.0)));
+    }
+
+    #[test]
+    fn test_term_to_json_compound() {
+        // nest(value)
+        let term = Term::Compound(
+            Intern::new("nest".to_string()),
+            vec![Term::Constant(Value::Atom(Intern::new(
+                "value".to_string(),
+            )))],
+        );
+        let json = term_to_json(&term);
+
+        // Should be {"f": "nest", "a": [{"t": "a", "v": "value"}]}
+        assert_eq!(
+            json.extract("$.f"),
+            Some(&JsonValue::String("nest".to_string()))
+        );
+        assert_eq!(
+            json.extract("$.a[0].t"),
+            Some(&JsonValue::String("a".to_string()))
+        );
+        assert_eq!(
+            json.extract("$.a[0].v"),
+            Some(&JsonValue::String("value".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_term_to_json_nested_compound() {
+        // nest(nest(value))
+        let inner = Term::Compound(
+            Intern::new("nest".to_string()),
+            vec![Term::Constant(Value::Atom(Intern::new(
+                "value".to_string(),
+            )))],
+        );
+        let outer = Term::Compound(Intern::new("nest".to_string()), vec![inner]);
+        let json = term_to_json(&outer);
+
+        // Should be {"f": "nest", "a": [{"f": "nest", "a": [{"t": "a", "v": "value"}]}]}
+        assert_eq!(
+            json.extract("$.f"),
+            Some(&JsonValue::String("nest".to_string()))
+        );
+        assert_eq!(
+            json.extract("$.a[0].f"),
+            Some(&JsonValue::String("nest".to_string()))
+        );
+        assert_eq!(
+            json.extract("$.a[0].a[0].v"),
+            Some(&JsonValue::String("value".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_json_to_term_atom() {
+        let json = JsonValue::Object(vec![
+            ("t".to_string(), JsonValue::String("a".to_string())),
+            ("v".to_string(), JsonValue::String("foo".to_string())),
+        ]);
+        let term = json_to_term(&json);
+
+        assert_eq!(
+            term,
+            Term::Constant(Value::Atom(Intern::new("foo".to_string())))
+        );
+    }
+
+    #[test]
+    fn test_json_to_term_compound() {
+        // {"f": "nest", "a": [{"t": "a", "v": "value"}]}
+        let json = JsonValue::Object(vec![
+            ("f".to_string(), JsonValue::String("nest".to_string())),
+            (
+                "a".to_string(),
+                JsonValue::Array(vec![JsonValue::Object(vec![
+                    ("t".to_string(), JsonValue::String("a".to_string())),
+                    ("v".to_string(), JsonValue::String("value".to_string())),
+                ])]),
+            ),
+        ]);
+        let term = json_to_term(&json);
+
+        let expected = Term::Compound(
+            Intern::new("nest".to_string()),
+            vec![Term::Constant(Value::Atom(Intern::new(
+                "value".to_string(),
+            )))],
+        );
+        assert_eq!(term, expected);
+    }
+
+    #[test]
+    fn test_term_json_roundtrip() {
+        // Test that term -> json -> term is identity
+        let terms = vec![
+            Term::Constant(Value::Atom(Intern::new("foo".to_string()))),
+            Term::Constant(Value::Integer(42)),
+            Term::Constant(Value::Float(3.14)),
+            Term::Constant(Value::Boolean(true)),
+            Term::Compound(
+                Intern::new("nest".to_string()),
+                vec![Term::Constant(Value::Atom(Intern::new(
+                    "value".to_string(),
+                )))],
+            ),
+            // Deeply nested: nest(nest(nest(value)))
+            Term::Compound(
+                Intern::new("nest".to_string()),
+                vec![Term::Compound(
+                    Intern::new("nest".to_string()),
+                    vec![Term::Compound(
+                        Intern::new("nest".to_string()),
+                        vec![Term::Constant(Value::Atom(Intern::new(
+                            "value".to_string(),
+                        )))],
+                    )],
+                )],
+            ),
+            // Multiple args: pair(1, foo)
+            Term::Compound(
+                Intern::new("pair".to_string()),
+                vec![
+                    Term::Constant(Value::Integer(1)),
+                    Term::Constant(Value::Atom(Intern::new("foo".to_string()))),
+                ],
+            ),
+        ];
+
+        for term in terms {
+            let json = term_to_json(&term);
+            let roundtripped = json_to_term(&json);
+            assert_eq!(roundtripped, term, "Roundtrip failed for {:?}", term);
+        }
+    }
+
+    #[test]
+    fn test_compound_term_storage_roundtrip() {
+        // Test that compound terms can be stored and retrieved via SQL
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        // Create a compound term: nest(value)
+        let compound_term = Term::Compound(
+            Intern::new("nest".to_string()),
+            vec![Term::Constant(Value::Atom(Intern::new(
+                "value".to_string(),
+            )))],
+        );
+
+        let atom = Atom {
+            predicate: Intern::new("test".to_string()),
+            terms: vec![compound_term.clone()],
+        };
+
+        // Insert the fact
+        db.insert(atom.clone(), &mut storage).unwrap();
+
+        // Query for it
+        let pattern = Atom {
+            predicate: Intern::new("test".to_string()),
+            terms: vec![Term::Variable(Intern::new("X".to_string()))],
+        };
+
+        let results = db.query(&pattern, &storage);
+        assert_eq!(results.len(), 1);
+
+        // The bound variable should be the compound term
+        let subst = &results[0];
+        let bound = subst.apply(&Term::Variable(Intern::new("X".to_string())));
+        assert_eq!(bound, compound_term);
+    }
+
+    #[test]
+    fn test_deeply_nested_compound_storage() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        // Create deeply nested: nest(nest(nest(nest(value))))
+        let mut term = Term::Constant(Value::Atom(Intern::new("value".to_string())));
+        for _ in 0..4 {
+            term = Term::Compound(Intern::new("nest".to_string()), vec![term]);
+        }
+
+        let atom = Atom {
+            predicate: Intern::new("deep".to_string()),
+            terms: vec![term.clone()],
+        };
+
+        db.insert(atom, &mut storage).unwrap();
+
+        let pattern = Atom {
+            predicate: Intern::new("deep".to_string()),
+            terms: vec![Term::Variable(Intern::new("X".to_string()))],
+        };
+
+        let results = db.query(&pattern, &storage);
+        assert_eq!(results.len(), 1);
+
+        let bound = results[0].apply(&Term::Variable(Intern::new("X".to_string())));
+        assert_eq!(bound, term);
     }
 }

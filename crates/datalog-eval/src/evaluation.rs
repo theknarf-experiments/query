@@ -874,4 +874,216 @@ mod tests {
     // Note: Zero-arity predicate tests from proclog are not included because
     // SQL storage requires at least one column per table. Zero-arity predicates
     // (propositional logic) would require a different storage approach.
+
+    // ===== Long Recursive Chain Stress Tests =====
+
+    #[test]
+    fn test_very_long_chain() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        // Create a long chain: n0->n1->n2->...->n100
+        for i in 0..100 {
+            let from = format!("n{}", i);
+            let to = format!("n{}", i + 1);
+            db.insert(
+                make_atom("edge", vec![atom_term(&from), atom_term(&to)]),
+                &mut storage,
+            )
+            .unwrap();
+        }
+
+        // path(X, Y) :- edge(X, Y).
+        // path(X, Z) :- path(X, Y), edge(Y, Z).
+        let rules = vec![
+            Rule {
+                head: make_atom("path", vec![var_term("X"), var_term("Y")]),
+                body: vec![Literal::Positive(make_atom(
+                    "edge",
+                    vec![var_term("X"), var_term("Y")],
+                ))],
+            },
+            Rule {
+                head: make_atom("path", vec![var_term("X"), var_term("Z")]),
+                body: vec![
+                    Literal::Positive(make_atom("path", vec![var_term("X"), var_term("Y")])),
+                    Literal::Positive(make_atom("edge", vec![var_term("Y"), var_term("Z")])),
+                ],
+            },
+        ];
+
+        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+
+        // Should be able to reach from n0 to n100
+        assert!(result.contains(
+            &make_atom("path", vec![atom_term("n0"), atom_term("n100")]),
+            &storage
+        ));
+
+        // We have 100 edges, so we should have:
+        // - 100 direct paths
+        // - 99 paths of length 2
+        // - 98 paths of length 3
+        // - ...
+        // - 1 path of length 100
+        // Total = 100 + 99 + 98 + ... + 1 = 100*101/2 = 5050
+        let path_count = result.count_facts("path", &storage);
+        assert_eq!(path_count, 5050, "Expected 5050 path facts");
+    }
+
+    #[test]
+    fn test_long_chain_with_stats() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        // Create a chain of 50 nodes
+        for i in 0..50 {
+            let from = format!("n{}", i);
+            let to = format!("n{}", i + 1);
+            db.insert(
+                make_atom("edge", vec![atom_term(&from), atom_term(&to)]),
+                &mut storage,
+            )
+            .unwrap();
+        }
+
+        let rules = vec![
+            Rule {
+                head: make_atom("path", vec![var_term("X"), var_term("Y")]),
+                body: vec![Literal::Positive(make_atom(
+                    "edge",
+                    vec![var_term("X"), var_term("Y")],
+                ))],
+            },
+            Rule {
+                head: make_atom("path", vec![var_term("X"), var_term("Z")]),
+                body: vec![
+                    Literal::Positive(make_atom("path", vec![var_term("X"), var_term("Y")])),
+                    Literal::Positive(make_atom("edge", vec![var_term("Y"), var_term("Z")])),
+                ],
+            },
+        ];
+
+        let (result, stats) = evaluate_instrumented(&rules, &[], db, &mut storage)
+            .expect("evaluation should succeed");
+
+        // Check that semi-naive is efficient
+        // Should converge in approximately 50 iterations (length of chain)
+        println!(
+            "Long chain (50 nodes) stats: {} iterations, {} facts derived",
+            stats.iterations, stats.facts_derived
+        );
+        assert!(
+            stats.iterations <= 51,
+            "Too many iterations: {}",
+            stats.iterations
+        );
+
+        // Verify correctness
+        assert!(result.contains(
+            &make_atom("path", vec![atom_term("n0"), atom_term("n50")]),
+            &storage
+        ));
+    }
+
+    #[test]
+    fn test_wide_graph_stress() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        // Create a wide graph: single source to many targets
+        // This tests performance with many facts in a single relation
+        for i in 0..100 {
+            let target = format!("t{}", i);
+            db.insert(
+                make_atom("edge", vec![atom_term("source"), atom_term(&target)]),
+                &mut storage,
+            )
+            .unwrap();
+        }
+
+        // reachable(X) :- edge(source, X).
+        let rules = vec![Rule {
+            head: make_atom("reachable", vec![var_term("X")]),
+            body: vec![Literal::Positive(make_atom(
+                "edge",
+                vec![atom_term("source"), var_term("X")],
+            ))],
+        }];
+
+        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+
+        // All targets should be reachable
+        for i in 0..100 {
+            let target = format!("t{}", i);
+            assert!(
+                result.contains(&make_atom("reachable", vec![atom_term(&target)]), &storage),
+                "t{} should be reachable",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_multi_level_derivation() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        // Create facts that will derive through multiple predicates
+        for i in 0..20 {
+            let name = format!("e{}", i);
+            db.insert(make_atom("base", vec![atom_term(&name)]), &mut storage)
+                .unwrap();
+        }
+
+        // level1(X) :- base(X).
+        // level2(X) :- level1(X).
+        // level3(X) :- level2(X).
+        // level4(X) :- level3(X).
+        // level5(X) :- level4(X).
+        let rules = vec![
+            Rule {
+                head: make_atom("level1", vec![var_term("X")]),
+                body: vec![Literal::Positive(make_atom("base", vec![var_term("X")]))],
+            },
+            Rule {
+                head: make_atom("level2", vec![var_term("X")]),
+                body: vec![Literal::Positive(make_atom("level1", vec![var_term("X")]))],
+            },
+            Rule {
+                head: make_atom("level3", vec![var_term("X")]),
+                body: vec![Literal::Positive(make_atom("level2", vec![var_term("X")]))],
+            },
+            Rule {
+                head: make_atom("level4", vec![var_term("X")]),
+                body: vec![Literal::Positive(make_atom("level3", vec![var_term("X")]))],
+            },
+            Rule {
+                head: make_atom("level5", vec![var_term("X")]),
+                body: vec![Literal::Positive(make_atom("level4", vec![var_term("X")]))],
+            },
+        ];
+
+        let (result, stats) = evaluate_instrumented(&rules, &[], db, &mut storage)
+            .expect("evaluation should succeed");
+
+        // Each level should have all 20 entities
+        for level in 1..=5 {
+            let level_name = format!("level{}", level);
+            let count = result.count_facts(&level_name, &storage);
+            assert_eq!(count, 20, "Level {} should have 20 facts", level);
+        }
+
+        println!(
+            "Multi-level derivation stats: {} iterations, {} facts derived",
+            stats.iterations, stats.facts_derived
+        );
+
+        // Should derive in about 5 iterations (one per level)
+        assert!(
+            stats.iterations <= 6,
+            "Too many iterations: {}",
+            stats.iterations
+        );
+    }
 }

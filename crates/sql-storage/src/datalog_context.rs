@@ -394,6 +394,21 @@ impl DatalogContext {
         self.predicate_count() == 0
     }
 
+    /// Count facts for a given predicate in storage
+    pub fn count_facts<S: StorageEngine>(&self, predicate: &str, storage: &S) -> usize {
+        if !self
+            .storage_backed_predicates
+            .contains(&Symbol::new(predicate.to_string()))
+            && !self
+                .derived_predicates
+                .contains(&Symbol::new(predicate.to_string()))
+        {
+            return 0;
+        }
+
+        storage.scan(predicate).map(|rows| rows.len()).unwrap_or(0)
+    }
+
     #[cfg(any(test, feature = "test-utils"))]
     pub fn track_ground_queries() -> GroundQueryTracker {
         GroundQueryTracker::new()

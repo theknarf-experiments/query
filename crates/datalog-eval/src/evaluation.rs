@@ -12,10 +12,13 @@
 //! let result = evaluate(&rules, &constraints, initial_facts)?;
 //! ```
 
-use datalog_grounding::{ground_rule, ground_rule_semi_naive, satisfy_body};
+use datalog_grounding::{
+    ground_rule, ground_rule_semi_naive, ground_rule_semi_naive_with_storage,
+    ground_rule_with_storage, satisfy_body, satisfy_body_with_storage,
+};
 use datalog_parser::{Constraint, Rule};
 use datalog_safety::{check_program_safety, stratify, SafetyError, StratificationError};
-use sql_storage::{FactDatabase, InsertError};
+use sql_storage::{FactDatabase, InsertError, StorageEngine};
 
 /// Errors that can occur during evaluation
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,6 +174,117 @@ fn semi_naive_evaluate(
             } else {
                 // Multi-literal: use semi-naive grounding
                 ground_rule_semi_naive(rule, &delta, &db)
+            };
+
+            for fact in derived {
+                if !db.contains(&fact) && !new_delta.contains(&fact) {
+                    new_delta.insert(fact)?;
+                }
+            }
+        }
+
+        // Fixed point reached when no new facts are derived
+        if new_delta.is_empty() {
+            break;
+        }
+
+        let delta_next = new_delta.clone();
+        db.absorb(new_delta);
+        delta = delta_next;
+    }
+
+    Ok(db)
+}
+
+// ============================================================================
+// Storage-Aware Evaluation Functions
+// ============================================================================
+//
+// These functions enable Datalog evaluation to use SQL storage indexes for
+// efficient lookups. Storage-backed predicates are queried directly from the
+// storage engine instead of from local facts.
+
+/// Evaluate a Datalog program using storage for indexed lookups.
+///
+/// This is the storage-aware version of `evaluate()`. It queries storage-backed
+/// predicates (SQL tables) directly using indexes when available.
+///
+/// # Arguments
+///
+/// * `rules` - The Datalog rules to evaluate
+/// * `constraints` - Integrity constraints that must not be violated
+/// * `initial_facts` - The initial fact database (may have storage-backed predicates)
+/// * `storage` - The storage engine for indexed lookups
+///
+/// # Returns
+///
+/// The complete fact database including all derived facts
+pub fn evaluate_with_storage<S: StorageEngine>(
+    rules: &[Rule],
+    constraints: &[Constraint],
+    initial_facts: FactDatabase,
+    storage: &S,
+) -> Result<FactDatabase, EvaluationError> {
+    // Check safety first
+    check_program_safety(rules)?;
+
+    // Stratify the program to handle negation correctly
+    let stratification = stratify(rules)?;
+
+    let mut db = initial_facts;
+
+    // Evaluate each stratum to fixed point before moving to the next
+    for stratum_rules in &stratification.rules_by_stratum {
+        db = semi_naive_evaluate_with_storage(stratum_rules, db, storage)?;
+    }
+
+    // Check constraints after evaluation
+    check_constraints_with_storage(constraints, &db, storage)?;
+
+    Ok(db)
+}
+
+/// Check constraints using storage for indexed lookups.
+fn check_constraints_with_storage<S: StorageEngine>(
+    constraints: &[Constraint],
+    db: &FactDatabase,
+    storage: &S,
+) -> Result<(), EvaluationError> {
+    for constraint in constraints {
+        let violations = satisfy_body_with_storage(&constraint.body, db, storage);
+
+        if !violations.is_empty() {
+            return Err(EvaluationError::ConstraintViolation {
+                constraint: format!("{:?}", constraint.body),
+                violation_count: violations.len(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Semi-naive evaluation with storage support.
+fn semi_naive_evaluate_with_storage<S: StorageEngine>(
+    rules: &[Rule],
+    initial_facts: FactDatabase,
+    storage: &S,
+) -> Result<FactDatabase, EvaluationError> {
+    let mut db = initial_facts.clone();
+    let mut delta = initial_facts;
+
+    loop {
+        let mut new_delta = FactDatabase::new();
+
+        for rule in rules {
+            let derived = if rule.body.is_empty() {
+                // No body - always evaluate (fact-like rule)
+                ground_rule_with_storage(rule, &db, storage)
+            } else if rule.body.len() == 1 {
+                // Single literal - just use delta (derived facts are local)
+                ground_rule_with_storage(rule, &delta, storage)
+            } else {
+                // Multi-literal: use semi-naive grounding with storage
+                ground_rule_semi_naive_with_storage(rule, &delta, &db, storage)
             };
 
             for fact in derived {

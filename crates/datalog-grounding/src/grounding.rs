@@ -21,7 +21,7 @@
 
 use datalog_builtins as builtins;
 use datalog_parser::{Atom, Literal, Rule, Term};
-use sql_storage::{FactDatabase, Substitution};
+use sql_storage::{FactDatabase, StorageEngine, Substitution};
 
 #[cfg(test)]
 mod allocation_tracker {
@@ -336,6 +336,337 @@ fn satisfy_body_mixed(
             DatabaseSelection::Full
         }
     })
+}
+
+// ============================================================================
+// Storage-Aware Grounding Functions
+// ============================================================================
+//
+// These functions enable Datalog queries to use SQL storage indexes for efficient
+// lookups. For storage-backed predicates, they query the storage engine directly
+// instead of local facts.
+
+/// Ground a rule using storage for indexed lookups
+pub fn ground_rule_with_storage<S: StorageEngine>(
+    rule: &Rule,
+    db: &FactDatabase,
+    storage: &S,
+) -> Vec<Atom> {
+    let mut results = Vec::new();
+
+    // Get all substitutions that satisfy the entire body
+    let substitutions = satisfy_body_with_storage(&rule.body, db, storage);
+
+    // Apply each substitution to the head to get ground facts
+    for subst in substitutions {
+        let ground_head = subst.apply_atom(&rule.head);
+        results.push(ground_head);
+    }
+
+    results
+}
+
+/// Find all substitutions that satisfy a conjunction of literals, using storage indexes
+pub fn satisfy_body_with_storage<S: StorageEngine>(
+    body: &[Literal],
+    db: &FactDatabase,
+    storage: &S,
+) -> Vec<Substitution> {
+    satisfy_body_with_storage_recursive(body, db, storage, None, 0, &Substitution::new())
+}
+
+fn satisfy_body_with_storage_recursive<S: StorageEngine>(
+    body: &[Literal],
+    full_db: &FactDatabase,
+    storage: &S,
+    delta: Option<&FactDatabase>,
+    index: usize,
+    current_subst: &Substitution,
+) -> Vec<Substitution> {
+    if index == body.len() {
+        return vec![current_subst.clone()];
+    }
+
+    let literal = &body[index];
+
+    match literal {
+        Literal::Positive(atom) => {
+            if let Some(builtin) = builtins::parse_builtin(atom) {
+                // Built-ins act as filters - evaluate them after satisfying the rest.
+                let rest_substs = satisfy_body_with_storage_recursive(
+                    body,
+                    full_db,
+                    storage,
+                    delta,
+                    index + 1,
+                    current_subst,
+                );
+                let mut result = Vec::new();
+
+                for subst in rest_substs {
+                    let applied_builtin = apply_subst_to_builtin(&subst, &builtin);
+                    if let Some(true) = builtins::eval_builtin(&applied_builtin, &subst) {
+                        result.push(subst);
+                    }
+                }
+
+                result
+            } else {
+                // Apply the current substitution to the atom before querying.
+                let grounded_atom = current_subst.apply_atom(atom);
+                let mut result = Vec::new();
+
+                // Use storage-backed query for indexed lookups
+                let atom_substs = full_db.query_with_storage(&grounded_atom, storage);
+
+                for atom_subst in atom_substs {
+                    if let Some(combined) = combine_substs(current_subst, &atom_subst) {
+                        let mut rest_results = satisfy_body_with_storage_recursive(
+                            body,
+                            full_db,
+                            storage,
+                            delta,
+                            index + 1,
+                            &combined,
+                        );
+                        result.append(&mut rest_results);
+                    }
+                }
+
+                result
+            }
+        }
+        Literal::Negative(atom) => {
+            // Negation filters substitutions produced by the rest of the body.
+            let rest_substs = satisfy_body_with_storage_recursive(
+                body,
+                full_db,
+                storage,
+                delta,
+                index + 1,
+                current_subst,
+            );
+            let mut result = Vec::new();
+
+            for subst in rest_substs {
+                let grounded_atom = subst.apply_atom(atom);
+                if !database_has_match_with_storage(full_db, storage, &grounded_atom) {
+                    result.push(subst);
+                }
+            }
+
+            result
+        }
+        Literal::Comparison(comp) => {
+            // Comparisons act as filters - evaluate after satisfying the rest
+            let rest_substs = satisfy_body_with_storage_recursive(
+                body,
+                full_db,
+                storage,
+                delta,
+                index + 1,
+                current_subst,
+            );
+            let mut result = Vec::new();
+
+            for subst in rest_substs {
+                // Evaluate the comparison with the substitution
+                let left = subst.apply(&comp.left);
+                let right = subst.apply(&comp.right);
+                let builtin =
+                    builtins::BuiltIn::Comparison(comp_op_to_builtin(&comp.op), left, right);
+                if let Some(true) = builtins::eval_builtin(&builtin, &subst) {
+                    result.push(subst);
+                }
+            }
+
+            result
+        }
+    }
+}
+
+fn database_has_match_with_storage<S: StorageEngine>(
+    db: &FactDatabase,
+    storage: &S,
+    atom: &Atom,
+) -> bool {
+    // For storage-backed predicates, we need to query storage
+    // For local predicates, use the regular check
+    if db.is_storage_backed(&atom.predicate) {
+        !db.query_with_storage(atom, storage).is_empty()
+    } else if atom_is_ground(atom) {
+        db.contains(atom)
+    } else {
+        !db.query(atom).is_empty()
+    }
+}
+
+/// Ground a rule using semi-naive evaluation with storage support
+pub fn ground_rule_semi_naive_with_storage<S: StorageEngine>(
+    rule: &Rule,
+    delta: &FactDatabase,
+    full_db: &FactDatabase,
+    storage: &S,
+) -> Vec<Atom> {
+    let mut results = Vec::new();
+
+    if rule.body.is_empty() {
+        // No body - just return the head
+        return vec![rule.head.clone()];
+    }
+
+    // For each position i in the body, use delta for position i and full_db for others
+    for delta_pos in 0..rule.body.len() {
+        let substs =
+            satisfy_body_mixed_with_storage(&rule.body, delta, full_db, storage, delta_pos);
+        for subst in substs {
+            let ground_head = subst.apply_atom(&rule.head);
+            results.push(ground_head);
+        }
+    }
+
+    results
+}
+
+/// Satisfy body literals using delta for one position and full DB for others, with storage
+fn satisfy_body_mixed_with_storage<S: StorageEngine>(
+    body: &[Literal],
+    delta: &FactDatabase,
+    full_db: &FactDatabase,
+    storage: &S,
+    delta_pos: usize,
+) -> Vec<Substitution> {
+    satisfy_body_with_storage_mixed_recursive(
+        body,
+        full_db,
+        storage,
+        Some(delta),
+        delta_pos,
+        0,
+        &Substitution::new(),
+    )
+}
+
+fn satisfy_body_with_storage_mixed_recursive<S: StorageEngine>(
+    body: &[Literal],
+    full_db: &FactDatabase,
+    storage: &S,
+    delta: Option<&FactDatabase>,
+    delta_pos: usize,
+    index: usize,
+    current_subst: &Substitution,
+) -> Vec<Substitution> {
+    if index == body.len() {
+        return vec![current_subst.clone()];
+    }
+
+    let literal = &body[index];
+    let use_delta = index == delta_pos
+        && matches!(literal, Literal::Positive(atom) if builtins::parse_builtin(atom).is_none());
+
+    match literal {
+        Literal::Positive(atom) => {
+            if let Some(builtin) = builtins::parse_builtin(atom) {
+                let rest_substs = satisfy_body_with_storage_mixed_recursive(
+                    body,
+                    full_db,
+                    storage,
+                    delta,
+                    delta_pos,
+                    index + 1,
+                    current_subst,
+                );
+                let mut result = Vec::new();
+
+                for subst in rest_substs {
+                    let applied_builtin = apply_subst_to_builtin(&subst, &builtin);
+                    if let Some(true) = builtins::eval_builtin(&applied_builtin, &subst) {
+                        result.push(subst);
+                    }
+                }
+
+                result
+            } else {
+                let grounded_atom = current_subst.apply_atom(atom);
+                let mut result = Vec::new();
+
+                // Storage-backed predicates are base facts - always query storage.
+                // Only derived predicates use the semi-naive delta logic.
+                let atom_substs = if full_db.is_storage_backed(&grounded_atom.predicate) {
+                    // Storage-backed (SQL table): always query storage
+                    full_db.query_with_storage(&grounded_atom, storage)
+                } else if use_delta {
+                    // Derived predicate at delta position: use delta (newly derived facts)
+                    delta.map_or(vec![], |d| d.query(&grounded_atom))
+                } else {
+                    // Derived predicate at non-delta position: use full_db
+                    full_db.query(&grounded_atom)
+                };
+
+                for atom_subst in atom_substs {
+                    if let Some(combined) = combine_substs(current_subst, &atom_subst) {
+                        let mut rest_results = satisfy_body_with_storage_mixed_recursive(
+                            body,
+                            full_db,
+                            storage,
+                            delta,
+                            delta_pos,
+                            index + 1,
+                            &combined,
+                        );
+                        result.append(&mut rest_results);
+                    }
+                }
+
+                result
+            }
+        }
+        Literal::Negative(atom) => {
+            let rest_substs = satisfy_body_with_storage_mixed_recursive(
+                body,
+                full_db,
+                storage,
+                delta,
+                delta_pos,
+                index + 1,
+                current_subst,
+            );
+            let mut result = Vec::new();
+
+            for subst in rest_substs {
+                let grounded_atom = subst.apply_atom(atom);
+                if !database_has_match_with_storage(full_db, storage, &grounded_atom) {
+                    result.push(subst);
+                }
+            }
+
+            result
+        }
+        Literal::Comparison(comp) => {
+            let rest_substs = satisfy_body_with_storage_mixed_recursive(
+                body,
+                full_db,
+                storage,
+                delta,
+                delta_pos,
+                index + 1,
+                current_subst,
+            );
+            let mut result = Vec::new();
+
+            for subst in rest_substs {
+                let left = subst.apply(&comp.left);
+                let right = subst.apply(&comp.right);
+                let builtin =
+                    builtins::BuiltIn::Comparison(comp_op_to_builtin(&comp.op), left, right);
+                if let Some(true) = builtins::eval_builtin(&builtin, &subst) {
+                    result.push(subst);
+                }
+            }
+
+            result
+        }
+    }
 }
 
 #[cfg(test)]

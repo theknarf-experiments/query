@@ -20,8 +20,9 @@
 //! ```
 
 use crate::datalog_unification::{unify_atoms, Substitution};
-use crate::engine::{ColumnSchema, DataType, TableSchema};
-use datalog_parser::{Atom, Symbol, Term};
+use crate::engine::{ColumnSchema, DataType, Row, StorageEngine, TableSchema};
+use crate::Value as SqlValue;
+use datalog_parser::{Atom, Symbol, Term, Value as DatalogValue};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
@@ -75,6 +76,8 @@ pub struct FactDatabase {
     facts_by_predicate: HashMap<Symbol, HashSet<Atom>>,
     /// Optional schemas for predicates (for SQL table interop)
     schemas: HashMap<Symbol, PredicateSchema>,
+    /// Predicates that are backed by storage (SQL tables) rather than local facts
+    storage_backed_predicates: HashSet<Symbol>,
 }
 
 impl Default for FactDatabase {
@@ -130,6 +133,7 @@ impl FactDatabase {
         FactDatabase {
             facts_by_predicate: HashMap::new(),
             schemas: HashMap::new(),
+            storage_backed_predicates: HashSet::new(),
         }
     }
 
@@ -146,6 +150,102 @@ impl FactDatabase {
     /// Check if predicate has a registered schema
     pub fn has_schema(&self, predicate: &Symbol) -> bool {
         self.schemas.contains_key(predicate)
+    }
+
+    /// Mark a predicate as backed by storage (SQL table)
+    ///
+    /// Storage-backed predicates are not queried from local facts;
+    /// instead, they should be queried via `query_with_storage`.
+    pub fn mark_storage_backed(&mut self, predicate: Symbol) {
+        self.storage_backed_predicates.insert(predicate);
+    }
+
+    /// Check if a predicate is backed by storage
+    pub fn is_storage_backed(&self, predicate: &Symbol) -> bool {
+        self.storage_backed_predicates.contains(predicate)
+    }
+
+    /// Query for facts, using storage indexes when available
+    ///
+    /// For storage-backed predicates, this method queries the underlying storage
+    /// engine directly, using indexes for O(1) lookups when constants are present.
+    /// For local predicates (derived facts), it falls back to the standard query.
+    pub fn query_with_storage<S: StorageEngine>(
+        &self,
+        pattern: &Atom,
+        storage: &S,
+    ) -> Vec<Substitution> {
+        // Check if this predicate is backed by storage
+        if self.storage_backed_predicates.contains(&pattern.predicate) {
+            // Try indexed lookup if pattern has constants
+            if let Some(indexed_results) = self.query_via_index(pattern, storage) {
+                return indexed_results;
+            }
+            // Fall back to table scan
+            return self.query_via_scan(pattern, storage);
+        }
+
+        // Use local facts (derived predicates)
+        self.query(pattern)
+    }
+
+    /// Try to query using an index if a constant column has one
+    fn query_via_index<S: StorageEngine>(
+        &self,
+        pattern: &Atom,
+        storage: &S,
+    ) -> Option<Vec<Substitution>> {
+        let table = pattern.predicate.as_ref();
+        let schema = self.schemas.get(&pattern.predicate)?;
+
+        // Find first constant in pattern that has an index
+        for (i, term) in pattern.terms.iter().enumerate() {
+            if let Term::Constant(value) = term {
+                let column = schema.column_name(i)?;
+                let sql_value = datalog_to_sql_value(value);
+
+                if storage.has_index(table, column) {
+                    if let Some(indices) = storage.index_lookup(table, column, &sql_value) {
+                        let rows = storage.get_rows_by_indices(table, &indices).ok()?;
+                        return Some(self.unify_rows_with_pattern(pattern, &rows));
+                    }
+                }
+            }
+        }
+        None // No usable index found
+    }
+
+    /// Query by scanning all rows in the table
+    fn query_via_scan<S: StorageEngine>(&self, pattern: &Atom, storage: &S) -> Vec<Substitution> {
+        let table = pattern.predicate.as_ref();
+
+        if let Ok(rows) = storage.scan(table) {
+            return self.unify_rows_with_pattern(pattern, &rows);
+        }
+        vec![]
+    }
+
+    /// Convert rows to substitutions by unifying with the pattern
+    fn unify_rows_with_pattern(&self, pattern: &Atom, rows: &[Row]) -> Vec<Substitution> {
+        let mut results = Vec::new();
+        for row in rows {
+            // Convert row to atom
+            let terms: Vec<Term> = row
+                .iter()
+                .map(|v| Term::Constant(sql_to_datalog_value(v)))
+                .collect();
+            let fact = Atom {
+                predicate: pattern.predicate,
+                terms,
+            };
+
+            // Try to unify
+            let mut subst = Substitution::new();
+            if unify_atoms(pattern, &fact, &mut subst) {
+                results.push(subst);
+            }
+        }
+        results
     }
 
     /// Insert a ground fact into the database
@@ -183,6 +283,9 @@ impl FactDatabase {
         }
         // Merge schemas (other's schemas take precedence for conflicts)
         self.schemas.extend(other.schemas);
+        // Merge storage-backed predicates
+        self.storage_backed_predicates
+            .extend(other.storage_backed_predicates);
     }
 
     /// Check if a fact exists in the database
@@ -279,6 +382,43 @@ impl GroundQueryTracker {
 impl Drop for GroundQueryTracker {
     fn drop(&mut self) {
         TRACK_GROUND_QUERIES.with(|flag| flag.set(false));
+    }
+}
+
+/// Convert SQL Value to Datalog Value
+///
+/// Note: SQL Text values are converted to Datalog Atoms so they can unify
+/// with lowercase identifiers in Datalog queries. For example, SQL 'john'
+/// becomes Datalog atom `john`, which matches `?- parent(john, X).`
+fn sql_to_datalog_value(value: &SqlValue) -> DatalogValue {
+    match value {
+        SqlValue::Null => DatalogValue::Atom(Symbol::new("null".to_string())),
+        SqlValue::Bool(b) => DatalogValue::Boolean(*b),
+        SqlValue::Int(i) => DatalogValue::Integer(*i),
+        SqlValue::Float(f) => DatalogValue::Float(*f),
+        // Use Atom instead of String so it unifies with lowercase identifiers
+        SqlValue::Text(s) => DatalogValue::Atom(Symbol::new(s.clone())),
+        SqlValue::Date(d) => DatalogValue::Atom(Symbol::new(format!("{}", d))),
+        SqlValue::Time(t) => DatalogValue::Atom(Symbol::new(format!("{}", t))),
+        SqlValue::Timestamp(ts) => DatalogValue::Atom(Symbol::new(format!("{}", ts))),
+    }
+}
+
+/// Convert Datalog Value to SQL Value
+fn datalog_to_sql_value(value: &DatalogValue) -> SqlValue {
+    match value {
+        DatalogValue::Integer(i) => SqlValue::Int(*i),
+        DatalogValue::Float(f) => SqlValue::Float(*f),
+        DatalogValue::Boolean(b) => SqlValue::Bool(*b),
+        DatalogValue::String(s) => SqlValue::Text(s.as_ref().clone()),
+        DatalogValue::Atom(s) => {
+            let name = s.as_ref();
+            if name == "null" {
+                SqlValue::Null
+            } else {
+                SqlValue::Text(name.clone())
+            }
+        }
     }
 }
 

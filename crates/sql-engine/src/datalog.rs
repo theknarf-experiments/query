@@ -19,10 +19,9 @@
 //! "#)?;
 //! ```
 
-use datalog_eval::{evaluate, EvaluationError};
-use datalog_parser::{
-    Atom, Constraint, Literal, Query, Rule, SrcId, Symbol, Term, Value as DValue,
-};
+use datalog_eval::{evaluate_with_storage, EvaluationError};
+use datalog_grounding::satisfy_body_with_storage;
+use datalog_parser::{Constraint, Literal, Query, Rule, SrcId, Symbol, Term, Value as DValue};
 use sql_storage::FactDatabase;
 use sql_storage::{PredicateSchema, StorageEngine, Value as SValue};
 
@@ -64,25 +63,6 @@ impl From<EvaluationError> for DatalogError {
     }
 }
 
-/// Convert SQL Value to Datalog Value
-///
-/// Note: SQL Text values are converted to Datalog Atoms so they can unify
-/// with lowercase identifiers in Datalog queries. For example, SQL 'john'
-/// becomes Datalog atom `john`, which matches `?- parent(john, X).`
-fn sql_to_datalog_value(value: &SValue) -> DValue {
-    match value {
-        SValue::Null => DValue::Atom(Symbol::new("null".to_string())),
-        SValue::Bool(b) => DValue::Boolean(*b),
-        SValue::Int(i) => DValue::Integer(*i),
-        SValue::Float(f) => DValue::Float(*f),
-        // Use Atom instead of String so it unifies with lowercase identifiers
-        SValue::Text(s) => DValue::Atom(Symbol::new(s.clone())),
-        SValue::Date(d) => DValue::Atom(Symbol::new(format!("{}", d))),
-        SValue::Time(t) => DValue::Atom(Symbol::new(format!("{}", t))),
-        SValue::Timestamp(ts) => DValue::Atom(Symbol::new(format!("{}", ts))),
-    }
-}
-
 /// Convert Datalog Value to SQL Value
 fn datalog_to_sql_value(value: &DValue) -> SValue {
     match value {
@@ -110,10 +90,16 @@ fn term_to_sql_value(term: &Term) -> Option<SValue> {
     }
 }
 
-/// Load a SQL table into a Datalog FactDatabase
+/// Register a SQL table as a storage-backed Datalog predicate
 ///
-/// This also registers the table's schema with the FactDatabase,
-/// enabling arity validation for facts loaded from SQL tables.
+/// This registers the table's schema with the FactDatabase and marks the
+/// predicate as storage-backed. Instead of copying rows, Datalog queries
+/// will query the storage engine directly using `query_with_storage`.
+///
+/// This enables:
+/// - O(1) indexed lookups when the query has constants on indexed columns
+/// - No data duplication between SQL and Datalog storage
+/// - Automatic updates when SQL data changes
 pub fn load_table_as_facts<S: StorageEngine>(
     storage: &S,
     table: &str,
@@ -127,25 +113,9 @@ pub fn load_table_as_facts<S: StorageEngine>(
     let pred_schema = PredicateSchema::from_table_schema(table_schema);
     db.register_schema(pred_schema);
 
-    // Load rows as facts
-    let rows = storage
-        .scan(table)
-        .map_err(|_| DatalogError::TableNotFound(table.to_string()))?;
-
+    // Mark predicate as storage-backed (don't copy rows)
     let predicate = Symbol::new(table.to_string());
-
-    for row in rows {
-        let terms: Vec<Term> = row
-            .iter()
-            .map(|v| Term::Constant(sql_to_datalog_value(v)))
-            .collect();
-
-        let atom = Atom { predicate, terms };
-
-        // Insert fact - errors are propagated (includes arity validation)
-        db.insert(atom)
-            .map_err(|e| DatalogError::EvaluationError(format!("{}", e)))?;
-    }
+    db.mark_storage_backed(predicate);
 
     Ok(())
 }
@@ -194,19 +164,19 @@ pub fn execute_datalog_program<S: StorageEngine>(
     // Find all predicates used in the program
     let predicates = collect_predicates(&rules, &constraints, &queries);
 
-    // Load SQL tables as facts for any predicate that matches a table name
+    // Register SQL tables as storage-backed predicates
     for pred in &predicates {
         let table_name = pred.as_ref();
         // Try to load the table (ignore errors - it might be a derived predicate)
         let _ = load_table_as_facts(storage, table_name, &mut db);
     }
 
-    // Evaluate the program
-    let result_db = evaluate(&rules, &constraints, db)?;
+    // Evaluate the program using storage for indexed lookups
+    let result_db = evaluate_with_storage(&rules, &constraints, db, storage)?;
 
     // If there's a query, evaluate it and return results
     if let Some(query) = queries.last() {
-        return execute_query(&result_db, query);
+        return execute_query(&result_db, query, storage);
     }
 
     // No query - return all derived facts as a generic result
@@ -252,15 +222,17 @@ fn collect_predicates(
     predicates
 }
 
-/// Execute a query against the fact database
-fn execute_query(db: &FactDatabase, query: &Query) -> Result<QueryResult, DatalogError> {
-    use datalog_grounding::satisfy_body;
-
+/// Execute a query against the fact database using storage for indexed lookups
+fn execute_query<S: StorageEngine>(
+    db: &FactDatabase,
+    query: &Query,
+    storage: &S,
+) -> Result<QueryResult, DatalogError> {
     // Find all variables in the query
     let variables = collect_query_variables(query);
 
-    // Get all substitutions that satisfy the query
-    let substitutions = satisfy_body(&query.body, db);
+    // Get all substitutions that satisfy the query using storage indexes
+    let substitutions = satisfy_body_with_storage(&query.body, db, storage);
 
     if substitutions.is_empty() {
         // No results

@@ -84,6 +84,19 @@ impl From<StorageError> for EvaluationError {
     }
 }
 
+/// Statistics about evaluation performance
+///
+/// Used by `evaluate_instrumented` to provide insight into evaluation behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EvaluationStats {
+    /// Number of fixed-point iterations performed
+    pub iterations: usize,
+    /// Total number of rule applications (rule evaluated once = 1 application)
+    pub rule_applications: usize,
+    /// Number of new facts derived (not counting duplicates)
+    pub facts_derived: usize,
+}
+
 /// Evaluate a Datalog program to fixed point.
 ///
 /// This is the main entry point for Datalog evaluation. It:
@@ -135,6 +148,54 @@ pub fn evaluate<S: StorageEngine>(
     check_constraints(constraints, &db, storage)?;
 
     Ok(db)
+}
+
+/// Evaluate a Datalog program with instrumentation to collect statistics.
+///
+/// This is identical to `evaluate()` but also returns `EvaluationStats`
+/// with information about iteration count, rule applications, and facts derived.
+///
+/// Useful for:
+/// - Performance testing and optimization
+/// - Verifying semi-naive efficiency vs naive evaluation
+/// - Understanding evaluation behavior on complex programs
+///
+/// # Example
+///
+/// ```ignore
+/// let (result, stats) = evaluate_instrumented(&rules, &[], facts, &mut storage)?;
+/// println!("Iterations: {}, Facts derived: {}", stats.iterations, stats.facts_derived);
+/// ```
+pub fn evaluate_instrumented<S: StorageEngine>(
+    rules: &[Rule],
+    constraints: &[Constraint],
+    initial_facts: DatalogContext,
+    storage: &mut S,
+) -> Result<(DatalogContext, EvaluationStats), EvaluationError> {
+    // Check safety first
+    check_program_safety(rules)?;
+
+    // Stratify the program
+    let stratification = stratify(rules)?;
+
+    let mut db = initial_facts;
+    let mut total_stats = EvaluationStats::default();
+
+    // Evaluate each stratum to fixed point
+    for stratum_rules in &stratification.rules_by_stratum {
+        let (new_db, stratum_stats) = semi_naive_evaluate_instrumented(stratum_rules, db, storage)?;
+        db = new_db;
+
+        // Accumulate stats from each stratum
+        total_stats.iterations += stratum_stats.iterations;
+        total_stats.rule_applications += stratum_stats.rule_applications;
+        total_stats.facts_derived += stratum_stats.facts_derived;
+    }
+
+    // Check constraints after evaluation
+    check_constraints(constraints, &db, storage)?;
+
+    Ok((db, total_stats))
 }
 
 /// Check constraints against the database.
@@ -206,6 +267,50 @@ fn semi_naive_evaluate<S: StorageEngine>(
     }
 
     Ok(db)
+}
+
+/// Instrumented version of semi-naive evaluation that tracks statistics.
+fn semi_naive_evaluate_instrumented<S: StorageEngine>(
+    rules: &[Rule],
+    initial_facts: DatalogContext,
+    storage: &mut S,
+) -> Result<(DatalogContext, EvaluationStats), EvaluationError> {
+    let mut db = initial_facts;
+    let mut delta = DeltaTracker::new();
+    let mut first_iteration = true;
+    let mut stats = EvaluationStats::default();
+
+    loop {
+        let mut new_delta = DeltaTracker::new();
+        stats.iterations += 1;
+
+        for rule in rules {
+            stats.rule_applications += 1;
+
+            let derived = if first_iteration {
+                ground_rule(rule, &db, storage)
+            } else {
+                ground_rule_semi_naive_with_delta(rule, &delta, &db, storage)
+            };
+
+            for fact in derived {
+                if db.insert(fact.clone(), storage)?.is_new() {
+                    new_delta.insert(fact);
+                    stats.facts_derived += 1;
+                }
+            }
+        }
+
+        first_iteration = false;
+
+        if new_delta.is_empty() {
+            break;
+        }
+
+        delta = new_delta;
+    }
+
+    Ok((db, stats))
 }
 
 /// Evaluate a Datalog program using storage for indexed lookups.
@@ -405,5 +510,106 @@ mod tests {
         let result = evaluate(&rules, &[], DatalogContext::new(), &mut storage);
 
         assert!(matches!(result, Err(EvaluationError::Stratification(_))));
+    }
+
+    #[test]
+    fn test_evaluate_instrumented_basic() {
+        // Simple rule: ancestor(X, Y) :- parent(X, Y).
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(
+            make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("mary"), atom_term("jane")]),
+            &mut storage,
+        )
+        .unwrap();
+
+        let rules = vec![Rule {
+            head: make_atom("ancestor", vec![var_term("X"), var_term("Y")]),
+            body: vec![Literal::Positive(make_atom(
+                "parent",
+                vec![var_term("X"), var_term("Y")],
+            ))],
+        }];
+
+        let (result, stats) = evaluate_instrumented(&rules, &[], db, &mut storage).unwrap();
+
+        assert_eq!(result.predicate_count(), 2); // parent + ancestor
+        assert_eq!(stats.facts_derived, 2); // 2 ancestor facts derived
+        assert!(stats.iterations >= 1);
+        assert!(stats.rule_applications >= 1);
+    }
+
+    #[test]
+    fn test_evaluate_instrumented_transitive_closure() {
+        // Transitive closure: multiple iterations needed
+        // ancestor(X, Y) :- parent(X, Y).
+        // ancestor(X, Z) :- ancestor(X, Y), parent(Y, Z).
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        // Chain: a -> b -> c -> d (3 edges, should derive 6 ancestor facts)
+        db.insert(
+            make_atom("parent", vec![atom_term("a"), atom_term("b")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("b"), atom_term("c")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("c"), atom_term("d")]),
+            &mut storage,
+        )
+        .unwrap();
+
+        let rules = vec![
+            Rule {
+                head: make_atom("ancestor", vec![var_term("X"), var_term("Y")]),
+                body: vec![Literal::Positive(make_atom(
+                    "parent",
+                    vec![var_term("X"), var_term("Y")],
+                ))],
+            },
+            Rule {
+                head: make_atom("ancestor", vec![var_term("X"), var_term("Z")]),
+                body: vec![
+                    Literal::Positive(make_atom("ancestor", vec![var_term("X"), var_term("Y")])),
+                    Literal::Positive(make_atom("parent", vec![var_term("Y"), var_term("Z")])),
+                ],
+            },
+        ];
+
+        let (result, stats) = evaluate_instrumented(&rules, &[], db, &mut storage).unwrap();
+
+        assert_eq!(result.predicate_count(), 2);
+        // ancestor facts: (a,b), (b,c), (c,d), (a,c), (b,d), (a,d) = 6
+        assert_eq!(stats.facts_derived, 6);
+        // Should take multiple iterations (chain length)
+        assert!(
+            stats.iterations >= 3,
+            "Expected at least 3 iterations, got {}",
+            stats.iterations
+        );
+    }
+
+    #[test]
+    fn test_evaluate_instrumented_no_rules() {
+        // No rules - should have 0 facts derived, minimal iterations
+        let db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        let (_, stats) = evaluate_instrumented(&[], &[], db, &mut storage).unwrap();
+
+        assert_eq!(stats.facts_derived, 0);
+        assert_eq!(stats.rule_applications, 0);
+        // No strata means 0 iterations
+        assert_eq!(stats.iterations, 0);
     }
 }

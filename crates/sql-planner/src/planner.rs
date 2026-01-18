@@ -513,7 +513,7 @@ fn plan_create_index(create: CreateIndexStatement) -> PlanResult {
     Ok(LogicalPlan::CreateIndex {
         name: create.name,
         table: create.table,
-        column: create.column,
+        columns: create.columns,
     })
 }
 

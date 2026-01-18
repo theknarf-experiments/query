@@ -306,18 +306,23 @@ fn drop_table_parser() -> impl Parser<Token, String, Error = Simple<Token>> {
         .ignore_then(identifier())
 }
 
-/// Parse CREATE INDEX name ON table(column)
+/// Parse CREATE INDEX name ON table(column1, column2, ...)
 fn create_index_parser() -> impl Parser<Token, CreateIndexStatement, Error = Simple<Token>> {
+    let column_list = identifier()
+        .separated_by(just(Token::Comma))
+        .at_least(1)
+        .delimited_by(just(Token::LParen), just(Token::RParen));
+
     just(Token::Keyword(Keyword::Create))
         .ignore_then(just(Token::Keyword(Keyword::Index)))
         .ignore_then(identifier())
         .then_ignore(just(Token::Keyword(Keyword::On)))
         .then(identifier())
-        .then(identifier().delimited_by(just(Token::LParen), just(Token::RParen)))
-        .map(|((name, table), column)| CreateIndexStatement {
+        .then(column_list)
+        .map(|((name, table), columns)| CreateIndexStatement {
             name,
             table,
-            column,
+            columns,
         })
 }
 
@@ -2218,7 +2223,22 @@ mod tests {
             Statement::CreateIndex(idx) => {
                 assert_eq!(idx.name, "idx_name");
                 assert_eq!(idx.table, "users");
-                assert_eq!(idx.column, "name");
+                assert_eq!(idx.columns, vec!["name"]);
+            }
+            _ => panic!("Expected CREATE INDEX statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_create_composite_index() {
+        let result = parse("CREATE INDEX idx_user_product ON orders (user_id, product_id)");
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::CreateIndex(idx) => {
+                assert_eq!(idx.name, "idx_user_product");
+                assert_eq!(idx.table, "orders");
+                assert_eq!(idx.columns, vec!["user_id", "product_id"]);
             }
             _ => panic!("Expected CREATE INDEX statement"),
         }

@@ -13,8 +13,8 @@ pub mod datalog_database;
 pub mod datalog_unification;
 
 pub use engine::{
-    ColumnSchema, DataType, ForeignKeyRef, ReferentialAction, Row, StorageEngine, StorageError,
-    StorageResult, TableConstraint, TableSchema,
+    ColumnSchema, DataType, ForeignKeyRef, IndexInfo, ReferentialAction, Row, StorageEngine,
+    StorageError, StorageResult, TableConstraint, TableSchema,
 };
 pub use memory::MemoryEngine;
 pub use value::{DateValue, TimeValue, TimestampValue, Value};

@@ -406,7 +406,8 @@ pub enum DataType {
 pub struct CreateIndexStatement {
     pub name: String,
     pub table: String,
-    pub column: String,
+    /// Column(s) to index - supports composite indexes
+    pub columns: Vec<String>,
 }
 
 /// CREATE VIEW statement

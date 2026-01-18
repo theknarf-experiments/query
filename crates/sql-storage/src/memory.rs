@@ -17,13 +17,17 @@ struct TableData {
     rows: Vec<Row>,
 }
 
-/// Index structure - maps values to row indices
+/// Composite index structure - maps column values to row indices
 #[derive(Debug, Clone)]
 struct IndexData {
     table: String,
-    column: String,
-    column_idx: usize,
-    /// Map from value hash to list of row indices
+    /// Column names in index order
+    columns: Vec<String>,
+    /// Column indices in the table schema, matching `columns` order
+    column_indices: Vec<usize>,
+    /// Is this a UNIQUE index?
+    unique: bool,
+    /// Map from composite value hash to list of row indices
     entries: HashMap<u64, Vec<usize>>,
 }
 
@@ -32,29 +36,149 @@ impl MemoryEngine {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Check UNIQUE constraints using O(1) index lookups
+    ///
+    /// For inserts, `exclude_row_idx` should be `None`.
+    /// For updates, `exclude_row_idx` should be `Some(idx)` to allow updating a row to its own value.
+    fn check_unique_constraints_indexed(
+        &self,
+        table: &str,
+        schema: &TableSchema,
+        new_row: &Row,
+        exclude_row_idx: Option<usize>,
+    ) -> StorageResult<()> {
+        use crate::engine::TableConstraint;
+
+        // Check per-column unique constraints via index lookup
+        for (col_idx, col) in schema.columns.iter().enumerate() {
+            if col.unique || col.primary_key {
+                if let Some(new_val) = new_row.get(col_idx) {
+                    // NULL values don't violate unique constraints
+                    if *new_val == Value::Null {
+                        continue;
+                    }
+
+                    // Use O(1) index lookup instead of O(n) scan
+                    if let Some(indices) = self.index_lookup(table, &col.name, new_val) {
+                        // Check if any returned index is NOT the excluded row
+                        for &idx in &indices {
+                            if Some(idx) != exclude_row_idx {
+                                return Err(StorageError::ConstraintViolation(format!(
+                                    "UNIQUE constraint violated on column '{}'",
+                                    col.name
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check table-level UNIQUE constraints (multi-column) via composite index lookup
+        for constraint in &schema.constraints {
+            if let TableConstraint::Unique { columns } | TableConstraint::PrimaryKey { columns } =
+                constraint
+            {
+                // Get column indices for the constraint
+                let col_indices: Vec<usize> = columns
+                    .iter()
+                    .filter_map(|col_name| schema.columns.iter().position(|c| &c.name == col_name))
+                    .collect();
+
+                if col_indices.len() != columns.len() {
+                    continue;
+                }
+
+                // Get new row values for the constrained columns
+                let new_values: Vec<Value> = col_indices
+                    .iter()
+                    .filter_map(|&i| new_row.get(i).cloned())
+                    .collect();
+
+                // If any value is NULL, skip (NULLs don't violate UNIQUE)
+                if new_values.contains(&Value::Null) {
+                    continue;
+                }
+
+                // Use O(1) composite index lookup
+                if let Some(indices) = self.composite_index_lookup(table, columns, &new_values) {
+                    for &idx in &indices {
+                        if Some(idx) != exclude_row_idx {
+                            return Err(StorageError::ConstraintViolation(format!(
+                                "UNIQUE constraint violated on columns ({})",
+                                columns.join(", ")
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl StorageEngine for MemoryEngine {
     fn create_table(&mut self, schema: TableSchema) -> StorageResult<()> {
+        use crate::engine::TableConstraint;
+
         if self.tables.contains_key(&schema.name) {
             return Err(StorageError::TableAlreadyExists(schema.name.clone()));
         }
-        let name = schema.name.clone();
+
+        let table_name = schema.name.clone();
+
+        // Collect indexes to create before inserting table
+        let mut indexes_to_create: Vec<(Vec<String>, String, bool)> = Vec::new();
+
+        // Auto-create indexes for column-level unique/primary_key constraints
+        for col in &schema.columns {
+            if col.unique || col.primary_key {
+                let index_name = format!("__auto_{}_{}", table_name, col.name);
+                indexes_to_create.push((vec![col.name.clone()], index_name, true));
+            }
+        }
+
+        // Auto-create indexes for table-level constraints
+        for constraint in &schema.constraints {
+            match constraint {
+                TableConstraint::Unique { columns } | TableConstraint::PrimaryKey { columns } => {
+                    let index_name = format!("__auto_{}_{}", table_name, columns.join("_"));
+                    indexes_to_create.push((columns.clone(), index_name, true));
+                }
+                TableConstraint::ForeignKey { .. } => {
+                    // Foreign keys don't need auto-indexes for now
+                }
+            }
+        }
+
+        // Insert the table first
         self.tables.insert(
-            name,
+            table_name.clone(),
             TableData {
                 schema,
                 rows: Vec::new(),
             },
         );
+
+        // Create the indexes (table is empty so this is fast)
+        for (columns, index_name, unique) in indexes_to_create {
+            self.create_composite_index(&table_name, &columns, &index_name, unique)?;
+        }
+
         Ok(())
     }
 
     fn drop_table(&mut self, name: &str) -> StorageResult<()> {
-        self.tables
-            .remove(name)
-            .map(|_| ())
-            .ok_or_else(|| StorageError::TableNotFound(name.to_string()))
+        if self.tables.remove(name).is_none() {
+            return Err(StorageError::TableNotFound(name.to_string()));
+        }
+
+        // Remove all indexes for this table
+        self.indexes.retain(|_, idx| idx.table != name);
+
+        Ok(())
     }
 
     fn get_schema(&self, name: &str) -> StorageResult<&TableSchema> {
@@ -65,13 +189,16 @@ impl StorageEngine for MemoryEngine {
     }
 
     fn insert(&mut self, table: &str, row: Row) -> StorageResult<()> {
+        // First check UNIQUE constraints using O(1) index lookups
+        // We need to get the schema first while we can still borrow self immutably
+        let schema = self.get_schema(table)?.clone();
+        self.check_unique_constraints_indexed(table, &schema, &row, None)?;
+
+        // Now we can get mutable access to insert
         let table_data = self
             .tables
             .get_mut(table)
             .ok_or_else(|| StorageError::TableNotFound(table.to_string()))?;
-
-        // Check UNIQUE constraints before inserting
-        check_unique_constraints(&table_data.schema, &table_data.rows, &row)?;
 
         let row_idx = table_data.rows.len();
         table_data.rows.push(row.clone());
@@ -79,8 +206,15 @@ impl StorageEngine for MemoryEngine {
         // Update indexes for this table
         for index in self.indexes.values_mut() {
             if index.table == table {
-                if let Some(val) = row.get(index.column_idx) {
-                    let hash = value_hash(val);
+                let values: Vec<&Value> = index
+                    .column_indices
+                    .iter()
+                    .filter_map(|&idx| row.get(idx))
+                    .collect();
+
+                // Only index if we have all column values
+                if values.len() == index.column_indices.len() {
+                    let hash = composite_hash(&values);
                     index.entries.entry(hash).or_default().push(row_idx);
                 }
             }
@@ -116,8 +250,14 @@ impl StorageEngine for MemoryEngine {
                 if index.table == table {
                     index.entries.clear();
                     for (row_idx, row) in table_data.rows.iter().enumerate() {
-                        if let Some(val) = row.get(index.column_idx) {
-                            let hash = value_hash(val);
+                        let values: Vec<&Value> = index
+                            .column_indices
+                            .iter()
+                            .filter_map(|&idx| row.get(idx))
+                            .collect();
+
+                        if values.len() == index.column_indices.len() {
+                            let hash = composite_hash(&values);
                             index.entries.entry(hash).or_default().push(row_idx);
                         }
                     }
@@ -137,6 +277,9 @@ impl StorageEngine for MemoryEngine {
         F: Fn(&Row) -> bool,
         U: Fn(&mut Row),
     {
+        // Get schema first for constraint checking
+        let schema = self.get_schema(table)?.clone();
+
         let table_data = self
             .tables
             .get_mut(table)
@@ -151,39 +294,50 @@ impl StorageEngine for MemoryEngine {
                 updates.push((idx, new_row));
             }
         }
+        // NLL releases the mutable borrow after last use of table_data above
 
-        // Check UNIQUE constraints for each update
+        // Check UNIQUE constraints using O(1) index lookups
         for (update_idx, new_row) in &updates {
-            // Build list of rows to check against (excluding the row being updated)
-            let other_rows: Vec<&Row> = table_data
-                .rows
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| i != update_idx)
-                .map(|(_, r)| r)
-                .collect();
+            // Use indexed check against existing rows (excludes the row being updated)
+            self.check_unique_constraints_indexed(table, &schema, new_row, Some(*update_idx))?;
 
-            // Also check against other pending updates
-            let other_updates: Vec<&Row> = updates
-                .iter()
-                .filter(|(i, _)| i != update_idx)
-                .map(|(_, r)| r)
-                .collect();
-
-            // Combine both sets for constraint checking
-            let all_other: Vec<Row> = other_rows
-                .iter()
-                .map(|r| (*r).clone())
-                .chain(other_updates.iter().map(|r| (*r).clone()))
-                .collect();
-
-            check_unique_constraints(&table_data.schema, &all_other, new_row)?;
+            // Also check against other pending updates (O(m) where m = number of updates)
+            // This handles the case where multiple rows are updated to the same value
+            check_unique_among_pending(&schema, &updates, *update_idx, new_row)?;
         }
+
+        // Re-acquire mutable borrow to apply updates
+        let table_data = self
+            .tables
+            .get_mut(table)
+            .ok_or_else(|| StorageError::TableNotFound(table.to_string()))?;
 
         // Apply updates
         let count = updates.len();
         for (idx, new_row) in updates {
             table_data.rows[idx] = new_row;
+        }
+
+        // Rebuild indexes for this table since values have changed
+        if count > 0 {
+            let table_data = self.tables.get(table).unwrap();
+            for index in self.indexes.values_mut() {
+                if index.table == table {
+                    index.entries.clear();
+                    for (row_idx, row) in table_data.rows.iter().enumerate() {
+                        let values: Vec<&Value> = index
+                            .column_indices
+                            .iter()
+                            .filter_map(|&idx| row.get(idx))
+                            .collect();
+
+                        if values.len() == index.column_indices.len() {
+                            let hash = composite_hash(&values);
+                            index.entries.entry(hash).or_default().push(row_idx);
+                        }
+                    }
+                }
+            }
         }
 
         Ok(count)
@@ -271,30 +425,54 @@ impl StorageEngine for MemoryEngine {
         Ok(())
     }
 
-    fn create_index(&mut self, table: &str, column: &str, name: &str) -> StorageResult<()> {
+    fn create_composite_index(
+        &mut self,
+        table: &str,
+        columns: &[String],
+        name: &str,
+        unique: bool,
+    ) -> StorageResult<()> {
         // Check if index already exists
         if self.indexes.contains_key(name) {
             return Err(StorageError::IndexAlreadyExists(name.to_string()));
         }
 
-        // Get table and find column index
+        // Validate columns is not empty
+        if columns.is_empty() {
+            return Err(StorageError::ColumnNotFound(
+                "index requires at least one column".to_string(),
+            ));
+        }
+
+        // Get table and find column indices
         let table_data = self
             .tables
             .get(table)
             .ok_or_else(|| StorageError::TableNotFound(table.to_string()))?;
 
-        let column_idx = table_data
-            .schema
-            .columns
+        let column_indices: Vec<usize> = columns
             .iter()
-            .position(|c| c.name == column)
-            .ok_or_else(|| StorageError::ColumnNotFound(column.to_string()))?;
+            .map(|col| {
+                table_data
+                    .schema
+                    .columns
+                    .iter()
+                    .position(|c| &c.name == col)
+                    .ok_or_else(|| StorageError::ColumnNotFound(col.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         // Build the index entries from existing rows
         let mut entries: HashMap<u64, Vec<usize>> = HashMap::new();
         for (row_idx, row) in table_data.rows.iter().enumerate() {
-            if let Some(val) = row.get(column_idx) {
-                let hash = value_hash(val);
+            let values: Vec<&Value> = column_indices
+                .iter()
+                .filter_map(|&idx| row.get(idx))
+                .collect();
+
+            // Only index if we have all column values
+            if values.len() == column_indices.len() {
+                let hash = composite_hash(&values);
                 entries.entry(hash).or_default().push(row_idx);
             }
         }
@@ -303,8 +481,9 @@ impl StorageEngine for MemoryEngine {
             name.to_string(),
             IndexData {
                 table: table.to_string(),
-                column: column.to_string(),
-                column_idx,
+                columns: columns.to_vec(),
+                column_indices,
+                unique,
                 entries,
             },
         );
@@ -319,21 +498,45 @@ impl StorageEngine for MemoryEngine {
             .ok_or_else(|| StorageError::IndexNotFound(name.to_string()))
     }
 
-    fn index_lookup(&self, table: &str, column: &str, value: &Value) -> Option<Vec<usize>> {
-        // Find index for this table/column
+    fn composite_index_lookup(
+        &self,
+        table: &str,
+        columns: &[String],
+        values: &[Value],
+    ) -> Option<Vec<usize>> {
+        // Validate input
+        if columns.len() != values.len() || columns.is_empty() {
+            return None;
+        }
+
+        // Find an index that matches exactly these columns in order
         for index in self.indexes.values() {
-            if index.table == table && index.column == column {
-                let hash = value_hash(value);
+            if index.table == table && index.columns == columns {
+                let value_refs: Vec<&Value> = values.iter().collect();
+                let hash = composite_hash(&value_refs);
                 return index.entries.get(&hash).cloned();
             }
         }
         None
     }
 
-    fn has_index(&self, table: &str, column: &str) -> bool {
+    fn has_composite_index(&self, table: &str, columns: &[String]) -> bool {
         self.indexes
             .values()
-            .any(|idx| idx.table == table && idx.column == column)
+            .any(|idx| idx.table == table && idx.columns == columns)
+    }
+
+    fn get_indexes(&self, table: &str) -> Vec<crate::IndexInfo> {
+        self.indexes
+            .iter()
+            .filter(|(_, idx)| idx.table == table)
+            .map(|(name, idx)| crate::IndexInfo {
+                name: name.clone(),
+                table: idx.table.clone(),
+                columns: idx.columns.clone(),
+                unique: idx.unique,
+            })
+            .collect()
     }
 
     fn get_rows_by_indices(&self, table: &str, indices: &[usize]) -> StorageResult<Vec<Row>> {
@@ -348,25 +551,29 @@ impl StorageEngine for MemoryEngine {
     }
 }
 
-/// Check UNIQUE constraints for a new row against existing rows
-fn check_unique_constraints(
+/// Check UNIQUE constraints among pending updates only
+/// This is used during UPDATE to detect when multiple rows are being updated to the same value
+fn check_unique_among_pending(
     schema: &TableSchema,
-    existing_rows: &[Row],
+    updates: &[(usize, Row)],
+    current_idx: usize,
     new_row: &Row,
 ) -> StorageResult<()> {
     use crate::engine::TableConstraint;
 
-    // Check per-column unique constraints
+    // Check per-column unique constraints against other pending updates
     for (col_idx, col) in schema.columns.iter().enumerate() {
         if col.unique || col.primary_key {
             if let Some(new_val) = new_row.get(col_idx) {
-                // NULL values don't violate unique constraints
                 if *new_val == Value::Null {
                     continue;
                 }
-                for existing in existing_rows {
-                    if let Some(existing_val) = existing.get(col_idx) {
-                        if existing_val == new_val {
+                for (other_idx, other_row) in updates {
+                    if *other_idx == current_idx {
+                        continue;
+                    }
+                    if let Some(other_val) = other_row.get(col_idx) {
+                        if other_val == new_val {
                             return Err(StorageError::ConstraintViolation(format!(
                                 "UNIQUE constraint violated on column '{}'",
                                 col.name
@@ -378,39 +585,37 @@ fn check_unique_constraints(
         }
     }
 
-    // Check table-level UNIQUE constraints (multi-column)
+    // Check table-level UNIQUE constraints against other pending updates
     for constraint in &schema.constraints {
         if let TableConstraint::Unique { columns } | TableConstraint::PrimaryKey { columns } =
             constraint
         {
-            // Get column indices for the constraint
             let col_indices: Vec<usize> = columns
                 .iter()
                 .filter_map(|col_name| schema.columns.iter().position(|c| &c.name == col_name))
                 .collect();
 
-            // Skip if we couldn't find all columns
             if col_indices.len() != columns.len() {
                 continue;
             }
 
-            // Get new row values for the constrained columns
             let new_values: Vec<&Value> =
                 col_indices.iter().filter_map(|&i| new_row.get(i)).collect();
 
-            // If any value is NULL, skip (NULLs don't violate UNIQUE)
             if new_values.iter().any(|v| **v == Value::Null) {
                 continue;
             }
 
-            // Check against existing rows
-            for existing in existing_rows {
-                let existing_values: Vec<&Value> = col_indices
+            for (other_idx, other_row) in updates {
+                if *other_idx == current_idx {
+                    continue;
+                }
+                let other_values: Vec<&Value> = col_indices
                     .iter()
-                    .filter_map(|&i| existing.get(i))
+                    .filter_map(|&i| other_row.get(i))
                     .collect();
 
-                if new_values == existing_values {
+                if new_values == other_values {
                     return Err(StorageError::ConstraintViolation(format!(
                         "UNIQUE constraint violated on columns ({})",
                         columns.join(", ")
@@ -421,6 +626,20 @@ fn check_unique_constraints(
     }
 
     Ok(())
+}
+
+/// Hash multiple values for composite index lookup
+fn composite_hash(values: &[&Value]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    // Hash the number of values to distinguish different arities
+    values.len().hash(&mut hasher);
+    for v in values {
+        value_hash(v).hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// Hash a Value for index lookup
@@ -922,5 +1141,184 @@ mod tests {
         );
 
         assert!(result.is_ok());
+    }
+
+    // ===== Composite index tests =====
+
+    #[test]
+    fn test_auto_index_for_unique_column() {
+        let mut engine = MemoryEngine::new();
+        engine.create_table(create_unique_email_schema()).unwrap();
+
+        // Should have auto-created indexes for id (primary_key) and email (unique)
+        let indexes = engine.get_indexes("users");
+        assert_eq!(indexes.len(), 2);
+
+        // Check that we can use the auto-created indexes
+        assert!(engine.has_index("users", "id"));
+        assert!(engine.has_index("users", "email"));
+    }
+
+    #[test]
+    fn test_auto_index_for_composite_unique_constraint() {
+        let schema = TableSchema {
+            name: "order_items".to_string(),
+            columns: vec![
+                ColumnSchema {
+                    name: "order_id".to_string(),
+                    data_type: DataType::Int,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+                ColumnSchema {
+                    name: "product_id".to_string(),
+                    data_type: DataType::Int,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+                ColumnSchema {
+                    name: "quantity".to_string(),
+                    data_type: DataType::Int,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+            ],
+            constraints: vec![TableConstraint::Unique {
+                columns: vec!["order_id".to_string(), "product_id".to_string()],
+            }],
+        };
+
+        let mut engine = MemoryEngine::new();
+        engine.create_table(schema).unwrap();
+
+        // Should have auto-created composite index
+        let indexes = engine.get_indexes("order_items");
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(indexes[0].columns, vec!["order_id", "product_id"]);
+        assert!(indexes[0].unique);
+    }
+
+    #[test]
+    fn test_composite_index_lookup() {
+        let schema = TableSchema {
+            name: "lookup_test".to_string(),
+            columns: vec![
+                ColumnSchema {
+                    name: "a".to_string(),
+                    data_type: DataType::Int,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+                ColumnSchema {
+                    name: "b".to_string(),
+                    data_type: DataType::Int,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+                ColumnSchema {
+                    name: "c".to_string(),
+                    data_type: DataType::Text,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+            ],
+            constraints: vec![],
+        };
+
+        let mut engine = MemoryEngine::new();
+        engine.create_table(schema).unwrap();
+
+        // Insert some rows
+        engine
+            .insert(
+                "lookup_test",
+                vec![Value::Int(1), Value::Int(10), Value::Text("x".to_string())],
+            )
+            .unwrap();
+        engine
+            .insert(
+                "lookup_test",
+                vec![Value::Int(1), Value::Int(20), Value::Text("y".to_string())],
+            )
+            .unwrap();
+        engine
+            .insert(
+                "lookup_test",
+                vec![Value::Int(2), Value::Int(10), Value::Text("z".to_string())],
+            )
+            .unwrap();
+
+        // Create composite index on (a, b)
+        engine
+            .create_composite_index(
+                "lookup_test",
+                &["a".to_string(), "b".to_string()],
+                "idx_a_b",
+                false,
+            )
+            .unwrap();
+
+        // Lookup by composite key
+        let indices = engine
+            .composite_index_lookup(
+                "lookup_test",
+                &["a".to_string(), "b".to_string()],
+                &[Value::Int(1), Value::Int(10)],
+            )
+            .unwrap();
+        assert_eq!(indices.len(), 1);
+        assert_eq!(indices[0], 0);
+
+        // Lookup with different key
+        let indices = engine
+            .composite_index_lookup(
+                "lookup_test",
+                &["a".to_string(), "b".to_string()],
+                &[Value::Int(2), Value::Int(10)],
+            )
+            .unwrap();
+        assert_eq!(indices.len(), 1);
+        assert_eq!(indices[0], 2);
+
+        // Lookup with non-existent key
+        let indices = engine.composite_index_lookup(
+            "lookup_test",
+            &["a".to_string(), "b".to_string()],
+            &[Value::Int(9), Value::Int(9)],
+        );
+        assert!(indices.is_none() || indices.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_drop_table_removes_indexes() {
+        let mut engine = MemoryEngine::new();
+        engine.create_table(create_unique_email_schema()).unwrap();
+
+        // Verify indexes exist
+        assert_eq!(engine.get_indexes("users").len(), 2);
+
+        // Drop table
+        engine.drop_table("users").unwrap();
+
+        // Indexes should be gone (get_indexes returns empty for non-existent table)
+        assert_eq!(engine.get_indexes("users").len(), 0);
     }
 }

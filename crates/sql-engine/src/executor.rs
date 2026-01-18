@@ -306,9 +306,10 @@ impl Engine {
             LogicalPlan::CreateIndex {
                 name,
                 table,
-                column,
+                columns,
             } => {
-                self.storage.create_index(&table, &column, &name)?;
+                self.storage
+                    .create_composite_index(&table, &columns, &name, false)?;
                 Ok(QueryResult::Success)
             }
             LogicalPlan::DropIndex { name } => {
@@ -4648,6 +4649,38 @@ mod tests {
         // Dropping again should fail
         let result = engine.execute("DROP INDEX idx_users_id");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_create_composite_index() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE orders (id INT, user_id INT, product_id INT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO orders (id, user_id, product_id) VALUES (1, 100, 1)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO orders (id, user_id, product_id) VALUES (2, 100, 2)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO orders (id, user_id, product_id) VALUES (3, 200, 1)")
+            .unwrap();
+
+        // Create composite index
+        let result =
+            engine.execute("CREATE INDEX idx_user_product ON orders (user_id, product_id)");
+        assert_eq!(result.unwrap(), QueryResult::Success);
+
+        // Data should still be queryable
+        let result = engine.execute("SELECT * FROM orders WHERE user_id = 100");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 2);
+            }
+            _ => panic!("Expected Select result"),
+        }
     }
 
     #[test]

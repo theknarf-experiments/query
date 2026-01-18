@@ -90,6 +90,15 @@ pub struct TableSchema {
 /// A row of data
 pub type Row = Vec<Value>;
 
+/// Information about an index for query planning
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexInfo {
+    pub name: String,
+    pub table: String,
+    pub columns: Vec<String>,
+    pub unique: bool,
+}
+
 /// Trait for pluggable storage engines
 pub trait StorageEngine: Send + Sync {
     /// Create a new table
@@ -138,17 +147,53 @@ pub trait StorageEngine: Send + Sync {
     /// Rename a table
     fn rename_table(&mut self, old_name: &str, new_name: &str) -> StorageResult<()>;
 
-    /// Create an index on a table column
-    fn create_index(&mut self, table: &str, column: &str, name: &str) -> StorageResult<()>;
+    /// Create a composite index on one or more table columns
+    ///
+    /// For a single-column index, pass a slice with one element.
+    /// The `unique` flag indicates whether this is a UNIQUE index.
+    fn create_composite_index(
+        &mut self,
+        table: &str,
+        columns: &[String],
+        name: &str,
+        unique: bool,
+    ) -> StorageResult<()>;
+
+    /// Create a single-column index (convenience method)
+    ///
+    /// Delegates to `create_composite_index` with a single column and unique=false.
+    fn create_index(&mut self, table: &str, column: &str, name: &str) -> StorageResult<()> {
+        self.create_composite_index(table, &[column.to_string()], name, false)
+    }
 
     /// Drop an index
     fn drop_index(&mut self, name: &str) -> StorageResult<()>;
 
-    /// Lookup rows by index (returns row indices)
-    fn index_lookup(&self, table: &str, column: &str, value: &Value) -> Option<Vec<usize>>;
+    /// Lookup rows by composite index (returns row indices)
+    ///
+    /// The `columns` and `values` must have the same length and match the index definition.
+    fn composite_index_lookup(
+        &self,
+        table: &str,
+        columns: &[String],
+        values: &[Value],
+    ) -> Option<Vec<usize>>;
 
-    /// Check if an index exists for the given table and column
-    fn has_index(&self, table: &str, column: &str) -> bool;
+    /// Lookup rows by single-column index (convenience method)
+    fn index_lookup(&self, table: &str, column: &str, value: &Value) -> Option<Vec<usize>> {
+        self.composite_index_lookup(table, &[column.to_string()], std::slice::from_ref(value))
+    }
+
+    /// Check if a composite index exists covering the given columns
+    fn has_composite_index(&self, table: &str, columns: &[String]) -> bool;
+
+    /// Check if an index exists for a single column (convenience method)
+    fn has_index(&self, table: &str, column: &str) -> bool {
+        self.has_composite_index(table, &[column.to_string()])
+    }
+
+    /// Get all indexes for a table
+    fn get_indexes(&self, table: &str) -> Vec<IndexInfo>;
 
     /// Get row by index (returns specific row indices from a table scan)
     fn get_rows_by_indices(&self, table: &str, indices: &[usize]) -> StorageResult<Vec<Row>>;

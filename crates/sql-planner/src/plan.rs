@@ -120,11 +120,11 @@ pub enum LogicalPlan {
         table: String,
         action: sql_parser::AlterAction,
     },
-    /// Create an index
+    /// Create an index (supports composite indexes)
     CreateIndex {
         name: String,
         table: String,
-        column: String,
+        columns: Vec<String>,
     },
     /// Drop an index
     DropIndex { name: String },

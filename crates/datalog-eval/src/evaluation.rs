@@ -313,6 +313,94 @@ fn semi_naive_evaluate_instrumented<S: StorageEngine>(
     Ok((db, stats))
 }
 
+/// Naive evaluation: repeatedly apply all rules until fixed point.
+///
+/// This is a simple but inefficient evaluation strategy that re-evaluates
+/// all facts every iteration. It serves as a baseline for comparing
+/// against semi-naive evaluation.
+///
+/// # Differences from semi-naive
+///
+/// - Does NOT track deltas (new facts from previous iteration)
+/// - Re-grounds all rules against ALL facts each iteration
+/// - Relies solely on storage deduplication for termination
+/// - Much slower for recursive rules but simpler to understand
+///
+/// # Use cases
+///
+/// - Performance comparison/benchmarking
+/// - Debugging evaluation issues
+/// - Educational purposes
+///
+/// Note: This does NOT do stratification. For programs with negation,
+/// use `evaluate()` or `evaluate_instrumented()` instead.
+pub fn naive_evaluate<S: StorageEngine>(
+    rules: &[Rule],
+    initial_facts: DatalogContext,
+    storage: &mut S,
+) -> Result<DatalogContext, EvaluationError> {
+    let mut db = initial_facts;
+    let mut changed = true;
+
+    while changed {
+        changed = false;
+
+        // Apply ALL rules against ALL facts
+        for rule in rules {
+            let derived = ground_rule(rule, &db, storage);
+            for fact in derived {
+                if db.insert(fact, storage)?.is_new() {
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    Ok(db)
+}
+
+/// Naive evaluation with instrumentation for statistics.
+///
+/// Same as `naive_evaluate()` but also collects `EvaluationStats`.
+/// Useful for comparing efficiency against `evaluate_instrumented()`.
+///
+/// # Example
+///
+/// ```ignore
+/// let (result_naive, naive_stats) = naive_evaluate_instrumented(&rules, facts, &mut storage)?;
+/// let (result_semi, semi_stats) = evaluate_instrumented(&rules, &[], facts, &mut storage)?;
+///
+/// // Semi-naive should have fewer iterations for recursive rules
+/// assert!(semi_stats.iterations <= naive_stats.iterations);
+/// ```
+pub fn naive_evaluate_instrumented<S: StorageEngine>(
+    rules: &[Rule],
+    initial_facts: DatalogContext,
+    storage: &mut S,
+) -> Result<(DatalogContext, EvaluationStats), EvaluationError> {
+    let mut db = initial_facts;
+    let mut changed = true;
+    let mut stats = EvaluationStats::default();
+
+    while changed {
+        changed = false;
+        stats.iterations += 1;
+
+        for rule in rules {
+            stats.rule_applications += 1;
+            let derived = ground_rule(rule, &db, storage);
+            for fact in derived {
+                if db.insert(fact, storage)?.is_new() {
+                    changed = true;
+                    stats.facts_derived += 1;
+                }
+            }
+        }
+    }
+
+    Ok((db, stats))
+}
+
 /// Evaluate a Datalog program using storage for indexed lookups.
 ///
 /// Deprecated: Use `evaluate()` with storage parameter instead.
@@ -1084,6 +1172,251 @@ mod tests {
             stats.iterations <= 6,
             "Too many iterations: {}",
             stats.iterations
+        );
+    }
+
+    // ===== Naive Evaluation Tests =====
+
+    #[test]
+    fn test_naive_evaluate_basic() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        db.insert(
+            make_atom("parent", vec![atom_term("alice"), atom_term("bob")]),
+            &mut storage,
+        )
+        .unwrap();
+
+        // ancestor(X, Y) :- parent(X, Y).
+        let rules = vec![Rule {
+            head: make_atom("ancestor", vec![var_term("X"), var_term("Y")]),
+            body: vec![Literal::Positive(make_atom(
+                "parent",
+                vec![var_term("X"), var_term("Y")],
+            ))],
+        }];
+
+        let result = naive_evaluate(&rules, db, &mut storage).unwrap();
+
+        assert!(result.contains(
+            &make_atom("ancestor", vec![atom_term("alice"), atom_term("bob")]),
+            &storage
+        ));
+    }
+
+    #[test]
+    fn test_naive_evaluate_transitive_closure() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        // a -> b -> c
+        db.insert(
+            make_atom("edge", vec![atom_term("a"), atom_term("b")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("edge", vec![atom_term("b"), atom_term("c")]),
+            &mut storage,
+        )
+        .unwrap();
+
+        // path(X, Y) :- edge(X, Y).
+        // path(X, Z) :- path(X, Y), edge(Y, Z).
+        let rules = vec![
+            Rule {
+                head: make_atom("path", vec![var_term("X"), var_term("Y")]),
+                body: vec![Literal::Positive(make_atom(
+                    "edge",
+                    vec![var_term("X"), var_term("Y")],
+                ))],
+            },
+            Rule {
+                head: make_atom("path", vec![var_term("X"), var_term("Z")]),
+                body: vec![
+                    Literal::Positive(make_atom("path", vec![var_term("X"), var_term("Y")])),
+                    Literal::Positive(make_atom("edge", vec![var_term("Y"), var_term("Z")])),
+                ],
+            },
+        ];
+
+        let result = naive_evaluate(&rules, db, &mut storage).unwrap();
+
+        // Should derive path(a, c) through transitive closure
+        assert!(result.contains(
+            &make_atom("path", vec![atom_term("a"), atom_term("c")]),
+            &storage
+        ));
+    }
+
+    #[test]
+    fn test_naive_vs_semi_naive_correctness() {
+        // Both should produce the same result
+        let rules = vec![
+            Rule {
+                head: make_atom("path", vec![var_term("X"), var_term("Y")]),
+                body: vec![Literal::Positive(make_atom(
+                    "edge",
+                    vec![var_term("X"), var_term("Y")],
+                ))],
+            },
+            Rule {
+                head: make_atom("path", vec![var_term("X"), var_term("Z")]),
+                body: vec![
+                    Literal::Positive(make_atom("path", vec![var_term("X"), var_term("Y")])),
+                    Literal::Positive(make_atom("edge", vec![var_term("Y"), var_term("Z")])),
+                ],
+            },
+        ];
+
+        // Create initial facts in separate databases for each evaluation
+        let mut storage_naive = MemoryEngine::new();
+        let mut db_naive = DatalogContext::new();
+        db_naive
+            .insert(
+                make_atom("edge", vec![atom_term("a"), atom_term("b")]),
+                &mut storage_naive,
+            )
+            .unwrap();
+        db_naive
+            .insert(
+                make_atom("edge", vec![atom_term("b"), atom_term("c")]),
+                &mut storage_naive,
+            )
+            .unwrap();
+        db_naive
+            .insert(
+                make_atom("edge", vec![atom_term("c"), atom_term("d")]),
+                &mut storage_naive,
+            )
+            .unwrap();
+
+        let mut storage_semi = MemoryEngine::new();
+        let mut db_semi = DatalogContext::new();
+        db_semi
+            .insert(
+                make_atom("edge", vec![atom_term("a"), atom_term("b")]),
+                &mut storage_semi,
+            )
+            .unwrap();
+        db_semi
+            .insert(
+                make_atom("edge", vec![atom_term("b"), atom_term("c")]),
+                &mut storage_semi,
+            )
+            .unwrap();
+        db_semi
+            .insert(
+                make_atom("edge", vec![atom_term("c"), atom_term("d")]),
+                &mut storage_semi,
+            )
+            .unwrap();
+
+        let result_naive = naive_evaluate(&rules, db_naive, &mut storage_naive).unwrap();
+        let result_semi = evaluate(&rules, &[], db_semi, &mut storage_semi).unwrap();
+
+        // Both should derive the same paths
+        assert_eq!(
+            result_naive.count_facts("path", &storage_naive),
+            result_semi.count_facts("path", &storage_semi)
+        );
+
+        // Check specific paths exist in both
+        let expected_paths = vec![
+            ("a", "b"),
+            ("b", "c"),
+            ("c", "d"),
+            ("a", "c"),
+            ("b", "d"),
+            ("a", "d"),
+        ];
+
+        for (from, to) in expected_paths {
+            let fact = make_atom("path", vec![atom_term(from), atom_term(to)]);
+            assert!(
+                result_naive.contains(&fact, &storage_naive),
+                "Naive should contain path({}, {})",
+                from,
+                to
+            );
+            assert!(
+                result_semi.contains(&fact, &storage_semi),
+                "Semi-naive should contain path({}, {})",
+                from,
+                to
+            );
+        }
+    }
+
+    #[test]
+    fn test_naive_vs_semi_naive_efficiency() {
+        // Semi-naive should be more efficient (fewer rule applications)
+        let rules = vec![
+            Rule {
+                head: make_atom("path", vec![var_term("X"), var_term("Y")]),
+                body: vec![Literal::Positive(make_atom(
+                    "edge",
+                    vec![var_term("X"), var_term("Y")],
+                ))],
+            },
+            Rule {
+                head: make_atom("path", vec![var_term("X"), var_term("Z")]),
+                body: vec![
+                    Literal::Positive(make_atom("path", vec![var_term("X"), var_term("Y")])),
+                    Literal::Positive(make_atom("edge", vec![var_term("Y"), var_term("Z")])),
+                ],
+            },
+        ];
+
+        // Build a chain for testing
+        let mut storage_naive = MemoryEngine::new();
+        let mut db_naive = DatalogContext::new();
+        let mut storage_semi = MemoryEngine::new();
+        let mut db_semi = DatalogContext::new();
+
+        for i in 0..20 {
+            let from = format!("n{}", i);
+            let to = format!("n{}", i + 1);
+            db_naive
+                .insert(
+                    make_atom("edge", vec![atom_term(&from), atom_term(&to)]),
+                    &mut storage_naive,
+                )
+                .unwrap();
+            db_semi
+                .insert(
+                    make_atom("edge", vec![atom_term(&from), atom_term(&to)]),
+                    &mut storage_semi,
+                )
+                .unwrap();
+        }
+
+        let (_, naive_stats) =
+            naive_evaluate_instrumented(&rules, db_naive, &mut storage_naive).unwrap();
+        let (_, semi_stats) =
+            evaluate_instrumented(&rules, &[], db_semi, &mut storage_semi).unwrap();
+
+        println!(
+            "Naive: {} iterations, {} rule apps, {} facts",
+            naive_stats.iterations, naive_stats.rule_applications, naive_stats.facts_derived
+        );
+        println!(
+            "Semi-naive: {} iterations, {} rule apps, {} facts",
+            semi_stats.iterations, semi_stats.rule_applications, semi_stats.facts_derived
+        );
+
+        // Both should derive the same number of facts
+        assert_eq!(
+            naive_stats.facts_derived, semi_stats.facts_derived,
+            "Both should derive same number of facts"
+        );
+
+        // Semi-naive should have fewer or equal rule applications
+        // (it processes less redundantly)
+        assert!(
+            semi_stats.rule_applications <= naive_stats.rule_applications,
+            "Semi-naive should have <= rule applications than naive"
         );
     }
 }

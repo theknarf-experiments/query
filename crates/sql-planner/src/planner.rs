@@ -476,6 +476,7 @@ fn plan_create_table(create: CreateTableStatement) -> PlanResult {
     Ok(LogicalPlan::CreateTable {
         name: create.name,
         columns: create.columns,
+        constraints: create.constraints,
     })
 }
 
@@ -648,7 +649,7 @@ mod tests {
         assert!(result.is_ok());
         let plan = result.unwrap();
         match plan {
-            LogicalPlan::CreateTable { name, columns } => {
+            LogicalPlan::CreateTable { name, columns, .. } => {
                 assert_eq!(name, "users");
                 assert_eq!(columns.len(), 2);
             }

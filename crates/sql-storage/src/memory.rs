@@ -69,6 +69,10 @@ impl StorageEngine for MemoryEngine {
             .tables
             .get_mut(table)
             .ok_or_else(|| StorageError::TableNotFound(table.to_string()))?;
+
+        // Check UNIQUE constraints before inserting
+        check_unique_constraints(&table_data.schema, &table_data.rows, &row)?;
+
         let row_idx = table_data.rows.len();
         table_data.rows.push(row.clone());
 
@@ -138,13 +142,50 @@ impl StorageEngine for MemoryEngine {
             .get_mut(table)
             .ok_or_else(|| StorageError::TableNotFound(table.to_string()))?;
 
-        let mut count = 0;
-        for row in &mut table_data.rows {
+        // First pass: identify rows to update and compute new values
+        let mut updates: Vec<(usize, Row)> = Vec::new();
+        for (idx, row) in table_data.rows.iter().enumerate() {
             if predicate(row) {
-                updater(row);
-                count += 1;
+                let mut new_row = row.clone();
+                updater(&mut new_row);
+                updates.push((idx, new_row));
             }
         }
+
+        // Check UNIQUE constraints for each update
+        for (update_idx, new_row) in &updates {
+            // Build list of rows to check against (excluding the row being updated)
+            let other_rows: Vec<&Row> = table_data
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| i != update_idx)
+                .map(|(_, r)| r)
+                .collect();
+
+            // Also check against other pending updates
+            let other_updates: Vec<&Row> = updates
+                .iter()
+                .filter(|(i, _)| i != update_idx)
+                .map(|(_, r)| r)
+                .collect();
+
+            // Combine both sets for constraint checking
+            let all_other: Vec<Row> = other_rows
+                .iter()
+                .map(|r| (*r).clone())
+                .chain(other_updates.iter().map(|r| (*r).clone()))
+                .collect();
+
+            check_unique_constraints(&table_data.schema, &all_other, new_row)?;
+        }
+
+        // Apply updates
+        let count = updates.len();
+        for (idx, new_row) in updates {
+            table_data.rows[idx] = new_row;
+        }
+
         Ok(count)
     }
 
@@ -307,6 +348,81 @@ impl StorageEngine for MemoryEngine {
     }
 }
 
+/// Check UNIQUE constraints for a new row against existing rows
+fn check_unique_constraints(
+    schema: &TableSchema,
+    existing_rows: &[Row],
+    new_row: &Row,
+) -> StorageResult<()> {
+    use crate::engine::TableConstraint;
+
+    // Check per-column unique constraints
+    for (col_idx, col) in schema.columns.iter().enumerate() {
+        if col.unique || col.primary_key {
+            if let Some(new_val) = new_row.get(col_idx) {
+                // NULL values don't violate unique constraints
+                if *new_val == Value::Null {
+                    continue;
+                }
+                for existing in existing_rows {
+                    if let Some(existing_val) = existing.get(col_idx) {
+                        if existing_val == new_val {
+                            return Err(StorageError::ConstraintViolation(format!(
+                                "UNIQUE constraint violated on column '{}'",
+                                col.name
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Check table-level UNIQUE constraints (multi-column)
+    for constraint in &schema.constraints {
+        if let TableConstraint::Unique { columns } | TableConstraint::PrimaryKey { columns } =
+            constraint
+        {
+            // Get column indices for the constraint
+            let col_indices: Vec<usize> = columns
+                .iter()
+                .filter_map(|col_name| schema.columns.iter().position(|c| &c.name == col_name))
+                .collect();
+
+            // Skip if we couldn't find all columns
+            if col_indices.len() != columns.len() {
+                continue;
+            }
+
+            // Get new row values for the constrained columns
+            let new_values: Vec<&Value> =
+                col_indices.iter().filter_map(|&i| new_row.get(i)).collect();
+
+            // If any value is NULL, skip (NULLs don't violate UNIQUE)
+            if new_values.iter().any(|v| **v == Value::Null) {
+                continue;
+            }
+
+            // Check against existing rows
+            for existing in existing_rows {
+                let existing_values: Vec<&Value> = col_indices
+                    .iter()
+                    .filter_map(|&i| existing.get(i))
+                    .collect();
+
+                if new_values == existing_values {
+                    return Err(StorageError::ConstraintViolation(format!(
+                        "UNIQUE constraint violated on columns ({})",
+                        columns.join(", ")
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Hash a Value for index lookup
 fn value_hash(v: &Value) -> u64 {
     use std::collections::hash_map::DefaultHasher;
@@ -361,7 +477,7 @@ fn value_hash(v: &Value) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{ColumnSchema, DataType};
+    use crate::engine::{ColumnSchema, DataType, TableConstraint};
     use crate::Value;
 
     fn create_users_schema() -> TableSchema {
@@ -545,5 +661,266 @@ mod tests {
             Value::Text("Charlie".to_string()),
             "Index lookup for Charlie should return Charlie's row, not nothing or wrong data"
         );
+    }
+
+    // ===== UNIQUE constraint tests =====
+
+    fn create_unique_email_schema() -> TableSchema {
+        TableSchema {
+            name: "users".to_string(),
+            columns: vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    data_type: DataType::Int,
+                    nullable: false,
+                    primary_key: true,
+                    unique: false, // primary_key implies unique
+                    default: None,
+                    references: None,
+                },
+                ColumnSchema {
+                    name: "email".to_string(),
+                    data_type: DataType::Text,
+                    nullable: false,
+                    primary_key: false,
+                    unique: true, // column-level unique
+                    default: None,
+                    references: None,
+                },
+            ],
+            constraints: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_unique_column_constraint_allows_distinct_values() {
+        let mut engine = MemoryEngine::new();
+        engine.create_table(create_unique_email_schema()).unwrap();
+
+        engine
+            .insert(
+                "users",
+                vec![Value::Int(1), Value::Text("alice@example.com".to_string())],
+            )
+            .unwrap();
+        engine
+            .insert(
+                "users",
+                vec![Value::Int(2), Value::Text("bob@example.com".to_string())],
+            )
+            .unwrap();
+
+        let rows = engine.scan("users").unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn test_unique_column_constraint_rejects_duplicates() {
+        let mut engine = MemoryEngine::new();
+        engine.create_table(create_unique_email_schema()).unwrap();
+
+        engine
+            .insert(
+                "users",
+                vec![Value::Int(1), Value::Text("alice@example.com".to_string())],
+            )
+            .unwrap();
+
+        let result = engine.insert(
+            "users",
+            vec![Value::Int(2), Value::Text("alice@example.com".to_string())],
+        );
+
+        assert!(matches!(result, Err(StorageError::ConstraintViolation(_))));
+        assert_eq!(engine.scan("users").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_primary_key_rejects_duplicates() {
+        let mut engine = MemoryEngine::new();
+        engine.create_table(create_unique_email_schema()).unwrap();
+
+        engine
+            .insert(
+                "users",
+                vec![Value::Int(1), Value::Text("alice@example.com".to_string())],
+            )
+            .unwrap();
+
+        // Same primary key, different email
+        let result = engine.insert(
+            "users",
+            vec![Value::Int(1), Value::Text("bob@example.com".to_string())],
+        );
+
+        assert!(matches!(result, Err(StorageError::ConstraintViolation(_))));
+    }
+
+    #[test]
+    fn test_unique_allows_multiple_nulls() {
+        let schema = TableSchema {
+            name: "items".to_string(),
+            columns: vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    data_type: DataType::Int,
+                    nullable: false,
+                    primary_key: true,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+                ColumnSchema {
+                    name: "code".to_string(),
+                    data_type: DataType::Text,
+                    nullable: true,
+                    primary_key: false,
+                    unique: true,
+                    default: None,
+                    references: None,
+                },
+            ],
+            constraints: Vec::new(),
+        };
+
+        let mut engine = MemoryEngine::new();
+        engine.create_table(schema).unwrap();
+
+        // Multiple NULL values should be allowed (SQL standard)
+        engine
+            .insert("items", vec![Value::Int(1), Value::Null])
+            .unwrap();
+        engine
+            .insert("items", vec![Value::Int(2), Value::Null])
+            .unwrap();
+
+        assert_eq!(engine.scan("items").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_multi_column_unique_constraint() {
+        let schema = TableSchema {
+            name: "orders".to_string(),
+            columns: vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    data_type: DataType::Int,
+                    nullable: false,
+                    primary_key: true,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+                ColumnSchema {
+                    name: "user_id".to_string(),
+                    data_type: DataType::Int,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+                ColumnSchema {
+                    name: "product_id".to_string(),
+                    data_type: DataType::Int,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+            ],
+            constraints: vec![TableConstraint::Unique {
+                columns: vec!["user_id".to_string(), "product_id".to_string()],
+            }],
+        };
+
+        let mut engine = MemoryEngine::new();
+        engine.create_table(schema).unwrap();
+
+        // Same user_id, different product_id - allowed
+        engine
+            .insert(
+                "orders",
+                vec![Value::Int(1), Value::Int(100), Value::Int(1)],
+            )
+            .unwrap();
+        engine
+            .insert(
+                "orders",
+                vec![Value::Int(2), Value::Int(100), Value::Int(2)],
+            )
+            .unwrap();
+
+        // Different user_id, same product_id - allowed
+        engine
+            .insert(
+                "orders",
+                vec![Value::Int(3), Value::Int(200), Value::Int(1)],
+            )
+            .unwrap();
+
+        // Same (user_id, product_id) combination - rejected
+        let result = engine.insert(
+            "orders",
+            vec![Value::Int(4), Value::Int(100), Value::Int(1)],
+        );
+        assert!(matches!(result, Err(StorageError::ConstraintViolation(_))));
+
+        assert_eq!(engine.scan("orders").unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_update_unique_constraint_violation() {
+        let mut engine = MemoryEngine::new();
+        engine.create_table(create_unique_email_schema()).unwrap();
+
+        engine
+            .insert(
+                "users",
+                vec![Value::Int(1), Value::Text("alice@example.com".to_string())],
+            )
+            .unwrap();
+        engine
+            .insert(
+                "users",
+                vec![Value::Int(2), Value::Text("bob@example.com".to_string())],
+            )
+            .unwrap();
+
+        // Try to update Bob's email to Alice's email
+        let result = engine.update(
+            "users",
+            |row| matches!(&row[0], Value::Int(id) if *id == 2),
+            |row| row[1] = Value::Text("alice@example.com".to_string()),
+        );
+
+        assert!(matches!(result, Err(StorageError::ConstraintViolation(_))));
+
+        // Verify no changes were made
+        let rows = engine.scan("users").unwrap();
+        assert_eq!(rows[1][1], Value::Text("bob@example.com".to_string()));
+    }
+
+    #[test]
+    fn test_update_same_value_allowed() {
+        let mut engine = MemoryEngine::new();
+        engine.create_table(create_unique_email_schema()).unwrap();
+
+        engine
+            .insert(
+                "users",
+                vec![Value::Int(1), Value::Text("alice@example.com".to_string())],
+            )
+            .unwrap();
+
+        // Update to the same value should be allowed
+        let result = engine.update(
+            "users",
+            |row| matches!(&row[0], Value::Int(id) if *id == 1),
+            |row| row[1] = Value::Text("alice@example.com".to_string()),
+        );
+
+        assert!(result.is_ok());
     }
 }

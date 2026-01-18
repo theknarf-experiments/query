@@ -78,6 +78,7 @@ pub enum LogicalPlan {
     CreateTable {
         name: String,
         columns: Vec<sql_parser::ColumnDef>,
+        constraints: Vec<sql_parser::TableConstraint>,
     },
     /// Update rows in a table
     Update {

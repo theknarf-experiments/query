@@ -5,13 +5,15 @@ use std::collections::HashMap;
 use sql_parser::{
     AggregateFunc, AlterAction, Assignment, BinaryOp, ColumnDef, Cte, DataType, Expr,
     ForeignKeyRef as ParserFKRef, JoinType, OrderBy, ProcedureStatement,
-    ReferentialAction as ParserRefAction, SetOperator, Statement, TriggerAction, TriggerEvent,
-    TriggerTiming, UnaryOp, WindowFunc,
+    ReferentialAction as ParserRefAction, SetOperator, Statement,
+    TableConstraint as ParserTableConstraint, TriggerAction, TriggerEvent, TriggerTiming, UnaryOp,
+    WindowFunc,
 };
 use sql_planner::LogicalPlan;
 use sql_storage::{
     ColumnSchema, DataType as StorageDataType, ForeignKeyRef, MemoryEngine,
-    ReferentialAction as StorageRefAction, Row, StorageEngine, StorageError, TableSchema, Value,
+    ReferentialAction as StorageRefAction, Row, StorageEngine, StorageError,
+    TableConstraint as StorageTableConstraint, TableSchema, Value,
 };
 
 /// CTE context - stores materialized CTE results during query execution
@@ -259,9 +261,11 @@ impl Engine {
     /// Execute a logical plan
     fn execute_plan(&mut self, plan: LogicalPlan) -> ExecResult {
         match plan {
-            LogicalPlan::CreateTable { name, columns } => {
-                self.execute_create_table(&name, &columns)
-            }
+            LogicalPlan::CreateTable {
+                name,
+                columns,
+                constraints,
+            } => self.execute_create_table(&name, &columns, &constraints),
             LogicalPlan::Insert {
                 table,
                 columns,
@@ -445,7 +449,12 @@ impl Engine {
     }
 
     /// Execute a CREATE TABLE
-    fn execute_create_table(&mut self, name: &str, columns: &[ColumnDef]) -> ExecResult {
+    fn execute_create_table(
+        &mut self,
+        name: &str,
+        columns: &[ColumnDef],
+        constraints: &[ParserTableConstraint],
+    ) -> ExecResult {
         let schema = TableSchema {
             name: name.to_string(),
             columns: columns
@@ -460,7 +469,7 @@ impl Engine {
                     references: c.references.as_ref().map(convert_fk_ref),
                 })
                 .collect(),
-            constraints: Vec::new(), // TODO: Handle table-level constraints
+            constraints: constraints.iter().map(convert_table_constraint).collect(),
         };
         self.storage.create_table(schema)?;
         Ok(QueryResult::Success)
@@ -2196,6 +2205,39 @@ fn convert_ref_action(action: &ParserRefAction) -> StorageRefAction {
     }
 }
 
+/// Convert parser table constraint to storage format
+fn convert_table_constraint(constraint: &ParserTableConstraint) -> StorageTableConstraint {
+    match constraint {
+        ParserTableConstraint::PrimaryKey { columns, .. } => StorageTableConstraint::PrimaryKey {
+            columns: columns.clone(),
+        },
+        ParserTableConstraint::ForeignKey {
+            columns,
+            references_table,
+            references_columns,
+            on_delete,
+            on_update,
+            ..
+        } => StorageTableConstraint::ForeignKey {
+            columns: columns.clone(),
+            references_table: references_table.clone(),
+            references_columns: references_columns.clone(),
+            on_delete: convert_ref_action(on_delete),
+            on_update: convert_ref_action(on_update),
+        },
+        ParserTableConstraint::Unique { columns, .. } => StorageTableConstraint::Unique {
+            columns: columns.clone(),
+        },
+        ParserTableConstraint::Check { .. } => {
+            // CHECK constraints are not yet enforced at storage level
+            // For now, we skip them (they're validated at query time)
+            StorageTableConstraint::Unique {
+                columns: Vec::new(),
+            }
+        }
+    }
+}
+
 /// Substitute procedure parameters in a statement
 fn substitute_params_in_statement(
     stmt: &Statement,
@@ -2869,6 +2911,61 @@ mod tests {
         let result = engine.execute("INSERT INTO users (id, name) VALUES (1, 'alice')");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), QueryResult::RowsAffected(1));
+    }
+
+    #[test]
+    fn test_unique_column_constraint_sql() {
+        let mut engine = Engine::new();
+
+        // Create table with UNIQUE constraint on email column
+        let result = engine.execute("CREATE TABLE users (id INT PRIMARY KEY, email TEXT UNIQUE)");
+        assert!(result.is_ok());
+
+        // First insert should succeed
+        let result =
+            engine.execute("INSERT INTO users (id, email) VALUES (1, 'alice@example.com')");
+        assert!(result.is_ok());
+
+        // Second insert with different email should succeed
+        let result = engine.execute("INSERT INTO users (id, email) VALUES (2, 'bob@example.com')");
+        assert!(result.is_ok());
+
+        // Third insert with duplicate email should fail
+        let result =
+            engine.execute("INSERT INTO users (id, email) VALUES (3, 'alice@example.com')");
+        assert!(
+            result.is_err(),
+            "Should fail with UNIQUE constraint violation"
+        );
+    }
+
+    #[test]
+    fn test_unique_table_constraint_sql() {
+        let mut engine = Engine::new();
+
+        // Create table with multi-column UNIQUE constraint
+        let result = engine.execute(
+            "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, product_id INT, UNIQUE(user_id, product_id))",
+        );
+        assert!(result.is_ok());
+
+        // Insert should succeed
+        let result =
+            engine.execute("INSERT INTO orders (id, user_id, product_id) VALUES (1, 100, 1)");
+        assert!(result.is_ok());
+
+        // Same user, different product should succeed
+        let result =
+            engine.execute("INSERT INTO orders (id, user_id, product_id) VALUES (2, 100, 2)");
+        assert!(result.is_ok());
+
+        // Same (user_id, product_id) should fail
+        let result =
+            engine.execute("INSERT INTO orders (id, user_id, product_id) VALUES (3, 100, 1)");
+        assert!(
+            result.is_err(),
+            "Should fail with UNIQUE constraint violation on (user_id, product_id)"
+        );
     }
 
     #[test]

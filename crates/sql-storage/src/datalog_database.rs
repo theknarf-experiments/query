@@ -69,15 +69,18 @@ impl PredicateSchema {
 #[cfg(any(test, feature = "test-utils"))]
 use std::cell::Cell;
 
-/// A database of ground facts with efficient indexing
+/// A database of ground facts backed by SQL storage
+///
+/// All facts (both EDB base facts and IDB derived facts) are stored in the
+/// StorageEngine. This struct maintains metadata about predicates and schemas.
 #[derive(Debug, Clone)]
 pub struct FactDatabase {
-    /// Index: predicate -> set of ground atoms
-    facts_by_predicate: HashMap<Symbol, HashSet<Atom>>,
     /// Optional schemas for predicates (for SQL table interop)
     schemas: HashMap<Symbol, PredicateSchema>,
-    /// Predicates that are backed by storage (SQL tables) rather than local facts
+    /// Predicates that are backed by storage (SQL tables - EDB base facts)
     storage_backed_predicates: HashSet<Symbol>,
+    /// Predicates that are derived (IDB - computed by rules)
+    derived_predicates: HashSet<Symbol>,
 }
 
 impl Default for FactDatabase {
@@ -97,6 +100,8 @@ pub enum InsertError {
         expected: usize,
         found: usize,
     },
+    /// Storage operation failed
+    StorageError(String),
 }
 
 impl fmt::Display for InsertError {
@@ -116,6 +121,9 @@ impl fmt::Display for InsertError {
                     predicate, expected, found
                 )
             }
+            InsertError::StorageError(msg) => {
+                write!(f, "storage error: {}", msg)
+            }
         }
     }
 }
@@ -131,9 +139,9 @@ thread_local! {
 impl FactDatabase {
     pub fn new() -> Self {
         FactDatabase {
-            facts_by_predicate: HashMap::new(),
             schemas: HashMap::new(),
             storage_backed_predicates: HashSet::new(),
+            derived_predicates: HashSet::new(),
         }
     }
 
@@ -152,31 +160,46 @@ impl FactDatabase {
         self.schemas.contains_key(predicate)
     }
 
-    /// Mark a predicate as backed by storage (SQL table)
-    ///
-    /// Storage-backed predicates are not queried from local facts;
-    /// instead, they should be queried via `query_with_storage`.
+    /// Mark a predicate as backed by storage (SQL table - EDB base facts)
     pub fn mark_storage_backed(&mut self, predicate: Symbol) {
         self.storage_backed_predicates.insert(predicate);
     }
 
-    /// Check if a predicate is backed by storage
+    /// Check if a predicate is backed by storage (EDB)
     pub fn is_storage_backed(&self, predicate: &Symbol) -> bool {
         self.storage_backed_predicates.contains(predicate)
     }
 
-    /// Query for facts, using storage indexes when available
+    /// Mark a predicate as derived (IDB - computed by rules)
+    pub fn mark_derived(&mut self, predicate: Symbol) {
+        self.derived_predicates.insert(predicate);
+    }
+
+    /// Check if a predicate is derived (IDB)
+    pub fn is_derived(&self, predicate: &Symbol) -> bool {
+        self.derived_predicates.contains(predicate)
+    }
+
+    /// Check if a predicate has storage (either EDB or IDB)
+    pub fn has_storage(&self, predicate: &Symbol) -> bool {
+        self.storage_backed_predicates.contains(predicate)
+            || self.derived_predicates.contains(predicate)
+    }
+
+    /// Query for facts matching a pattern
     ///
-    /// For storage-backed predicates, this method queries the underlying storage
-    /// engine directly, using indexes for O(1) lookups when constants are present.
-    /// For local predicates (derived facts), it falls back to the standard query.
-    pub fn query_with_storage<S: StorageEngine>(
-        &self,
-        pattern: &Atom,
-        storage: &S,
-    ) -> Vec<Substitution> {
-        // Check if this predicate is backed by storage
-        if self.storage_backed_predicates.contains(&pattern.predicate) {
+    /// All predicates (EDB and IDB) are queried from storage.
+    /// Uses indexes for O(1) lookups when constants are present.
+    pub fn query<S: StorageEngine>(&self, pattern: &Atom, storage: &S) -> Vec<Substitution> {
+        #[cfg(any(test, feature = "test-utils"))]
+        TRACK_GROUND_QUERIES.with(|flag| {
+            if flag.get() && is_ground(pattern) {
+                GROUND_QUERY_COUNT.with(|count| count.set(count.get() + 1));
+            }
+        });
+
+        // Check if this predicate has storage (EDB or IDB)
+        if self.has_storage(&pattern.predicate) {
             // Try indexed lookup if pattern has constants
             if let Some(indexed_results) = self.query_via_index(pattern, storage) {
                 return indexed_results;
@@ -185,8 +208,18 @@ impl FactDatabase {
             return self.query_via_scan(pattern, storage);
         }
 
-        // Use local facts (derived predicates)
-        self.query(pattern)
+        // Predicate not in storage - return empty
+        vec![]
+    }
+
+    /// Query for facts (alias for backward compatibility during migration)
+    #[deprecated(note = "Use query() with storage parameter instead")]
+    pub fn query_with_storage<S: StorageEngine>(
+        &self,
+        pattern: &Atom,
+        storage: &S,
+    ) -> Vec<Substitution> {
+        self.query(pattern, storage)
     }
 
     /// Try to query using an index if a constant column has one
@@ -248,8 +281,15 @@ impl FactDatabase {
         results
     }
 
-    /// Insert a ground fact into the database
-    pub fn insert(&mut self, atom: Atom) -> Result<bool, InsertError> {
+    /// Insert a ground fact into storage
+    ///
+    /// Returns Ok(true) if the fact was new, Ok(false) if it already existed.
+    /// Uses UNIQUE constraints for O(1) deduplication.
+    pub fn insert<S: StorageEngine>(
+        &mut self,
+        atom: Atom,
+        storage: &mut S,
+    ) -> Result<bool, InsertError> {
         // Check that atom is ground (no variables)
         if !is_ground(&atom) {
             return Err(InsertError::NonGroundAtom(atom));
@@ -266,92 +306,99 @@ impl FactDatabase {
             }
         }
 
-        Ok(self
-            .facts_by_predicate
-            .entry(atom.predicate)
-            .or_default()
-            .insert(atom))
+        let predicate_name = atom.predicate.as_ref();
+        let arity = atom.terms.len();
+
+        // Ensure the derived table exists (creates with UNIQUE constraint)
+        if !self.is_storage_backed(&atom.predicate) {
+            ensure_derived_table(storage, predicate_name, arity)
+                .map_err(|e| InsertError::StorageError(format!("{:?}", e)))?;
+            self.mark_derived(atom.predicate);
+        }
+
+        // Convert atom to row and insert into storage
+        let row = atom_to_row(&atom);
+        match storage.insert(predicate_name, row) {
+            Ok(()) => Ok(true), // New fact inserted
+            Err(crate::engine::StorageError::ConstraintViolation(_)) => Ok(false), // Duplicate
+            Err(e) => Err(InsertError::StorageError(format!("{:?}", e))),
+        }
     }
 
-    /// Merge another fact database into this one, consuming the other database.
-    pub fn absorb(&mut self, mut other: FactDatabase) {
-        for (predicate, mut facts) in other.facts_by_predicate.drain() {
-            self.facts_by_predicate
-                .entry(predicate)
-                .or_default()
-                .extend(facts.drain());
-        }
+    /// Merge another fact database metadata into this one
+    ///
+    /// Note: This only merges metadata (schemas, predicate tracking).
+    /// Facts are stored in storage and don't need to be merged.
+    pub fn absorb(&mut self, other: FactDatabase) {
         // Merge schemas (other's schemas take precedence for conflicts)
         self.schemas.extend(other.schemas);
         // Merge storage-backed predicates
         self.storage_backed_predicates
             .extend(other.storage_backed_predicates);
+        // Merge derived predicates
+        self.derived_predicates.extend(other.derived_predicates);
     }
 
-    /// Check if a fact exists in the database
-    pub fn contains(&self, atom: &Atom) -> bool {
-        if let Some(facts) = self.facts_by_predicate.get(&atom.predicate) {
-            facts.contains(atom)
+    /// Check if a fact exists in storage
+    ///
+    /// Uses composite index lookup for O(1) when available, falls back to scan.
+    pub fn contains<S: StorageEngine>(&self, atom: &Atom, storage: &S) -> bool {
+        if !is_ground(atom) {
+            // Non-ground atoms: check if any matching facts exist
+            return !self.query(atom, storage).is_empty();
+        }
+
+        // Ground atom: check storage
+        let predicate_name = atom.predicate.as_ref();
+
+        // Check if predicate has storage
+        if !self.has_storage(&atom.predicate) {
+            return false;
+        }
+
+        // Get column names - use schema for storage-backed, col0/col1/... for derived
+        let columns: Vec<String> = if let Some(schema) = self.schemas.get(&atom.predicate) {
+            (0..schema.arity())
+                .filter_map(|i| schema.column_name(i).map(|s| s.to_string()))
+                .collect()
         } else {
-            false
-        }
-    }
+            (0..atom.terms.len()).map(|i| format!("col{}", i)).collect()
+        };
+        let row = atom_to_row(atom);
 
-    /// Query for facts matching a pattern (may contain variables)
-    /// Returns all substitutions that make the pattern match facts in the database
-    pub fn query(&self, pattern: &Atom) -> Vec<Substitution> {
-        #[cfg(any(test, feature = "test-utils"))]
-        TRACK_GROUND_QUERIES.with(|flag| {
-            if flag.get() && is_ground(pattern) {
-                GROUND_QUERY_COUNT.with(|count| count.set(count.get() + 1));
-            }
-        });
-
-        let mut results = Vec::new();
-
-        // Get all facts with the same predicate
-        if let Some(facts) = self.facts_by_predicate.get(&pattern.predicate) {
-            for fact in facts {
-                let mut subst = Substitution::new();
-                if unify_atoms(pattern, fact, &mut subst) {
-                    results.push(subst);
-                }
-            }
+        // Try O(1) index lookup first
+        if let Some(indices) = storage.composite_index_lookup(predicate_name, &columns, &row) {
+            return !indices.is_empty();
         }
 
-        results
+        // Fall back to scan-based check
+        if let Ok(rows) = storage.scan(predicate_name) {
+            return rows.contains(&row);
+        }
+
+        false
     }
 
-    /// Get all facts with a specific predicate
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn get_by_predicate(&self, predicate: &Symbol) -> Vec<&Atom> {
-        if let Some(facts) = self.facts_by_predicate.get(predicate) {
-            facts.iter().collect()
+    /// Get all facts for a predicate from storage
+    pub fn get_by_predicate<S: StorageEngine>(&self, predicate: &Symbol, storage: &S) -> Vec<Atom> {
+        let predicate_name = predicate.as_ref();
+        if let Ok(rows) = storage.scan(predicate_name) {
+            rows.iter()
+                .map(|row| row_to_atom(predicate_name, row))
+                .collect()
         } else {
             vec![]
         }
     }
 
-    /// Get all facts in the database
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn all_facts(&self) -> Vec<&Atom> {
-        self.facts_by_predicate
-            .values()
-            .flat_map(|facts| facts.iter())
-            .collect()
+    /// Count total number of predicates with storage
+    pub fn predicate_count(&self) -> usize {
+        self.storage_backed_predicates.len() + self.derived_predicates.len()
     }
 
-    /// Count total number of facts
-    pub fn len(&self) -> usize {
-        self.facts_by_predicate
-            .values()
-            .map(|facts| facts.len())
-            .sum()
-    }
-
-    /// Check if database is empty
+    /// Check if no predicates are registered
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.predicate_count() == 0
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -520,12 +567,14 @@ pub fn row_to_atom(predicate: &str, row: &Row) -> Atom {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MemoryEngine;
     use datalog_parser::Value;
     use internment::Intern;
 
     #[test]
     fn test_insert_ground_fact() {
         let mut db = FactDatabase::new();
+        let mut storage = MemoryEngine::new();
         let atom = Atom {
             predicate: Intern::new("parent".to_string()),
             terms: vec![
@@ -533,13 +582,14 @@ mod tests {
                 Term::Constant(Value::Atom(Intern::new("mary".to_string()))),
             ],
         };
-        assert!(db.insert(atom).is_ok());
-        assert_eq!(db.len(), 1);
+        assert!(db.insert(atom, &mut storage).is_ok());
+        assert!(db.is_derived(&Intern::new("parent".to_string())));
     }
 
     #[test]
     fn test_reject_non_ground_fact() {
         let mut db = FactDatabase::new();
+        let mut storage = MemoryEngine::new();
         let atom = Atom {
             predicate: Intern::new("parent".to_string()),
             terms: vec![
@@ -547,19 +597,23 @@ mod tests {
                 Term::Constant(Value::Atom(Intern::new("mary".to_string()))),
             ],
         };
-        assert!(db.insert(atom).is_err());
+        assert!(db.insert(atom, &mut storage).is_err());
     }
 
     #[test]
     fn test_query_with_variable() {
         let mut db = FactDatabase::new();
-        db.insert(Atom {
-            predicate: Intern::new("parent".to_string()),
-            terms: vec![
-                Term::Constant(Value::Atom(Intern::new("john".to_string()))),
-                Term::Constant(Value::Atom(Intern::new("mary".to_string()))),
-            ],
-        })
+        let mut storage = MemoryEngine::new();
+        db.insert(
+            Atom {
+                predicate: Intern::new("parent".to_string()),
+                terms: vec![
+                    Term::Constant(Value::Atom(Intern::new("john".to_string()))),
+                    Term::Constant(Value::Atom(Intern::new("mary".to_string()))),
+                ],
+            },
+            &mut storage,
+        )
         .unwrap();
 
         let pattern = Atom {
@@ -570,7 +624,7 @@ mod tests {
             ],
         };
 
-        let results = db.query(&pattern);
+        let results = db.query(&pattern, &storage);
         assert_eq!(results.len(), 1);
     }
 
@@ -650,12 +704,13 @@ mod tests {
         db.register_schema(schema);
 
         // Try to insert atom with wrong arity (1 instead of 2)
+        let mut storage = MemoryEngine::new();
         let atom = Atom {
             predicate,
             terms: vec![Term::Constant(Value::Integer(1))],
         };
 
-        let result = db.insert(atom);
+        let result = db.insert(atom, &mut storage);
         assert!(matches!(
             result,
             Err(InsertError::ArityMismatch {
@@ -669,6 +724,7 @@ mod tests {
     #[test]
     fn test_insert_allows_unregistered_predicate() {
         let mut db = FactDatabase::new();
+        let mut storage = MemoryEngine::new();
 
         // No schema registered for "unknown"
         let atom = Atom {
@@ -681,8 +737,8 @@ mod tests {
         };
 
         // Should succeed - permissive mode allows unregistered predicates
-        assert!(db.insert(atom).is_ok());
-        assert_eq!(db.len(), 1);
+        assert!(db.insert(atom, &mut storage).is_ok());
+        assert!(db.is_derived(&Intern::new("unknown".to_string())));
     }
 
     #[test]
@@ -690,6 +746,7 @@ mod tests {
         use crate::engine::{ColumnSchema, DataType};
 
         let mut db = FactDatabase::new();
+        let mut storage = MemoryEngine::new();
         let predicate = Intern::new("person".to_string());
 
         // Register a 2-column schema
@@ -727,8 +784,8 @@ mod tests {
             ],
         };
 
-        assert!(db.insert(atom).is_ok());
-        assert_eq!(db.len(), 1);
+        assert!(db.insert(atom, &mut storage).is_ok());
+        assert!(db.is_derived(&predicate));
     }
 
     #[test]
@@ -848,21 +905,22 @@ mod tests {
     }
 
     #[test]
-    fn test_query_with_storage_uses_local_facts_for_non_storage_backed() {
-        use crate::MemoryEngine;
-
+    fn test_query_derived_facts() {
         let mut db = FactDatabase::new();
-        let storage = MemoryEngine::new();
+        let mut storage = MemoryEngine::new();
 
-        // Add a local fact (not storage-backed)
-        let pred = Intern::new("local_fact".to_string());
-        db.insert(Atom {
-            predicate: pred,
-            terms: vec![
-                Term::Constant(Value::Atom(Intern::new("a".to_string()))),
-                Term::Constant(Value::Atom(Intern::new("b".to_string()))),
-            ],
-        })
+        // Insert a derived fact
+        let pred = Intern::new("derived_fact".to_string());
+        db.insert(
+            Atom {
+                predicate: pred,
+                terms: vec![
+                    Term::Constant(Value::Atom(Intern::new("a".to_string()))),
+                    Term::Constant(Value::Atom(Intern::new("b".to_string()))),
+                ],
+            },
+            &mut storage,
+        )
         .unwrap();
 
         // Query with a variable
@@ -874,13 +932,13 @@ mod tests {
             ],
         };
 
-        // Should find the local fact
-        let results = db.query_with_storage(&pattern, &storage);
+        // Should find the derived fact from storage
+        let results = db.query(&pattern, &storage);
         assert_eq!(results.len(), 1);
     }
 
     #[test]
-    fn test_query_with_storage_queries_storage_for_storage_backed() {
+    fn test_query_storage_backed_predicate() {
         use crate::engine::{ColumnSchema, DataType, TableSchema};
         use crate::MemoryEngine;
 
@@ -950,12 +1008,12 @@ mod tests {
             ],
         };
 
-        let results = db.query_with_storage(&pattern, &storage);
+        let results = db.query(&pattern, &storage);
         assert_eq!(results.len(), 2);
     }
 
     #[test]
-    fn test_query_with_storage_uses_index_when_available() {
+    fn test_query_uses_index_when_available() {
         use crate::engine::{ColumnSchema, DataType, TableSchema};
         use crate::MemoryEngine;
 
@@ -1020,7 +1078,7 @@ mod tests {
             ],
         };
 
-        let results = db.query_with_storage(&pattern, &storage);
+        let results = db.query(&pattern, &storage);
         assert_eq!(results.len(), 1);
 
         // Verify the result
@@ -1032,7 +1090,7 @@ mod tests {
     }
 
     #[test]
-    fn test_query_with_storage_falls_back_to_scan_without_index() {
+    fn test_query_falls_back_to_scan_without_index() {
         use crate::engine::{ColumnSchema, DataType, TableSchema};
         use crate::MemoryEngine;
 
@@ -1096,7 +1154,7 @@ mod tests {
             ],
         };
 
-        let results = db.query_with_storage(&pattern, &storage);
+        let results = db.query(&pattern, &storage);
         assert_eq!(results.len(), 1);
     }
 

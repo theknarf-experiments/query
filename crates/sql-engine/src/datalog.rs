@@ -19,8 +19,8 @@
 //! "#)?;
 //! ```
 
-use datalog_eval::{evaluate_with_storage, EvaluationError};
-use datalog_grounding::satisfy_body_with_storage;
+use datalog_eval::{evaluate, EvaluationError};
+use datalog_grounding::satisfy_body;
 use datalog_parser::{Constraint, Literal, Query, Rule, SrcId, Symbol, Term, Value as DValue};
 use sql_storage::FactDatabase;
 use sql_storage::{PredicateSchema, StorageEngine, Value as SValue};
@@ -147,7 +147,7 @@ pub fn execute_datalog_program<S: StorageEngine>(
     for stmt in program.statements {
         match stmt {
             datalog_parser::Statement::Fact(fact) => {
-                let _ = db.insert(fact.atom);
+                let _ = db.insert(fact.atom, storage);
             }
             datalog_parser::Statement::Rule(rule) => {
                 rules.push(rule);
@@ -172,7 +172,7 @@ pub fn execute_datalog_program<S: StorageEngine>(
     }
 
     // Evaluate the program using storage for indexed lookups
-    let result_db = evaluate_with_storage(&rules, &constraints, db, storage)?;
+    let result_db = evaluate(&rules, &constraints, db, storage)?;
 
     // If there's a query, evaluate it and return results
     if let Some(query) = queries.last() {
@@ -226,13 +226,13 @@ fn collect_predicates(
 fn execute_query<S: StorageEngine>(
     db: &FactDatabase,
     query: &Query,
-    storage: &mut S,
+    storage: &S,
 ) -> Result<QueryResult, DatalogError> {
     // Find all variables in the query
     let variables = collect_query_variables(query);
 
     // Get all substitutions that satisfy the query using storage indexes
-    let substitutions = satisfy_body_with_storage(&query.body, db, storage);
+    let substitutions = satisfy_body(&query.body, db, storage);
 
     if substitutions.is_empty() {
         // No results

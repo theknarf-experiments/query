@@ -69,11 +69,11 @@ static GLOBAL: allocation_tracker::CountingAllocator = allocation_tracker::Count
 /// Ground a rule: generate all ground instances by substituting variables
 /// For a rule like `ancestor(X, Z) :- parent(X, Y), parent(Y, Z)`
 /// This finds all ways to satisfy the body and applies those substitutions to the head
-pub fn ground_rule(rule: &Rule, db: &FactDatabase) -> Vec<Atom> {
+pub fn ground_rule<S: StorageEngine>(rule: &Rule, db: &FactDatabase, storage: &S) -> Vec<Atom> {
     let mut results = Vec::new();
 
     // Get all substitutions that satisfy the entire body
-    let substitutions = satisfy_body(&rule.body, db);
+    let substitutions = satisfy_body(&rule.body, db, storage);
 
     // Apply each substitution to the head to get ground facts
     for subst in substitutions {
@@ -85,8 +85,12 @@ pub fn ground_rule(rule: &Rule, db: &FactDatabase) -> Vec<Atom> {
 }
 
 /// Find all substitutions that satisfy a conjunction of literals
-pub fn satisfy_body(body: &[Literal], db: &FactDatabase) -> Vec<Substitution> {
-    satisfy_body_with_selector(body, db, None, &|_, _| DatabaseSelection::Full)
+pub fn satisfy_body<S: StorageEngine>(
+    body: &[Literal],
+    db: &FactDatabase,
+    storage: &S,
+) -> Vec<Substitution> {
+    satisfy_body_with_selector(body, db, storage, None, &|_, _| DatabaseSelection::Full)
 }
 
 enum DatabaseSelection {
@@ -94,27 +98,39 @@ enum DatabaseSelection {
     Delta,
 }
 
-fn satisfy_body_with_selector<F>(
+fn satisfy_body_with_selector<S, F>(
     body: &[Literal],
     full_db: &FactDatabase,
+    storage: &S,
     delta: Option<&FactDatabase>,
     selector: &F,
 ) -> Vec<Substitution>
 where
+    S: StorageEngine,
     F: Fn(usize, &Literal) -> DatabaseSelection,
 {
-    satisfy_body_with_selector_recursive(body, full_db, delta, selector, 0, &Substitution::new())
+    satisfy_body_with_selector_recursive(
+        body,
+        full_db,
+        storage,
+        delta,
+        selector,
+        0,
+        &Substitution::new(),
+    )
 }
 
-fn satisfy_body_with_selector_recursive<F>(
+fn satisfy_body_with_selector_recursive<S, F>(
     body: &[Literal],
     full_db: &FactDatabase,
+    storage: &S,
     delta: Option<&FactDatabase>,
     selector: &F,
     index: usize,
     current_subst: &Substitution,
 ) -> Vec<Substitution>
 where
+    S: StorageEngine,
     F: Fn(usize, &Literal) -> DatabaseSelection,
 {
     if index == body.len() {
@@ -130,6 +146,7 @@ where
                 let rest_substs = satisfy_body_with_selector_recursive(
                     body,
                     full_db,
+                    storage,
                     delta,
                     selector,
                     index + 1,
@@ -154,11 +171,12 @@ where
                 };
                 let mut result = Vec::new();
 
-                for atom_subst in db.query(&grounded_atom) {
+                for atom_subst in db.query(&grounded_atom, storage) {
                     if let Some(combined) = combine_substs(current_subst, &atom_subst) {
                         let mut rest_results = satisfy_body_with_selector_recursive(
                             body,
                             full_db,
+                            storage,
                             delta,
                             selector,
                             index + 1,
@@ -176,6 +194,7 @@ where
             let rest_substs = satisfy_body_with_selector_recursive(
                 body,
                 full_db,
+                storage,
                 delta,
                 selector,
                 index + 1,
@@ -185,7 +204,7 @@ where
 
             for subst in rest_substs {
                 let grounded_atom = subst.apply_atom(atom);
-                if !database_has_match(full_db, &grounded_atom) {
+                if !database_has_match(full_db, storage, &grounded_atom) {
                     result.push(subst);
                 }
             }
@@ -197,6 +216,7 @@ where
             let rest_substs = satisfy_body_with_selector_recursive(
                 body,
                 full_db,
+                storage,
                 delta,
                 selector,
                 index + 1,
@@ -257,11 +277,11 @@ fn combine_substs(s1: &Substitution, s2: &Substitution) -> Option<Substitution> 
     Some(combined)
 }
 
-fn database_has_match(db: &FactDatabase, atom: &Atom) -> bool {
+fn database_has_match<S: StorageEngine>(db: &FactDatabase, storage: &S, atom: &Atom) -> bool {
     if atom_is_ground(atom) {
-        db.contains(atom)
+        db.contains(atom, storage)
     } else {
-        !db.query(atom).is_empty()
+        !db.query(atom, storage).is_empty()
     }
 }
 
@@ -291,10 +311,11 @@ fn apply_subst_to_builtin(subst: &Substitution, builtin: &builtins::BuiltIn) -> 
 /// Ground a rule using semi-naive evaluation
 /// For multi-literal rules, this tries using delta at each position
 /// and the full database for other positions
-pub fn ground_rule_semi_naive(
+pub fn ground_rule_semi_naive<S: StorageEngine>(
     rule: &Rule,
     delta: &FactDatabase,
     full_db: &FactDatabase,
+    storage: &S,
 ) -> Vec<Atom> {
     let mut results = Vec::new();
 
@@ -305,7 +326,7 @@ pub fn ground_rule_semi_naive(
 
     // For each position i in the body, use delta for position i and full_db for others
     for delta_pos in 0..rule.body.len() {
-        let substs = satisfy_body_mixed(&rule.body, delta, full_db, delta_pos);
+        let substs = satisfy_body_mixed(&rule.body, delta, full_db, storage, delta_pos);
         for subst in substs {
             let ground_head = subst.apply_atom(&rule.head);
             results.push(ground_head);
@@ -316,13 +337,14 @@ pub fn ground_rule_semi_naive(
 }
 
 /// Satisfy body literals using delta for one position and full DB for others
-fn satisfy_body_mixed(
+fn satisfy_body_mixed<S: StorageEngine>(
     body: &[Literal],
     delta: &FactDatabase,
     full_db: &FactDatabase,
+    storage: &S,
     delta_pos: usize,
 ) -> Vec<Substitution> {
-    satisfy_body_with_selector(body, full_db, Some(delta), &|index, literal| {
+    satisfy_body_with_selector(body, full_db, storage, Some(delta), &|index, literal| {
         if index == delta_pos {
             match literal {
                 Literal::Positive(atom) if builtins::parse_builtin(atom).is_some() => {
@@ -339,174 +361,21 @@ fn satisfy_body_mixed(
 }
 
 // ============================================================================
-// Storage-Aware Grounding Functions
+// DeltaTracker-Based Semi-Naive Evaluation
 // ============================================================================
-//
-// These functions enable Datalog queries to use SQL storage indexes for efficient
-// lookups. For storage-backed predicates, they query the storage engine directly
-// instead of local facts.
 
-/// Ground a rule using storage for indexed lookups
-pub fn ground_rule_with_storage<S: StorageEngine>(
+use sql_storage::DeltaTracker;
+
+/// Ground a rule using semi-naive evaluation with lightweight DeltaTracker
+///
+/// For each body literal position, this grounds the rule using delta at that
+/// position and full_db for all other positions. This ensures we only find
+/// derivations that use at least one newly derived fact.
+pub fn ground_rule_semi_naive_with_delta<S: StorageEngine>(
     rule: &Rule,
-    db: &FactDatabase,
-    storage: &mut S,
-) -> Vec<Atom> {
-    let mut results = Vec::new();
-
-    // Get all substitutions that satisfy the entire body
-    let substitutions = satisfy_body_with_storage(&rule.body, db, storage);
-
-    // Apply each substitution to the head to get ground facts
-    for subst in substitutions {
-        let ground_head = subst.apply_atom(&rule.head);
-        results.push(ground_head);
-    }
-
-    results
-}
-
-/// Find all substitutions that satisfy a conjunction of literals, using storage indexes
-pub fn satisfy_body_with_storage<S: StorageEngine>(
-    body: &[Literal],
-    db: &FactDatabase,
-    storage: &mut S,
-) -> Vec<Substitution> {
-    satisfy_body_with_storage_recursive(body, db, storage, None, 0, &Substitution::new())
-}
-
-fn satisfy_body_with_storage_recursive<S: StorageEngine>(
-    body: &[Literal],
+    delta: &DeltaTracker,
     full_db: &FactDatabase,
-    storage: &mut S,
-    delta: Option<&FactDatabase>,
-    index: usize,
-    current_subst: &Substitution,
-) -> Vec<Substitution> {
-    if index == body.len() {
-        return vec![current_subst.clone()];
-    }
-
-    let literal = &body[index];
-
-    match literal {
-        Literal::Positive(atom) => {
-            if let Some(builtin) = builtins::parse_builtin(atom) {
-                // Built-ins act as filters - evaluate them after satisfying the rest.
-                let rest_substs = satisfy_body_with_storage_recursive(
-                    body,
-                    full_db,
-                    storage,
-                    delta,
-                    index + 1,
-                    current_subst,
-                );
-                let mut result = Vec::new();
-
-                for subst in rest_substs {
-                    let applied_builtin = apply_subst_to_builtin(&subst, &builtin);
-                    if let Some(true) = builtins::eval_builtin(&applied_builtin, &subst) {
-                        result.push(subst);
-                    }
-                }
-
-                result
-            } else {
-                // Apply the current substitution to the atom before querying.
-                let grounded_atom = current_subst.apply_atom(atom);
-                let mut result = Vec::new();
-
-                // Use storage-backed query for indexed lookups
-                let atom_substs = full_db.query_with_storage(&grounded_atom, storage);
-
-                for atom_subst in atom_substs {
-                    if let Some(combined) = combine_substs(current_subst, &atom_subst) {
-                        let mut rest_results = satisfy_body_with_storage_recursive(
-                            body,
-                            full_db,
-                            storage,
-                            delta,
-                            index + 1,
-                            &combined,
-                        );
-                        result.append(&mut rest_results);
-                    }
-                }
-
-                result
-            }
-        }
-        Literal::Negative(atom) => {
-            // Negation filters substitutions produced by the rest of the body.
-            let rest_substs = satisfy_body_with_storage_recursive(
-                body,
-                full_db,
-                storage,
-                delta,
-                index + 1,
-                current_subst,
-            );
-            let mut result = Vec::new();
-
-            for subst in rest_substs {
-                let grounded_atom = subst.apply_atom(atom);
-                if !database_has_match_with_storage(full_db, storage, &grounded_atom) {
-                    result.push(subst);
-                }
-            }
-
-            result
-        }
-        Literal::Comparison(comp) => {
-            // Comparisons act as filters - evaluate after satisfying the rest
-            let rest_substs = satisfy_body_with_storage_recursive(
-                body,
-                full_db,
-                storage,
-                delta,
-                index + 1,
-                current_subst,
-            );
-            let mut result = Vec::new();
-
-            for subst in rest_substs {
-                // Evaluate the comparison with the substitution
-                let left = subst.apply(&comp.left);
-                let right = subst.apply(&comp.right);
-                let builtin =
-                    builtins::BuiltIn::Comparison(comp_op_to_builtin(&comp.op), left, right);
-                if let Some(true) = builtins::eval_builtin(&builtin, &subst) {
-                    result.push(subst);
-                }
-            }
-
-            result
-        }
-    }
-}
-
-fn database_has_match_with_storage<S: StorageEngine>(
-    db: &FactDatabase,
-    storage: &mut S,
-    atom: &Atom,
-) -> bool {
-    // For storage-backed predicates, we need to query storage
-    // For local predicates, use the regular check
-    if db.is_storage_backed(&atom.predicate) {
-        !db.query_with_storage(atom, storage).is_empty()
-    } else if atom_is_ground(atom) {
-        db.contains(atom)
-    } else {
-        !db.query(atom).is_empty()
-    }
-}
-
-/// Ground a rule using semi-naive evaluation with storage support
-pub fn ground_rule_semi_naive_with_storage<S: StorageEngine>(
-    rule: &Rule,
-    delta: &FactDatabase,
-    full_db: &FactDatabase,
-    storage: &mut S,
+    storage: &S,
 ) -> Vec<Atom> {
     let mut results = Vec::new();
 
@@ -517,8 +386,7 @@ pub fn ground_rule_semi_naive_with_storage<S: StorageEngine>(
 
     // For each position i in the body, use delta for position i and full_db for others
     for delta_pos in 0..rule.body.len() {
-        let substs =
-            satisfy_body_mixed_with_storage(&rule.body, delta, full_db, storage, delta_pos);
+        let substs = satisfy_body_with_delta(&rule.body, delta, full_db, storage, delta_pos);
         for subst in substs {
             let ground_head = subst.apply_atom(&rule.head);
             results.push(ground_head);
@@ -528,30 +396,30 @@ pub fn ground_rule_semi_naive_with_storage<S: StorageEngine>(
     results
 }
 
-/// Satisfy body literals using delta for one position and full DB for others, with storage
-fn satisfy_body_mixed_with_storage<S: StorageEngine>(
+/// Satisfy body literals using DeltaTracker for one position and full DB for others
+fn satisfy_body_with_delta<S: StorageEngine>(
     body: &[Literal],
-    delta: &FactDatabase,
+    delta: &DeltaTracker,
     full_db: &FactDatabase,
-    storage: &mut S,
+    storage: &S,
     delta_pos: usize,
 ) -> Vec<Substitution> {
-    satisfy_body_with_storage_mixed_recursive(
+    satisfy_body_with_delta_recursive(
         body,
+        delta,
         full_db,
         storage,
-        Some(delta),
         delta_pos,
         0,
         &Substitution::new(),
     )
 }
 
-fn satisfy_body_with_storage_mixed_recursive<S: StorageEngine>(
+fn satisfy_body_with_delta_recursive<S: StorageEngine>(
     body: &[Literal],
+    delta: &DeltaTracker,
     full_db: &FactDatabase,
-    storage: &mut S,
-    delta: Option<&FactDatabase>,
+    storage: &S,
     delta_pos: usize,
     index: usize,
     current_subst: &Substitution,
@@ -561,55 +429,47 @@ fn satisfy_body_with_storage_mixed_recursive<S: StorageEngine>(
     }
 
     let literal = &body[index];
-    let use_delta = index == delta_pos
-        && matches!(literal, Literal::Positive(atom) if builtins::parse_builtin(atom).is_none());
 
     match literal {
         Literal::Positive(atom) => {
             if let Some(builtin) = builtins::parse_builtin(atom) {
-                let rest_substs = satisfy_body_with_storage_mixed_recursive(
+                // Built-ins act as filters - evaluate after satisfying the rest
+                let rest_substs = satisfy_body_with_delta_recursive(
                     body,
+                    delta,
                     full_db,
                     storage,
-                    delta,
                     delta_pos,
                     index + 1,
                     current_subst,
                 );
                 let mut result = Vec::new();
-
                 for subst in rest_substs {
                     let applied_builtin = apply_subst_to_builtin(&subst, &builtin);
                     if let Some(true) = builtins::eval_builtin(&applied_builtin, &subst) {
                         result.push(subst);
                     }
                 }
-
                 result
             } else {
+                // Apply the current substitution to the atom before querying
                 let grounded_atom = current_subst.apply_atom(atom);
-                let mut result = Vec::new();
 
-                // Storage-backed predicates are base facts - always query storage.
-                // Only derived predicates use the semi-naive delta logic.
-                let atom_substs = if full_db.is_storage_backed(&grounded_atom.predicate) {
-                    // Storage-backed (SQL table): always query storage
-                    full_db.query_with_storage(&grounded_atom, storage)
-                } else if use_delta {
-                    // Derived predicate at delta position: use delta (newly derived facts)
-                    delta.map_or(vec![], |d| d.query(&grounded_atom))
+                // Choose data source: delta for this position, full_db for others
+                let matches: Vec<Substitution> = if index == delta_pos {
+                    delta.query(&grounded_atom) // In-memory query!
                 } else {
-                    // Derived predicate at non-delta position: use full_db
-                    full_db.query(&grounded_atom)
+                    full_db.query(&grounded_atom, storage) // Storage query
                 };
 
-                for atom_subst in atom_substs {
+                let mut result = Vec::new();
+                for atom_subst in matches {
                     if let Some(combined) = combine_substs(current_subst, &atom_subst) {
-                        let mut rest_results = satisfy_body_with_storage_mixed_recursive(
+                        let mut rest_results = satisfy_body_with_delta_recursive(
                             body,
+                            delta,
                             full_db,
                             storage,
-                            delta,
                             delta_pos,
                             index + 1,
                             &combined,
@@ -617,43 +477,41 @@ fn satisfy_body_with_storage_mixed_recursive<S: StorageEngine>(
                         result.append(&mut rest_results);
                     }
                 }
-
                 result
             }
         }
         Literal::Negative(atom) => {
-            let rest_substs = satisfy_body_with_storage_mixed_recursive(
+            // Negation always checks against full database (stratification ensures safety)
+            let rest_substs = satisfy_body_with_delta_recursive(
                 body,
+                delta,
                 full_db,
                 storage,
-                delta,
                 delta_pos,
                 index + 1,
                 current_subst,
             );
             let mut result = Vec::new();
-
             for subst in rest_substs {
                 let grounded_atom = subst.apply_atom(atom);
-                if !database_has_match_with_storage(full_db, storage, &grounded_atom) {
+                if !database_has_match(full_db, storage, &grounded_atom) {
                     result.push(subst);
                 }
             }
-
             result
         }
         Literal::Comparison(comp) => {
-            let rest_substs = satisfy_body_with_storage_mixed_recursive(
+            // Comparisons act as filters
+            let rest_substs = satisfy_body_with_delta_recursive(
                 body,
+                delta,
                 full_db,
                 storage,
-                delta,
                 delta_pos,
                 index + 1,
                 current_subst,
             );
             let mut result = Vec::new();
-
             for subst in rest_substs {
                 let left = subst.apply(&comp.left);
                 let right = subst.apply(&comp.right);
@@ -663,16 +521,55 @@ fn satisfy_body_with_storage_mixed_recursive<S: StorageEngine>(
                     result.push(subst);
                 }
             }
-
             result
         }
     }
+}
+
+// ============================================================================
+// Storage-Aware Grounding Functions
+// ============================================================================
+//
+// These functions enable Datalog queries to use SQL storage indexes for efficient
+// lookups. For storage-backed predicates, they query the storage engine directly
+// instead of local facts.
+
+/// Ground a rule using storage for indexed lookups
+#[deprecated(note = "Use ground_rule() with storage parameter instead")]
+pub fn ground_rule_with_storage<S: StorageEngine>(
+    rule: &Rule,
+    db: &FactDatabase,
+    storage: &S,
+) -> Vec<Atom> {
+    ground_rule(rule, db, storage)
+}
+
+/// Find all substitutions that satisfy a conjunction of literals, using storage indexes
+#[deprecated(note = "Use satisfy_body() with storage parameter instead")]
+pub fn satisfy_body_with_storage<S: StorageEngine>(
+    body: &[Literal],
+    db: &FactDatabase,
+    storage: &S,
+) -> Vec<Substitution> {
+    satisfy_body(body, db, storage)
+}
+
+/// Ground a rule using semi-naive evaluation with storage support
+#[deprecated(note = "Use ground_rule_semi_naive() with storage parameter instead")]
+pub fn ground_rule_semi_naive_with_storage<S: StorageEngine>(
+    rule: &Rule,
+    delta: &FactDatabase,
+    full_db: &FactDatabase,
+    storage: &S,
+) -> Vec<Atom> {
+    ground_rule_semi_naive(rule, delta, full_db, storage)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use datalog_parser::{Atom, Rule, Symbol, Value};
+    use sql_storage::MemoryEngine;
 
     fn sym(s: &str) -> Symbol {
         Symbol::new(s.to_string())
@@ -694,21 +591,28 @@ mod tests {
         // parent(john, mary). parent(mary, jane).
         // ancestor(X, Y) :- parent(X, Y).
         let mut db = FactDatabase::new();
-        db.insert(make_atom(
-            "parent",
-            vec![
-                Term::Constant(Value::Atom(sym("john"))),
-                Term::Constant(Value::Atom(sym("mary"))),
-            ],
-        ))
+        let mut storage = MemoryEngine::new();
+        db.insert(
+            make_atom(
+                "parent",
+                vec![
+                    Term::Constant(Value::Atom(sym("john"))),
+                    Term::Constant(Value::Atom(sym("mary"))),
+                ],
+            ),
+            &mut storage,
+        )
         .unwrap();
-        db.insert(make_atom(
-            "parent",
-            vec![
-                Term::Constant(Value::Atom(sym("mary"))),
-                Term::Constant(Value::Atom(sym("jane"))),
-            ],
-        ))
+        db.insert(
+            make_atom(
+                "parent",
+                vec![
+                    Term::Constant(Value::Atom(sym("mary"))),
+                    Term::Constant(Value::Atom(sym("jane"))),
+                ],
+            ),
+            &mut storage,
+        )
         .unwrap();
 
         let rule = Rule {
@@ -719,7 +623,7 @@ mod tests {
             ))],
         };
 
-        let results = ground_rule(&rule, &db);
+        let results = ground_rule(&rule, &db, &storage);
         assert_eq!(results.len(), 2);
     }
 
@@ -727,21 +631,28 @@ mod tests {
     fn test_ground_transitive_rule() {
         // ancestor(X, Z) :- ancestor(X, Y), parent(Y, Z).
         let mut db = FactDatabase::new();
-        db.insert(make_atom(
-            "ancestor",
-            vec![
-                Term::Constant(Value::Atom(sym("john"))),
-                Term::Constant(Value::Atom(sym("mary"))),
-            ],
-        ))
+        let mut storage = MemoryEngine::new();
+        db.insert(
+            make_atom(
+                "ancestor",
+                vec![
+                    Term::Constant(Value::Atom(sym("john"))),
+                    Term::Constant(Value::Atom(sym("mary"))),
+                ],
+            ),
+            &mut storage,
+        )
         .unwrap();
-        db.insert(make_atom(
-            "parent",
-            vec![
-                Term::Constant(Value::Atom(sym("mary"))),
-                Term::Constant(Value::Atom(sym("jane"))),
-            ],
-        ))
+        db.insert(
+            make_atom(
+                "parent",
+                vec![
+                    Term::Constant(Value::Atom(sym("mary"))),
+                    Term::Constant(Value::Atom(sym("jane"))),
+                ],
+            ),
+            &mut storage,
+        )
         .unwrap();
 
         let rule = Rule {
@@ -752,7 +663,7 @@ mod tests {
             ],
         };
 
-        let results = ground_rule(&rule, &db);
+        let results = ground_rule(&rule, &db, &storage);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].predicate.as_ref(), "ancestor");
     }
@@ -761,23 +672,27 @@ mod tests {
     fn test_negation() {
         // not_parent(X) :- person(X), not parent(X, _).
         let mut db = FactDatabase::new();
-        db.insert(make_atom(
-            "person",
-            vec![Term::Constant(Value::Atom(sym("john")))],
-        ))
+        let mut storage = MemoryEngine::new();
+        db.insert(
+            make_atom("person", vec![Term::Constant(Value::Atom(sym("john")))]),
+            &mut storage,
+        )
         .unwrap();
-        db.insert(make_atom(
-            "person",
-            vec![Term::Constant(Value::Atom(sym("mary")))],
-        ))
+        db.insert(
+            make_atom("person", vec![Term::Constant(Value::Atom(sym("mary")))]),
+            &mut storage,
+        )
         .unwrap();
-        db.insert(make_atom(
-            "parent",
-            vec![
-                Term::Constant(Value::Atom(sym("john"))),
-                Term::Constant(Value::Atom(sym("jane"))),
-            ],
-        ))
+        db.insert(
+            make_atom(
+                "parent",
+                vec![
+                    Term::Constant(Value::Atom(sym("john"))),
+                    Term::Constant(Value::Atom(sym("jane"))),
+                ],
+            ),
+            &mut storage,
+        )
         .unwrap();
 
         // Check that mary (who is not a parent) would be included, john (who is) would not
@@ -786,7 +701,7 @@ mod tests {
             Literal::Negative(make_atom("parent", vec![var_term("X"), var_term("_Y")])),
         ];
 
-        let substs = satisfy_body(&body, &db);
+        let substs = satisfy_body(&body, &db, &storage);
         // Mary should be the only one without a parent entry
         assert_eq!(substs.len(), 1);
     }

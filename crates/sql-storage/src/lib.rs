@@ -11,6 +11,7 @@ mod value;
 pub mod datalog_constants;
 pub mod datalog_database;
 pub mod datalog_unification;
+pub mod delta_tracker;
 
 pub use engine::{
     ColumnSchema, DataType, ForeignKeyRef, IndexInfo, ReferentialAction, Row, StorageEngine,
@@ -26,3 +27,4 @@ pub use datalog_database::{
     InsertError, PredicateSchema,
 };
 pub use datalog_unification::{unify, unify_atoms, Substitution};
+pub use delta_tracker::DeltaTracker;

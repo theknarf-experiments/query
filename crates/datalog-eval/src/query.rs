@@ -12,13 +12,13 @@
 //!
 //! ```ignore
 //! // Query: ?- parent(X, mary).
-//! let results = evaluate_query(&query, &db);
+//! let results = evaluate_query(&query, &db, &storage);
 //! // Returns: [{X -> john}, {X -> alice}]
 //! ```
 
 use datalog_grounding::satisfy_body;
 use datalog_parser::{Query, Symbol};
-use sql_storage::{FactDatabase, Substitution};
+use sql_storage::{FactDatabase, StorageEngine, Substitution};
 use std::collections::HashSet;
 
 /// Result of query evaluation - list of substitutions that satisfy the query
@@ -32,9 +32,13 @@ pub type QueryResult = Vec<Substitution>;
 /// - `vec![]` if the query is false
 ///
 /// For queries with variables, returns all matching substitutions.
-pub fn evaluate_query(query: &Query, db: &FactDatabase) -> QueryResult {
+pub fn evaluate_query<S: StorageEngine>(
+    query: &Query,
+    db: &FactDatabase,
+    storage: &S,
+) -> QueryResult {
     // Use satisfy_body from grounding module to find all substitutions
-    satisfy_body(&query.body, db)
+    satisfy_body(&query.body, db, storage)
 }
 
 /// Extract variable bindings from a substitution for a set of variables
@@ -88,6 +92,7 @@ pub fn query_variables(query: &Query) -> HashSet<Symbol> {
 mod tests {
     use super::*;
     use datalog_parser::{Atom, Literal, Term, Value};
+    use sql_storage::MemoryEngine;
 
     fn sym(s: &str) -> Symbol {
         Symbol::new(s.to_string())
@@ -107,21 +112,28 @@ mod tests {
     #[test]
     fn test_query_with_variables() {
         let mut db = FactDatabase::new();
-        db.insert(make_atom(
-            "parent",
-            vec![
-                Term::Constant(Value::Atom(sym("john"))),
-                Term::Constant(Value::Atom(sym("mary"))),
-            ],
-        ))
+        let mut storage = MemoryEngine::new();
+        db.insert(
+            make_atom(
+                "parent",
+                vec![
+                    Term::Constant(Value::Atom(sym("john"))),
+                    Term::Constant(Value::Atom(sym("mary"))),
+                ],
+            ),
+            &mut storage,
+        )
         .unwrap();
-        db.insert(make_atom(
-            "parent",
-            vec![
-                Term::Constant(Value::Atom(sym("mary"))),
-                Term::Constant(Value::Atom(sym("jane"))),
-            ],
-        ))
+        db.insert(
+            make_atom(
+                "parent",
+                vec![
+                    Term::Constant(Value::Atom(sym("mary"))),
+                    Term::Constant(Value::Atom(sym("jane"))),
+                ],
+            ),
+            &mut storage,
+        )
         .unwrap();
 
         // Query: ?- parent(X, mary).
@@ -132,20 +144,24 @@ mod tests {
             ))],
         };
 
-        let results = evaluate_query(&query, &db);
+        let results = evaluate_query(&query, &db, &storage);
         assert_eq!(results.len(), 1);
     }
 
     #[test]
     fn test_ground_query() {
         let mut db = FactDatabase::new();
-        db.insert(make_atom(
-            "parent",
-            vec![
-                Term::Constant(Value::Atom(sym("john"))),
-                Term::Constant(Value::Atom(sym("mary"))),
-            ],
-        ))
+        let mut storage = MemoryEngine::new();
+        db.insert(
+            make_atom(
+                "parent",
+                vec![
+                    Term::Constant(Value::Atom(sym("john"))),
+                    Term::Constant(Value::Atom(sym("mary"))),
+                ],
+            ),
+            &mut storage,
+        )
         .unwrap();
 
         // Query: ?- parent(john, mary). (ground query - should succeed)
@@ -159,7 +175,7 @@ mod tests {
             ))],
         };
 
-        let results = evaluate_query(&query, &db);
+        let results = evaluate_query(&query, &db, &storage);
         assert_eq!(results.len(), 1); // One empty substitution = true
 
         // Query: ?- parent(john, jane). (ground query - should fail)
@@ -173,7 +189,7 @@ mod tests {
             ))],
         };
 
-        let results2 = evaluate_query(&query2, &db);
+        let results2 = evaluate_query(&query2, &db, &storage);
         assert_eq!(results2.len(), 0); // No substitution = false
     }
 }

@@ -18,7 +18,7 @@ pub use engine::{
     StorageError, StorageResult, TableConstraint, TableSchema,
 };
 pub use memory::MemoryEngine;
-pub use value::{DateValue, TimeValue, TimestampValue, Value};
+pub use value::{DateValue, JsonParseError, JsonValue, TimeValue, TimestampValue, Value};
 
 // Re-export Datalog storage types
 pub use datalog_constants::ConstantEnv;

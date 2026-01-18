@@ -689,6 +689,11 @@ fn value_hash(v: &Value) -> u64 {
             ts.time.second.hash(&mut hasher);
             ts.time.microsecond.hash(&mut hasher);
         }
+        Value::Json(j) => {
+            8u8.hash(&mut hasher);
+            // Hash the JSON string representation for consistency
+            j.to_string().hash(&mut hasher);
+        }
     }
     hasher.finish()
 }

@@ -456,6 +456,9 @@ fn sql_to_datalog_value(value: &SqlValue) -> DatalogValue {
         SqlValue::Date(d) => DatalogValue::Atom(Symbol::new(format!("{}", d))),
         SqlValue::Time(t) => DatalogValue::Atom(Symbol::new(format!("{}", t))),
         SqlValue::Timestamp(ts) => DatalogValue::Atom(Symbol::new(format!("{}", ts))),
+        // JSON values will be converted to compound terms in json_to_term
+        // For now, fall back to text representation
+        SqlValue::Json(j) => DatalogValue::Atom(Symbol::new(j.to_string())),
     }
 }
 

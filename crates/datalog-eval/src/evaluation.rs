@@ -612,4 +612,266 @@ mod tests {
         // No strata means 0 iterations
         assert_eq!(stats.iterations, 0);
     }
+
+    // ===== Stratification Edge Case Tests =====
+
+    #[test]
+    fn test_stratified_chain_of_negations() {
+        // Stratum 0: p(X) :- base(X).
+        // Stratum 1: q(X) :- base(X), not p(X).
+        // Stratum 2: r(X) :- base(X), not q(X).
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(make_atom("base", vec![atom_term("a")]), &mut storage)
+            .unwrap();
+
+        let rules = vec![
+            Rule {
+                head: make_atom("p", vec![var_term("X")]),
+                body: vec![Literal::Positive(make_atom("base", vec![var_term("X")]))],
+            },
+            Rule {
+                head: make_atom("q", vec![var_term("X")]),
+                body: vec![
+                    Literal::Positive(make_atom("base", vec![var_term("X")])),
+                    Literal::Negative(make_atom("p", vec![var_term("X")])),
+                ],
+            },
+            Rule {
+                head: make_atom("r", vec![var_term("X")]),
+                body: vec![
+                    Literal::Positive(make_atom("base", vec![var_term("X")])),
+                    Literal::Negative(make_atom("q", vec![var_term("X")])),
+                ],
+            },
+        ];
+
+        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+
+        // p(a) should be derived in stratum 0
+        assert!(result.contains(&make_atom("p", vec![atom_term("a")]), &storage));
+
+        // q(a) should NOT be derived (because p(a) exists)
+        assert!(!result.contains(&make_atom("q", vec![atom_term("a")]), &storage));
+
+        // r(a) should be derived (because q(a) doesn't exist)
+        assert!(result.contains(&make_atom("r", vec![atom_term("a")]), &storage));
+    }
+
+    #[test]
+    fn test_stratified_double_negation() {
+        // Test multiple levels of negation
+        // base(a). base(b). base(c).
+        // excluded(a).
+        // included(X) :- base(X), not excluded(X).
+        // non_included(X) :- base(X), not included(X).
+        // definitely(X) :- base(X), not non_included(X).
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(make_atom("base", vec![atom_term("a")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("base", vec![atom_term("b")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("base", vec![atom_term("c")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("excluded", vec![atom_term("a")]), &mut storage)
+            .unwrap();
+
+        let rules = vec![
+            Rule {
+                head: make_atom("included", vec![var_term("X")]),
+                body: vec![
+                    Literal::Positive(make_atom("base", vec![var_term("X")])),
+                    Literal::Negative(make_atom("excluded", vec![var_term("X")])),
+                ],
+            },
+            Rule {
+                head: make_atom("non_included", vec![var_term("X")]),
+                body: vec![
+                    Literal::Positive(make_atom("base", vec![var_term("X")])),
+                    Literal::Negative(make_atom("included", vec![var_term("X")])),
+                ],
+            },
+            Rule {
+                head: make_atom("definitely", vec![var_term("X")]),
+                body: vec![
+                    Literal::Positive(make_atom("base", vec![var_term("X")])),
+                    Literal::Negative(make_atom("non_included", vec![var_term("X")])),
+                ],
+            },
+        ];
+
+        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+
+        // b and c are included (not excluded)
+        assert!(result.contains(&make_atom("included", vec![atom_term("b")]), &storage));
+        assert!(result.contains(&make_atom("included", vec![atom_term("c")]), &storage));
+
+        // a is not included (excluded)
+        assert!(!result.contains(&make_atom("included", vec![atom_term("a")]), &storage));
+
+        // a is non_included
+        assert!(result.contains(&make_atom("non_included", vec![atom_term("a")]), &storage));
+
+        // b and c are definitely (not non_included)
+        assert!(result.contains(&make_atom("definitely", vec![atom_term("b")]), &storage));
+        assert!(result.contains(&make_atom("definitely", vec![atom_term("c")]), &storage));
+
+        // a is NOT definitely (it is non_included)
+        assert!(!result.contains(&make_atom("definitely", vec![atom_term("a")]), &storage));
+    }
+
+    #[test]
+    fn test_stratified_with_transitive_closure_and_negation() {
+        // Graph reachability with blocked nodes
+        // edge(a, b). edge(b, c). edge(c, d). edge(a, x).
+        // blocked(x).
+        // reachable(X, Y) :- edge(X, Y).
+        // reachable(X, Z) :- reachable(X, Y), edge(Y, Z).
+        // safe_reachable(X, Y) :- reachable(X, Y), not blocked(Y).
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(
+            make_atom("edge", vec![atom_term("a"), atom_term("b")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("edge", vec![atom_term("b"), atom_term("c")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("edge", vec![atom_term("c"), atom_term("d")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("edge", vec![atom_term("a"), atom_term("x")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(make_atom("blocked", vec![atom_term("x")]), &mut storage)
+            .unwrap();
+
+        let rules = vec![
+            Rule {
+                head: make_atom("reachable", vec![var_term("X"), var_term("Y")]),
+                body: vec![Literal::Positive(make_atom(
+                    "edge",
+                    vec![var_term("X"), var_term("Y")],
+                ))],
+            },
+            Rule {
+                head: make_atom("reachable", vec![var_term("X"), var_term("Z")]),
+                body: vec![
+                    Literal::Positive(make_atom("reachable", vec![var_term("X"), var_term("Y")])),
+                    Literal::Positive(make_atom("edge", vec![var_term("Y"), var_term("Z")])),
+                ],
+            },
+            Rule {
+                head: make_atom("safe_reachable", vec![var_term("X"), var_term("Y")]),
+                body: vec![
+                    Literal::Positive(make_atom("reachable", vec![var_term("X"), var_term("Y")])),
+                    Literal::Negative(make_atom("blocked", vec![var_term("Y")])),
+                ],
+            },
+        ];
+
+        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+
+        // Should reach d from a (via b->c->d)
+        assert!(result.contains(
+            &make_atom("safe_reachable", vec![atom_term("a"), atom_term("d")]),
+            &storage
+        ));
+
+        // Should NOT reach x (blocked)
+        assert!(!result.contains(
+            &make_atom("safe_reachable", vec![atom_term("a"), atom_term("x")]),
+            &storage
+        ));
+
+        // But x IS reachable (just not safe_reachable)
+        assert!(result.contains(
+            &make_atom("reachable", vec![atom_term("a"), atom_term("x")]),
+            &storage
+        ));
+    }
+
+    #[test]
+    fn test_stratified_game_states() {
+        // Game state exploration with forbidden states
+        // initial(start).
+        // transition(start, s1). transition(s1, s2). transition(s1, danger).
+        // forbidden(danger).
+        // reachable(S) :- initial(S).
+        // reachable(S) :- reachable(S0), transition(S0, S).
+        // safe(S) :- reachable(S), not forbidden(S).
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(make_atom("initial", vec![atom_term("start")]), &mut storage)
+            .unwrap();
+        db.insert(
+            make_atom("transition", vec![atom_term("start"), atom_term("s1")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("transition", vec![atom_term("s1"), atom_term("s2")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("transition", vec![atom_term("s1"), atom_term("danger")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("forbidden", vec![atom_term("danger")]),
+            &mut storage,
+        )
+        .unwrap();
+
+        let rules = vec![
+            Rule {
+                head: make_atom("reachable", vec![var_term("S")]),
+                body: vec![Literal::Positive(make_atom("initial", vec![var_term("S")]))],
+            },
+            Rule {
+                head: make_atom("reachable", vec![var_term("S")]),
+                body: vec![
+                    Literal::Positive(make_atom("reachable", vec![var_term("S0")])),
+                    Literal::Positive(make_atom("transition", vec![var_term("S0"), var_term("S")])),
+                ],
+            },
+            Rule {
+                head: make_atom("safe", vec![var_term("S")]),
+                body: vec![
+                    Literal::Positive(make_atom("reachable", vec![var_term("S")])),
+                    Literal::Negative(make_atom("forbidden", vec![var_term("S")])),
+                ],
+            },
+        ];
+
+        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+
+        // All states are reachable
+        assert!(result.contains(&make_atom("reachable", vec![atom_term("start")]), &storage));
+        assert!(result.contains(&make_atom("reachable", vec![atom_term("s1")]), &storage));
+        assert!(result.contains(&make_atom("reachable", vec![atom_term("s2")]), &storage));
+        assert!(result.contains(&make_atom("reachable", vec![atom_term("danger")]), &storage));
+
+        // Danger is NOT safe
+        assert!(!result.contains(&make_atom("safe", vec![atom_term("danger")]), &storage));
+
+        // Other states ARE safe
+        assert!(result.contains(&make_atom("safe", vec![atom_term("start")]), &storage));
+        assert!(result.contains(&make_atom("safe", vec![atom_term("s1")]), &storage));
+        assert!(result.contains(&make_atom("safe", vec![atom_term("s2")]), &storage));
+    }
+
+    // Note: Zero-arity predicate tests from proclog are not included because
+    // SQL storage requires at least one column per table. Zero-arity predicates
+    // (propositional logic) would require a different storage approach.
 }

@@ -1419,4 +1419,176 @@ mod tests {
             "Semi-naive should have <= rule applications than naive"
         );
     }
+
+    // ===== Compound Term Tests =====
+
+    fn compound_term(functor: &str, args: Vec<Term>) -> Term {
+        Term::Compound(sym(functor), args)
+    }
+
+    #[test]
+    fn test_compound_term_in_fact() {
+        // Test storing and retrieving compound terms as facts
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        // Insert: data(pair(1, foo))
+        let compound = compound_term(
+            "pair",
+            vec![Term::Constant(Value::Integer(1)), atom_term("foo")],
+        );
+        db.insert(make_atom("data", vec![compound.clone()]), &mut storage)
+            .unwrap();
+
+        // Query should return the compound term
+        let result = evaluate(&[], &[], db, &mut storage).unwrap();
+        assert!(result.contains(&make_atom("data", vec![compound]), &storage));
+    }
+
+    #[test]
+    fn test_compound_term_in_rule_head() {
+        // Test deriving compound terms via rules
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        // Base fact: value(foo)
+        db.insert(make_atom("value", vec![atom_term("foo")]), &mut storage)
+            .unwrap();
+
+        // Rule: wrapped(wrap(X)) :- value(X).
+        let rules = vec![Rule {
+            head: make_atom("wrapped", vec![compound_term("wrap", vec![var_term("X")])]),
+            body: vec![Literal::Positive(make_atom("value", vec![var_term("X")]))],
+        }];
+
+        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+
+        // Should derive: wrapped(wrap(foo))
+        let expected = compound_term("wrap", vec![atom_term("foo")]);
+        assert!(result.contains(&make_atom("wrapped", vec![expected]), &storage));
+    }
+
+    #[test]
+    fn test_nested_compound_term_derivation() {
+        // Test deriving deeply nested compound terms
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        // Base fact: base(a)
+        db.insert(make_atom("base", vec![atom_term("a")]), &mut storage)
+            .unwrap();
+
+        // Rules that progressively wrap:
+        // level0(X) :- base(X).
+        // level1(wrap(X)) :- level0(X).
+        // level2(wrap(X)) :- level1(X).
+        // level3(wrap(X)) :- level2(X).
+        let rules = vec![
+            Rule {
+                head: make_atom("level0", vec![var_term("X")]),
+                body: vec![Literal::Positive(make_atom("base", vec![var_term("X")]))],
+            },
+            Rule {
+                head: make_atom("level1", vec![compound_term("wrap", vec![var_term("X")])]),
+                body: vec![Literal::Positive(make_atom("level0", vec![var_term("X")]))],
+            },
+            Rule {
+                head: make_atom("level2", vec![compound_term("wrap", vec![var_term("X")])]),
+                body: vec![Literal::Positive(make_atom("level1", vec![var_term("X")]))],
+            },
+            Rule {
+                head: make_atom("level3", vec![compound_term("wrap", vec![var_term("X")])]),
+                body: vec![Literal::Positive(make_atom("level2", vec![var_term("X")]))],
+            },
+        ];
+
+        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+
+        // Should derive:
+        // level0(a)
+        // level1(wrap(a))
+        // level2(wrap(wrap(a)))
+        // level3(wrap(wrap(wrap(a))))
+
+        assert!(result.contains(&make_atom("level0", vec![atom_term("a")]), &storage));
+
+        let wrap_a = compound_term("wrap", vec![atom_term("a")]);
+        assert!(result.contains(&make_atom("level1", vec![wrap_a.clone()]), &storage));
+
+        let wrap_wrap_a = compound_term("wrap", vec![wrap_a.clone()]);
+        assert!(result.contains(&make_atom("level2", vec![wrap_wrap_a.clone()]), &storage));
+
+        let wrap_wrap_wrap_a = compound_term("wrap", vec![wrap_wrap_a]);
+        assert!(result.contains(&make_atom("level3", vec![wrap_wrap_wrap_a]), &storage));
+    }
+
+    #[test]
+    fn test_compound_term_unification_in_body() {
+        // Test matching compound terms in rule bodies
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        // Facts with compound terms
+        db.insert(
+            make_atom(
+                "data",
+                vec![compound_term("pair", vec![atom_term("a"), atom_term("b")])],
+            ),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom(
+                "data",
+                vec![compound_term("pair", vec![atom_term("c"), atom_term("d")])],
+            ),
+            &mut storage,
+        )
+        .unwrap();
+
+        // Rule: first(X) :- data(pair(X, _)).
+        // This extracts the first element of pairs
+        let rules = vec![Rule {
+            head: make_atom("first", vec![var_term("X")]),
+            body: vec![Literal::Positive(make_atom(
+                "data",
+                vec![compound_term("pair", vec![var_term("X"), var_term("Y")])],
+            ))],
+        }];
+
+        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+
+        // Should derive first(a) and first(c)
+        assert!(result.contains(&make_atom("first", vec![atom_term("a")]), &storage));
+        assert!(result.contains(&make_atom("first", vec![atom_term("c")]), &storage));
+    }
+
+    #[test]
+    fn test_multiple_arg_compound_term() {
+        // Test compound terms with multiple arguments
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        db.insert(make_atom("x", vec![atom_term("a")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("y", vec![atom_term("b")]), &mut storage)
+            .unwrap();
+
+        // Rule: combined(pair(X, Y)) :- x(X), y(Y).
+        let rules = vec![Rule {
+            head: make_atom(
+                "combined",
+                vec![compound_term("pair", vec![var_term("X"), var_term("Y")])],
+            ),
+            body: vec![
+                Literal::Positive(make_atom("x", vec![var_term("X")])),
+                Literal::Positive(make_atom("y", vec![var_term("Y")])),
+            ],
+        }];
+
+        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+
+        let expected = compound_term("pair", vec![atom_term("a"), atom_term("b")]);
+        assert!(result.contains(&make_atom("combined", vec![expected]), &storage));
+    }
 }

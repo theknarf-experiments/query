@@ -18,7 +18,7 @@
 
 use datalog_grounding::satisfy_body;
 use datalog_parser::{Query, Symbol};
-use sql_storage::{FactDatabase, StorageEngine, Substitution};
+use sql_storage::{DatalogContext, StorageEngine, Substitution};
 use std::collections::HashSet;
 
 /// Result of query evaluation - list of substitutions that satisfy the query
@@ -34,7 +34,7 @@ pub type QueryResult = Vec<Substitution>;
 /// For queries with variables, returns all matching substitutions.
 pub fn evaluate_query<S: StorageEngine>(
     query: &Query,
-    db: &FactDatabase,
+    db: &DatalogContext,
     storage: &S,
 ) -> QueryResult {
     // Use satisfy_body from grounding module to find all substitutions
@@ -111,7 +111,7 @@ mod tests {
 
     #[test]
     fn test_query_with_variables() {
-        let mut db = FactDatabase::new();
+        let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
         db.insert(
             make_atom(
@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn test_ground_query() {
-        let mut db = FactDatabase::new();
+        let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
         db.insert(
             make_atom(

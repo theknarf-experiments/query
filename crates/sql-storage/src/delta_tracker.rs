@@ -1,7 +1,7 @@
 //! Lightweight delta tracker for semi-naive Datalog evaluation
 //!
 //! DeltaTracker provides efficient in-memory storage for newly derived facts
-//! during a single iteration of semi-naive evaluation. Unlike FactDatabase,
+//! during a single iteration of semi-naive evaluation. Unlike DatalogContext,
 //! it does not use SQL storage and operates entirely in memory.
 //!
 //! # Indexing

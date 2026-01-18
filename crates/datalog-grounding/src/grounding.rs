@@ -21,7 +21,7 @@
 
 use datalog_builtins as builtins;
 use datalog_parser::{Atom, Literal, Rule, Term};
-use sql_storage::{FactDatabase, StorageEngine, Substitution};
+use sql_storage::{DatalogContext, StorageEngine, Substitution};
 
 #[cfg(test)]
 mod allocation_tracker {
@@ -69,7 +69,7 @@ static GLOBAL: allocation_tracker::CountingAllocator = allocation_tracker::Count
 /// Ground a rule: generate all ground instances by substituting variables
 /// For a rule like `ancestor(X, Z) :- parent(X, Y), parent(Y, Z)`
 /// This finds all ways to satisfy the body and applies those substitutions to the head
-pub fn ground_rule<S: StorageEngine>(rule: &Rule, db: &FactDatabase, storage: &S) -> Vec<Atom> {
+pub fn ground_rule<S: StorageEngine>(rule: &Rule, db: &DatalogContext, storage: &S) -> Vec<Atom> {
     let mut results = Vec::new();
 
     // Get all substitutions that satisfy the entire body
@@ -87,7 +87,7 @@ pub fn ground_rule<S: StorageEngine>(rule: &Rule, db: &FactDatabase, storage: &S
 /// Find all substitutions that satisfy a conjunction of literals
 pub fn satisfy_body<S: StorageEngine>(
     body: &[Literal],
-    db: &FactDatabase,
+    db: &DatalogContext,
     storage: &S,
 ) -> Vec<Substitution> {
     satisfy_body_with_selector(body, db, storage, None, &|_, _| DatabaseSelection::Full)
@@ -100,9 +100,9 @@ enum DatabaseSelection {
 
 fn satisfy_body_with_selector<S, F>(
     body: &[Literal],
-    full_db: &FactDatabase,
+    full_db: &DatalogContext,
     storage: &S,
-    delta: Option<&FactDatabase>,
+    delta: Option<&DatalogContext>,
     selector: &F,
 ) -> Vec<Substitution>
 where
@@ -122,9 +122,9 @@ where
 
 fn satisfy_body_with_selector_recursive<S, F>(
     body: &[Literal],
-    full_db: &FactDatabase,
+    full_db: &DatalogContext,
     storage: &S,
-    delta: Option<&FactDatabase>,
+    delta: Option<&DatalogContext>,
     selector: &F,
     index: usize,
     current_subst: &Substitution,
@@ -277,7 +277,7 @@ fn combine_substs(s1: &Substitution, s2: &Substitution) -> Option<Substitution> 
     Some(combined)
 }
 
-fn database_has_match<S: StorageEngine>(db: &FactDatabase, storage: &S, atom: &Atom) -> bool {
+fn database_has_match<S: StorageEngine>(db: &DatalogContext, storage: &S, atom: &Atom) -> bool {
     if atom_is_ground(atom) {
         db.contains(atom, storage)
     } else {
@@ -313,8 +313,8 @@ fn apply_subst_to_builtin(subst: &Substitution, builtin: &builtins::BuiltIn) -> 
 /// and the full database for other positions
 pub fn ground_rule_semi_naive<S: StorageEngine>(
     rule: &Rule,
-    delta: &FactDatabase,
-    full_db: &FactDatabase,
+    delta: &DatalogContext,
+    full_db: &DatalogContext,
     storage: &S,
 ) -> Vec<Atom> {
     let mut results = Vec::new();
@@ -339,8 +339,8 @@ pub fn ground_rule_semi_naive<S: StorageEngine>(
 /// Satisfy body literals using delta for one position and full DB for others
 fn satisfy_body_mixed<S: StorageEngine>(
     body: &[Literal],
-    delta: &FactDatabase,
-    full_db: &FactDatabase,
+    delta: &DatalogContext,
+    full_db: &DatalogContext,
     storage: &S,
     delta_pos: usize,
 ) -> Vec<Substitution> {
@@ -374,7 +374,7 @@ use sql_storage::DeltaTracker;
 pub fn ground_rule_semi_naive_with_delta<S: StorageEngine>(
     rule: &Rule,
     delta: &DeltaTracker,
-    full_db: &FactDatabase,
+    full_db: &DatalogContext,
     storage: &S,
 ) -> Vec<Atom> {
     let mut results = Vec::new();
@@ -400,7 +400,7 @@ pub fn ground_rule_semi_naive_with_delta<S: StorageEngine>(
 fn satisfy_body_with_delta<S: StorageEngine>(
     body: &[Literal],
     delta: &DeltaTracker,
-    full_db: &FactDatabase,
+    full_db: &DatalogContext,
     storage: &S,
     delta_pos: usize,
 ) -> Vec<Substitution> {
@@ -418,7 +418,7 @@ fn satisfy_body_with_delta<S: StorageEngine>(
 fn satisfy_body_with_delta_recursive<S: StorageEngine>(
     body: &[Literal],
     delta: &DeltaTracker,
-    full_db: &FactDatabase,
+    full_db: &DatalogContext,
     storage: &S,
     delta_pos: usize,
     index: usize,
@@ -538,7 +538,7 @@ fn satisfy_body_with_delta_recursive<S: StorageEngine>(
 #[deprecated(note = "Use ground_rule() with storage parameter instead")]
 pub fn ground_rule_with_storage<S: StorageEngine>(
     rule: &Rule,
-    db: &FactDatabase,
+    db: &DatalogContext,
     storage: &S,
 ) -> Vec<Atom> {
     ground_rule(rule, db, storage)
@@ -548,7 +548,7 @@ pub fn ground_rule_with_storage<S: StorageEngine>(
 #[deprecated(note = "Use satisfy_body() with storage parameter instead")]
 pub fn satisfy_body_with_storage<S: StorageEngine>(
     body: &[Literal],
-    db: &FactDatabase,
+    db: &DatalogContext,
     storage: &S,
 ) -> Vec<Substitution> {
     satisfy_body(body, db, storage)
@@ -558,8 +558,8 @@ pub fn satisfy_body_with_storage<S: StorageEngine>(
 #[deprecated(note = "Use ground_rule_semi_naive() with storage parameter instead")]
 pub fn ground_rule_semi_naive_with_storage<S: StorageEngine>(
     rule: &Rule,
-    delta: &FactDatabase,
-    full_db: &FactDatabase,
+    delta: &DatalogContext,
+    full_db: &DatalogContext,
     storage: &S,
 ) -> Vec<Atom> {
     ground_rule_semi_naive(rule, delta, full_db, storage)
@@ -590,7 +590,7 @@ mod tests {
     fn test_ground_simple_rule() {
         // parent(john, mary). parent(mary, jane).
         // ancestor(X, Y) :- parent(X, Y).
-        let mut db = FactDatabase::new();
+        let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
         db.insert(
             make_atom(
@@ -630,7 +630,7 @@ mod tests {
     #[test]
     fn test_ground_transitive_rule() {
         // ancestor(X, Z) :- ancestor(X, Y), parent(Y, Z).
-        let mut db = FactDatabase::new();
+        let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
         db.insert(
             make_atom(
@@ -671,7 +671,7 @@ mod tests {
     #[test]
     fn test_negation() {
         // not_parent(X) :- person(X), not parent(X, _).
-        let mut db = FactDatabase::new();
+        let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
         db.insert(
             make_atom("person", vec![Term::Constant(Value::Atom(sym("john")))]),

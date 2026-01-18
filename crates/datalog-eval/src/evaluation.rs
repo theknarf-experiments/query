@@ -15,7 +15,7 @@
 use datalog_grounding::{ground_rule, ground_rule_semi_naive_with_delta, satisfy_body};
 use datalog_parser::{Constraint, Rule};
 use datalog_safety::{check_program_safety, stratify, SafetyError, StratificationError};
-use sql_storage::{DeltaTracker, FactDatabase, InsertError, StorageEngine, StorageError};
+use sql_storage::{DatalogContext, DeltaTracker, InsertError, StorageEngine, StorageError};
 
 /// Errors that can occur during evaluation
 #[derive(Debug, Clone, PartialEq)]
@@ -115,9 +115,9 @@ impl From<StorageError> for EvaluationError {
 pub fn evaluate<S: StorageEngine>(
     rules: &[Rule],
     constraints: &[Constraint],
-    initial_facts: FactDatabase,
+    initial_facts: DatalogContext,
     storage: &mut S,
-) -> Result<FactDatabase, EvaluationError> {
+) -> Result<DatalogContext, EvaluationError> {
     // Check safety first (variables in negation must appear in positive literals, etc.)
     check_program_safety(rules)?;
 
@@ -143,7 +143,7 @@ pub fn evaluate<S: StorageEngine>(
 /// substitutions that make all literals in the body true).
 pub fn check_constraints<S: StorageEngine>(
     constraints: &[Constraint],
-    db: &FactDatabase,
+    db: &DatalogContext,
     storage: &S,
 ) -> Result<(), EvaluationError> {
     for constraint in constraints {
@@ -166,9 +166,9 @@ pub fn check_constraints<S: StorageEngine>(
 /// Storage handles deduplication via UNIQUE constraints on all columns.
 fn semi_naive_evaluate<S: StorageEngine>(
     rules: &[Rule],
-    initial_facts: FactDatabase,
+    initial_facts: DatalogContext,
     storage: &mut S,
-) -> Result<FactDatabase, EvaluationError> {
+) -> Result<DatalogContext, EvaluationError> {
     let mut db = initial_facts;
     let mut delta = DeltaTracker::new();
     let mut first_iteration = true;
@@ -215,9 +215,9 @@ fn semi_naive_evaluate<S: StorageEngine>(
 pub fn evaluate_with_storage<S: StorageEngine>(
     rules: &[Rule],
     constraints: &[Constraint],
-    initial_facts: FactDatabase,
+    initial_facts: DatalogContext,
     storage: &mut S,
-) -> Result<FactDatabase, EvaluationError> {
+) -> Result<DatalogContext, EvaluationError> {
     evaluate(rules, constraints, initial_facts, storage)
 }
 
@@ -250,7 +250,7 @@ mod tests {
     fn test_simple_derivation() {
         // parent(john, mary). parent(mary, jane).
         // ancestor(X, Y) :- parent(X, Y).
-        let mut db = FactDatabase::new();
+        let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
         db.insert(
             make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
@@ -282,7 +282,7 @@ mod tests {
     fn test_transitive_closure() {
         // ancestor(X, Y) :- parent(X, Y).
         // ancestor(X, Z) :- ancestor(X, Y), parent(Y, Z).
-        let mut db = FactDatabase::new();
+        let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
         db.insert(
             make_atom("parent", vec![atom_term("a"), atom_term("b")]),
@@ -327,7 +327,7 @@ mod tests {
     fn test_negation_with_stratification() {
         // person(alice). person(bob). parent(alice, charlie).
         // childless(X) :- person(X), not parent(X, _).
-        let mut db = FactDatabase::new();
+        let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
         db.insert(make_atom("person", vec![atom_term("alice")]), &mut storage)
             .unwrap();
@@ -356,7 +356,7 @@ mod tests {
     #[test]
     fn test_constraint_violation() {
         // Constraint: :- dangerous(X).
-        let mut db = FactDatabase::new();
+        let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
         db.insert(
             make_atom("dangerous", vec![atom_term("bomb")]),
@@ -402,7 +402,7 @@ mod tests {
         ];
 
         let mut storage = MemoryEngine::new();
-        let result = evaluate(&rules, &[], FactDatabase::new(), &mut storage);
+        let result = evaluate(&rules, &[], DatalogContext::new(), &mut storage);
 
         assert!(matches!(result, Err(EvaluationError::Stratification(_))));
     }

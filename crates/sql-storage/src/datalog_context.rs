@@ -1,22 +1,25 @@
-//! Fact database with efficient indexing and querying
+//! Datalog evaluation context
 //!
-//! This module provides a database for storing and querying ground facts.
-//! Facts are indexed by predicate name for efficient lookup.
+//! This module provides `DatalogContext`, a bridge between SQL storage and Datalog
+//! evaluation. It tracks metadata about predicates and provides unification-based
+//! querying over SQL-stored facts.
 //!
-//! # Features
+//! # Purpose
 //!
-//! - **Indexing**: Facts are indexed by predicate for O(1) lookup
-//! - **Ground facts only**: Only fully ground atoms (no variables) can be stored
-//! - **Unification-based querying**: Query with patterns containing variables
-//! - **Set semantics**: Duplicate facts are automatically deduplicated
-//! - **Schema support**: Predicates can have associated schemas for validation
+//! `DatalogContext` serves as the evaluation context for Datalog programs:
+//! - **Metadata tracking**: Schemas, EDB (base facts) vs IDB (derived facts)
+//! - **Unification queries**: Pattern matching with variables over SQL rows
+//! - **Auto table creation**: Creates derived tables with UNIQUE constraints
+//!
+//! All actual facts are stored in a `StorageEngine` (SQL storage). This struct
+//! only holds metadata needed for correct evaluation.
 //!
 //! # Example
 //!
 //! ```ignore
-//! let mut db = FactDatabase::new();
-//! db.insert(ground_fact).unwrap();
-//! let results = db.query(&pattern_with_variables);
+//! let mut ctx = DatalogContext::new();
+//! ctx.insert(ground_fact, &mut storage)?;
+//! let results = ctx.query(&pattern_with_variables, &storage);
 //! ```
 
 use crate::datalog_unification::{unify_atoms, Substitution};
@@ -69,25 +72,35 @@ impl PredicateSchema {
 #[cfg(any(test, feature = "test-utils"))]
 use std::cell::Cell;
 
-/// A database of ground facts backed by SQL storage
+/// Datalog evaluation context - bridges SQL storage with logic programming
 ///
-/// All facts (both EDB base facts and IDB derived facts) are stored in the
-/// StorageEngine. This struct maintains metadata about predicates and schemas.
+/// Tracks metadata about predicates (schemas, EDB/IDB classification) and
+/// provides unification-based querying over SQL-stored facts. All actual
+/// facts are stored in the `StorageEngine`; this struct only holds metadata.
+///
+/// # EDB vs IDB
+///
+/// - **EDB (Extensional Database)**: Base facts from SQL tables
+/// - **IDB (Intensional Database)**: Derived facts computed by Datalog rules
 #[derive(Debug, Clone)]
-pub struct FactDatabase {
-    /// Optional schemas for predicates (for SQL table interop)
+pub struct DatalogContext {
+    /// Schemas for predicates (maps predicate → column names/types)
     schemas: HashMap<Symbol, PredicateSchema>,
-    /// Predicates that are backed by storage (SQL tables - EDB base facts)
+    /// EDB predicates backed by SQL tables
     storage_backed_predicates: HashSet<Symbol>,
-    /// Predicates that are derived (IDB - computed by rules)
+    /// IDB predicates derived by rules
     derived_predicates: HashSet<Symbol>,
 }
 
-impl Default for FactDatabase {
+impl Default for DatalogContext {
     fn default() -> Self {
         Self::new()
     }
 }
+
+/// Type alias for backwards compatibility during migration
+#[deprecated(note = "Use DatalogContext instead")]
+pub type FactDatabase = DatalogContext;
 
 /// Error type for failed fact insertions
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,9 +170,10 @@ thread_local! {
     static GROUND_QUERY_COUNT: Cell<usize> = const { Cell::new(0) };
 }
 
-impl FactDatabase {
+impl DatalogContext {
+    /// Create a new empty context
     pub fn new() -> Self {
-        FactDatabase {
+        DatalogContext {
             schemas: HashMap::new(),
             storage_backed_predicates: HashSet::new(),
             derived_predicates: HashSet::new(),
@@ -174,11 +188,6 @@ impl FactDatabase {
     /// Get schema for a predicate (if registered)
     pub fn get_schema(&self, predicate: &Symbol) -> Option<&PredicateSchema> {
         self.schemas.get(predicate)
-    }
-
-    /// Check if predicate has a registered schema
-    pub fn has_schema(&self, predicate: &Symbol) -> bool {
-        self.schemas.contains_key(predicate)
     }
 
     /// Mark a predicate as backed by storage (SQL table - EDB base facts)
@@ -231,16 +240,6 @@ impl FactDatabase {
 
         // Predicate not in storage - return empty
         vec![]
-    }
-
-    /// Query for facts (alias for backward compatibility during migration)
-    #[deprecated(note = "Use query() with storage parameter instead")]
-    pub fn query_with_storage<S: StorageEngine>(
-        &self,
-        pattern: &Atom,
-        storage: &S,
-    ) -> Vec<Substitution> {
-        self.query(pattern, storage)
     }
 
     /// Try to query using an index if a constant column has one
@@ -349,20 +348,6 @@ impl FactDatabase {
         }
     }
 
-    /// Merge another fact database metadata into this one
-    ///
-    /// Note: This only merges metadata (schemas, predicate tracking).
-    /// Facts are stored in storage and don't need to be merged.
-    pub fn absorb(&mut self, other: FactDatabase) {
-        // Merge schemas (other's schemas take precedence for conflicts)
-        self.schemas.extend(other.schemas);
-        // Merge storage-backed predicates
-        self.storage_backed_predicates
-            .extend(other.storage_backed_predicates);
-        // Merge derived predicates
-        self.derived_predicates.extend(other.derived_predicates);
-    }
-
     /// Check if a fact exists in storage
     ///
     /// Uses composite index lookup for O(1) when available, falls back to scan.
@@ -401,18 +386,6 @@ impl FactDatabase {
         }
 
         false
-    }
-
-    /// Get all facts for a predicate from storage
-    pub fn get_by_predicate<S: StorageEngine>(&self, predicate: &Symbol, storage: &S) -> Vec<Atom> {
-        let predicate_name = predicate.as_ref();
-        if let Ok(rows) = storage.scan(predicate_name) {
-            rows.iter()
-                .map(|row| row_to_atom(predicate_name, row))
-                .collect()
-        } else {
-            vec![]
-        }
     }
 
     /// Count total number of predicates with storage
@@ -597,7 +570,7 @@ mod tests {
 
     #[test]
     fn test_insert_ground_fact() {
-        let mut db = FactDatabase::new();
+        let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
         let atom = Atom {
             predicate: Intern::new("parent".to_string()),
@@ -612,7 +585,7 @@ mod tests {
 
     #[test]
     fn test_reject_non_ground_fact() {
-        let mut db = FactDatabase::new();
+        let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
         let atom = Atom {
             predicate: Intern::new("parent".to_string()),
@@ -626,7 +599,7 @@ mod tests {
 
     #[test]
     fn test_query_with_variable() {
-        let mut db = FactDatabase::new();
+        let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
         db.insert(
             Atom {
@@ -658,7 +631,7 @@ mod tests {
     fn test_register_and_get_schema() {
         use crate::engine::{ColumnSchema, DataType};
 
-        let mut db = FactDatabase::new();
+        let mut db = DatalogContext::new();
         let predicate = Intern::new("person".to_string());
 
         let schema = PredicateSchema::new(
@@ -687,7 +660,7 @@ mod tests {
 
         db.register_schema(schema);
 
-        assert!(db.has_schema(&predicate));
+        assert!(db.get_schema(&predicate).is_some());
         let retrieved = db.get_schema(&predicate).unwrap();
         assert_eq!(retrieved.arity(), 2);
         assert_eq!(retrieved.column_name(0), Some("id"));
@@ -698,7 +671,7 @@ mod tests {
     fn test_insert_validates_arity_when_schema_exists() {
         use crate::engine::{ColumnSchema, DataType};
 
-        let mut db = FactDatabase::new();
+        let mut db = DatalogContext::new();
         let predicate = Intern::new("person".to_string());
 
         // Register a 2-column schema
@@ -747,7 +720,7 @@ mod tests {
 
     #[test]
     fn test_insert_allows_unregistered_predicate() {
-        let mut db = FactDatabase::new();
+        let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
         // No schema registered for "unknown"
@@ -769,7 +742,7 @@ mod tests {
     fn test_insert_valid_arity() {
         use crate::engine::{ColumnSchema, DataType};
 
-        let mut db = FactDatabase::new();
+        let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
         let predicate = Intern::new("person".to_string());
 
@@ -810,52 +783,6 @@ mod tests {
 
         assert!(db.insert(atom, &mut storage).is_ok());
         assert!(db.is_derived(&predicate));
-    }
-
-    #[test]
-    fn test_absorb_merges_schemas() {
-        use crate::engine::{ColumnSchema, DataType};
-
-        let mut db1 = FactDatabase::new();
-        let mut db2 = FactDatabase::new();
-
-        let pred1 = Intern::new("table1".to_string());
-        let pred2 = Intern::new("table2".to_string());
-
-        // Register schema in db1
-        db1.register_schema(PredicateSchema::new(
-            pred1,
-            vec![ColumnSchema {
-                name: "col".to_string(),
-                data_type: DataType::Int,
-                nullable: false,
-                primary_key: false,
-                unique: false,
-                default: None,
-                references: None,
-            }],
-        ));
-
-        // Register different schema in db2
-        db2.register_schema(PredicateSchema::new(
-            pred2,
-            vec![ColumnSchema {
-                name: "val".to_string(),
-                data_type: DataType::Text,
-                nullable: false,
-                primary_key: false,
-                unique: false,
-                default: None,
-                references: None,
-            }],
-        ));
-
-        // Absorb db2 into db1
-        db1.absorb(db2);
-
-        // Both schemas should be present
-        assert!(db1.has_schema(&pred1));
-        assert!(db1.has_schema(&pred2));
     }
 
     #[test]
@@ -901,7 +828,7 @@ mod tests {
 
     #[test]
     fn test_mark_storage_backed() {
-        let mut db = FactDatabase::new();
+        let mut db = DatalogContext::new();
         let pred = Intern::new("parent".to_string());
 
         assert!(!db.is_storage_backed(&pred));
@@ -912,25 +839,8 @@ mod tests {
     }
 
     #[test]
-    fn test_absorb_merges_storage_backed_predicates() {
-        let mut db1 = FactDatabase::new();
-        let mut db2 = FactDatabase::new();
-
-        let pred1 = Intern::new("table1".to_string());
-        let pred2 = Intern::new("table2".to_string());
-
-        db1.mark_storage_backed(pred1);
-        db2.mark_storage_backed(pred2);
-
-        db1.absorb(db2);
-
-        assert!(db1.is_storage_backed(&pred1));
-        assert!(db1.is_storage_backed(&pred2));
-    }
-
-    #[test]
     fn test_query_derived_facts() {
-        let mut db = FactDatabase::new();
+        let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
         // Insert a derived fact
@@ -1016,7 +926,7 @@ mod tests {
             .unwrap();
 
         // Set up FactDatabase with storage-backed predicate
-        let mut db = FactDatabase::new();
+        let mut db = DatalogContext::new();
         let pred = Intern::new("parent".to_string());
         db.register_schema(PredicateSchema::from_table_schema(
             storage.get_schema("parent").unwrap(),
@@ -1086,7 +996,7 @@ mod tests {
             .unwrap();
 
         // Set up FactDatabase
-        let mut db = FactDatabase::new();
+        let mut db = DatalogContext::new();
         let pred = Intern::new("person".to_string());
         db.register_schema(PredicateSchema::from_table_schema(
             storage.get_schema("person").unwrap(),
@@ -1162,7 +1072,7 @@ mod tests {
             .unwrap();
 
         // Set up FactDatabase
-        let mut db = FactDatabase::new();
+        let mut db = DatalogContext::new();
         let pred = Intern::new("data".to_string());
         db.register_schema(PredicateSchema::from_table_schema(
             storage.get_schema("data").unwrap(),

@@ -22,7 +22,7 @@
 use datalog_eval::{evaluate, EvaluationError};
 use datalog_grounding::satisfy_body;
 use datalog_parser::{Constraint, Literal, Query, Rule, SrcId, Symbol, Term, Value as DValue};
-use sql_storage::FactDatabase;
+use sql_storage::DatalogContext;
 use sql_storage::{PredicateSchema, StorageEngine, Value as SValue};
 
 use crate::{ExecError, QueryResult};
@@ -92,7 +92,7 @@ fn term_to_sql_value(term: &Term) -> Option<SValue> {
 
 /// Register a SQL table as a storage-backed Datalog predicate
 ///
-/// This registers the table's schema with the FactDatabase and marks the
+/// This registers the table's schema with the DatalogContext and marks the
 /// predicate as storage-backed. Instead of copying rows, Datalog queries
 /// will query the storage engine directly using `query_with_storage`.
 ///
@@ -103,7 +103,7 @@ fn term_to_sql_value(term: &Term) -> Option<SValue> {
 pub fn load_table_as_facts<S: StorageEngine>(
     storage: &mut S,
     table: &str,
-    db: &mut FactDatabase,
+    db: &mut DatalogContext,
 ) -> Result<(), DatalogError> {
     // Get schema from storage and register it
     let table_schema = storage
@@ -139,7 +139,7 @@ pub fn execute_datalog_program<S: StorageEngine>(
         .map_err(|errors| DatalogError::ParseError(format!("{:?}", errors)))?;
 
     // Separate statements into facts, rules, constraints, and queries
-    let mut db = FactDatabase::new();
+    let mut db = DatalogContext::new();
     let mut rules = Vec::new();
     let mut constraints = Vec::new();
     let mut queries = Vec::new();
@@ -224,7 +224,7 @@ fn collect_predicates(
 
 /// Execute a query against the fact database using storage for indexed lookups
 fn execute_query<S: StorageEngine>(
-    db: &FactDatabase,
+    db: &DatalogContext,
     query: &Query,
     storage: &S,
 ) -> Result<QueryResult, DatalogError> {

@@ -9,7 +9,7 @@ test-utils = []
 [dependencies]
 serde = { workspace = true }
 datalog-parser = { workspace = true }
-chumsky = { workspace = true }
+json-value = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

@@ -1,0 +1,8 @@
+[package]
+name = "json-value"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chumsky = { workspace = true }
+serde = { workspace = true }

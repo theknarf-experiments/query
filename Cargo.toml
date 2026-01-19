@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
+    # Core types
+    "crates/json-value",
     # SQL frontend
     "crates/sql-parser",
     "crates/sql-planner",
@@ -27,6 +29,9 @@ license = "MIT"
 chumsky = "0.9"
 ariadne = "0.4"
 internment = "0.8"
+
+# Core types
+json-value = { path = "crates/json-value" }
 
 # SQL crates
 sql-parser = { path = "crates/sql-parser" }

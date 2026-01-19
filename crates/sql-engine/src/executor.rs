@@ -11,7 +11,7 @@ use sql_parser::{
 };
 use sql_planner::LogicalPlan;
 use sql_storage::{
-    ColumnSchema, DataType as StorageDataType, ForeignKeyRef, MemoryEngine,
+    ColumnSchema, DataType as StorageDataType, ForeignKeyRef, JsonValue, MemoryEngine,
     ReferentialAction as StorageRefAction, Row, StorageEngine, StorageError,
     TableConstraint as StorageTableConstraint, TableSchema, Value,
 };
@@ -1932,6 +1932,13 @@ impl Engine {
                 // Return NULL here as a placeholder - actual evaluation happens in execute_query
                 Value::Null
             }
+            Expr::Function { name, args } => {
+                let evaluated_args: Vec<Value> = args
+                    .iter()
+                    .map(|a| self.eval_expr_with_subquery(a, row, columns))
+                    .collect();
+                eval_function(name, &evaluated_args)
+            }
         }
     }
 
@@ -2045,6 +2052,10 @@ fn value_hash(v: &Value) -> u64 {
             ts.time.minute.hash(&mut hasher);
             ts.time.second.hash(&mut hasher);
             ts.time.microsecond.hash(&mut hasher);
+        }
+        Value::Json(j) => {
+            8u8.hash(&mut hasher);
+            j.to_string().hash(&mut hasher);
         }
     }
     hasher.finish()
@@ -2168,6 +2179,13 @@ fn eval_having_expr(expr: &Expr, group_rows: &[Vec<Value>], columns: &[String]) 
         Expr::WindowFunction { .. } => {
             // Window functions are evaluated during query execution, not in HAVING clause
             Value::Null
+        }
+        Expr::Function { name, args } => {
+            let evaluated_args: Vec<Value> = args
+                .iter()
+                .map(|a| eval_having_expr(a, group_rows, columns))
+                .collect();
+            eval_function(name, &evaluated_args)
         }
     }
 }
@@ -2364,6 +2382,7 @@ fn value_to_expr(value: &Value) -> Expr {
         Value::Date(d) => Expr::String(d.to_string()),
         Value::Time(t) => Expr::String(t.to_string()),
         Value::Timestamp(ts) => Expr::String(ts.to_string()),
+        Value::Json(j) => Expr::String(j.to_string()),
     }
 }
 
@@ -2507,6 +2526,11 @@ fn eval_expr(expr: &Expr, row: &[Value], columns: &[String]) -> Value {
         Expr::WindowFunction { .. } => {
             // Window functions are evaluated during query execution, not at expression level
             Value::Null
+        }
+        Expr::Function { name, args } => {
+            let evaluated_args: Vec<Value> =
+                args.iter().map(|a| eval_expr(a, row, columns)).collect();
+            eval_function(name, &evaluated_args)
         }
     }
 }
@@ -2894,6 +2918,363 @@ fn eval_single_window_function(
                 Value::Int((seen_values.len() + 1) as i64)
             }
         }
+    }
+}
+
+/// Evaluate a scalar function call
+fn eval_function(name: &str, args: &[Value]) -> Value {
+    match name.to_lowercase().as_str() {
+        // JSON functions
+        "json_extract" => eval_json_extract(args),
+        "json_array_length" => eval_json_array_length(args),
+        "json_type" => eval_json_type(args),
+        "json_valid" => eval_json_valid(args),
+
+        // String functions
+        "upper" => eval_upper(args),
+        "lower" => eval_lower(args),
+        "length" => eval_length(args),
+        "concat" => eval_concat(args),
+        "substr" | "substring" => eval_substr(args),
+        "trim" => eval_trim(args),
+        "ltrim" => eval_ltrim(args),
+        "rtrim" => eval_rtrim(args),
+        "replace" => eval_replace(args),
+
+        // Numeric functions
+        "abs" => eval_abs(args),
+        "round" => eval_round(args),
+        "ceil" | "ceiling" => eval_ceil(args),
+        "floor" => eval_floor(args),
+
+        // Null handling
+        "coalesce" => eval_coalesce(args),
+        "nullif" => eval_nullif(args),
+        "ifnull" => eval_ifnull(args),
+
+        // Unknown function
+        _ => Value::Null,
+    }
+}
+
+// ===== JSON Functions =====
+
+fn eval_json_extract(args: &[Value]) -> Value {
+    if args.len() != 2 {
+        return Value::Null;
+    }
+
+    let json_value = match &args[0] {
+        Value::Json(j) => j.clone(),
+        Value::Text(s) => match JsonValue::parse(s) {
+            Ok(j) => j,
+            Err(_) => return Value::Null,
+        },
+        _ => return Value::Null,
+    };
+
+    let path = match &args[1] {
+        Value::Text(s) => s.as_str(),
+        _ => return Value::Null,
+    };
+
+    match json_value.extract(path) {
+        Some(extracted) => json_value_to_sql(extracted),
+        None => Value::Null,
+    }
+}
+
+fn eval_json_array_length(args: &[Value]) -> Value {
+    if args.is_empty() {
+        return Value::Null;
+    }
+
+    let json_value = match &args[0] {
+        Value::Json(j) => j.clone(),
+        Value::Text(s) => match JsonValue::parse(s) {
+            Ok(j) => j,
+            Err(_) => return Value::Null,
+        },
+        _ => return Value::Null,
+    };
+
+    // If path provided, extract first
+    let target = if args.len() >= 2 {
+        match &args[1] {
+            Value::Text(path) => match json_value.extract(path) {
+                Some(j) => j.clone(),
+                None => return Value::Null,
+            },
+            _ => json_value,
+        }
+    } else {
+        json_value
+    };
+
+    match target.array_length() {
+        Some(len) => Value::Int(len as i64),
+        None => Value::Null,
+    }
+}
+
+fn eval_json_type(args: &[Value]) -> Value {
+    if args.is_empty() {
+        return Value::Null;
+    }
+
+    let json_value = match &args[0] {
+        Value::Json(j) => j.clone(),
+        Value::Text(s) => match JsonValue::parse(s) {
+            Ok(j) => j,
+            Err(_) => return Value::Null,
+        },
+        _ => return Value::Null,
+    };
+
+    // If path provided, extract first
+    let target = if args.len() >= 2 {
+        match &args[1] {
+            Value::Text(path) => match json_value.extract(path) {
+                Some(j) => j.clone(),
+                None => return Value::Null,
+            },
+            _ => json_value,
+        }
+    } else {
+        json_value
+    };
+
+    let type_name = match target {
+        JsonValue::Null => "null",
+        JsonValue::Bool(_) => "boolean",
+        JsonValue::Number(_) => "number",
+        JsonValue::String(_) => "string",
+        JsonValue::Array(_) => "array",
+        JsonValue::Object(_) => "object",
+    };
+
+    Value::Text(type_name.to_string())
+}
+
+fn eval_json_valid(args: &[Value]) -> Value {
+    if args.is_empty() {
+        return Value::Bool(false);
+    }
+
+    match &args[0] {
+        Value::Json(_) => Value::Bool(true),
+        Value::Text(s) => Value::Bool(JsonValue::parse(s).is_ok()),
+        _ => Value::Bool(false),
+    }
+}
+
+/// Convert JsonValue to SQL Value
+fn json_value_to_sql(json: &JsonValue) -> Value {
+    match json {
+        JsonValue::Null => Value::Null,
+        JsonValue::Bool(b) => Value::Bool(*b),
+        JsonValue::Number(n) => {
+            if n.fract() == 0.0 && *n >= i64::MIN as f64 && *n <= i64::MAX as f64 {
+                Value::Int(*n as i64)
+            } else {
+                Value::Float(*n)
+            }
+        }
+        JsonValue::String(s) => Value::Text(s.clone()),
+        // Arrays and objects are returned as JSON
+        JsonValue::Array(_) | JsonValue::Object(_) => Value::Json(json.clone()),
+    }
+}
+
+// ===== String Functions =====
+
+fn eval_upper(args: &[Value]) -> Value {
+    match args.first() {
+        Some(Value::Text(s)) => Value::Text(s.to_uppercase()),
+        _ => Value::Null,
+    }
+}
+
+fn eval_lower(args: &[Value]) -> Value {
+    match args.first() {
+        Some(Value::Text(s)) => Value::Text(s.to_lowercase()),
+        _ => Value::Null,
+    }
+}
+
+fn eval_length(args: &[Value]) -> Value {
+    match args.first() {
+        Some(Value::Text(s)) => Value::Int(s.len() as i64),
+        _ => Value::Null,
+    }
+}
+
+fn eval_concat(args: &[Value]) -> Value {
+    let mut result = String::new();
+    for arg in args {
+        match arg {
+            Value::Text(s) => result.push_str(s),
+            Value::Int(n) => result.push_str(&n.to_string()),
+            Value::Float(f) => result.push_str(&f.to_string()),
+            Value::Bool(b) => result.push_str(if *b { "true" } else { "false" }),
+            Value::Null => {} // NULL is skipped in concat
+            _ => {}
+        }
+    }
+    Value::Text(result)
+}
+
+fn eval_substr(args: &[Value]) -> Value {
+    if args.len() < 2 {
+        return Value::Null;
+    }
+
+    let s = match &args[0] {
+        Value::Text(s) => s,
+        _ => return Value::Null,
+    };
+
+    let start = match &args[1] {
+        Value::Int(n) => (*n as usize).saturating_sub(1), // SQL is 1-indexed
+        _ => return Value::Null,
+    };
+
+    let len = if args.len() >= 3 {
+        match &args[2] {
+            Value::Int(n) => Some(*n as usize),
+            _ => return Value::Null,
+        }
+    } else {
+        None
+    };
+
+    let chars: Vec<char> = s.chars().collect();
+    if start >= chars.len() {
+        return Value::Text(String::new());
+    }
+
+    let result: String = match len {
+        Some(l) => chars[start..].iter().take(l).collect(),
+        None => chars[start..].iter().collect(),
+    };
+
+    Value::Text(result)
+}
+
+fn eval_trim(args: &[Value]) -> Value {
+    match args.first() {
+        Some(Value::Text(s)) => Value::Text(s.trim().to_string()),
+        _ => Value::Null,
+    }
+}
+
+fn eval_ltrim(args: &[Value]) -> Value {
+    match args.first() {
+        Some(Value::Text(s)) => Value::Text(s.trim_start().to_string()),
+        _ => Value::Null,
+    }
+}
+
+fn eval_rtrim(args: &[Value]) -> Value {
+    match args.first() {
+        Some(Value::Text(s)) => Value::Text(s.trim_end().to_string()),
+        _ => Value::Null,
+    }
+}
+
+fn eval_replace(args: &[Value]) -> Value {
+    if args.len() < 3 {
+        return Value::Null;
+    }
+
+    match (&args[0], &args[1], &args[2]) {
+        (Value::Text(s), Value::Text(from), Value::Text(to)) => Value::Text(s.replace(from, to)),
+        _ => Value::Null,
+    }
+}
+
+// ===== Numeric Functions =====
+
+fn eval_abs(args: &[Value]) -> Value {
+    match args.first() {
+        Some(Value::Int(n)) => Value::Int(n.abs()),
+        Some(Value::Float(f)) => Value::Float(f.abs()),
+        _ => Value::Null,
+    }
+}
+
+fn eval_round(args: &[Value]) -> Value {
+    if args.is_empty() {
+        return Value::Null;
+    }
+
+    let decimals = if args.len() >= 2 {
+        match &args[1] {
+            Value::Int(n) => *n as i32,
+            _ => 0,
+        }
+    } else {
+        0
+    };
+
+    match &args[0] {
+        Value::Int(n) => Value::Int(*n),
+        Value::Float(f) => {
+            let multiplier = 10_f64.powi(decimals);
+            Value::Float((f * multiplier).round() / multiplier)
+        }
+        _ => Value::Null,
+    }
+}
+
+fn eval_ceil(args: &[Value]) -> Value {
+    match args.first() {
+        Some(Value::Int(n)) => Value::Int(*n),
+        Some(Value::Float(f)) => Value::Int(f.ceil() as i64),
+        _ => Value::Null,
+    }
+}
+
+fn eval_floor(args: &[Value]) -> Value {
+    match args.first() {
+        Some(Value::Int(n)) => Value::Int(*n),
+        Some(Value::Float(f)) => Value::Int(f.floor() as i64),
+        _ => Value::Null,
+    }
+}
+
+// ===== Null Handling Functions =====
+
+fn eval_coalesce(args: &[Value]) -> Value {
+    for arg in args {
+        if !arg.is_null() {
+            return arg.clone();
+        }
+    }
+    Value::Null
+}
+
+fn eval_nullif(args: &[Value]) -> Value {
+    if args.len() < 2 {
+        return Value::Null;
+    }
+
+    if values_equal(&args[0], &args[1]) {
+        Value::Null
+    } else {
+        args[0].clone()
+    }
+}
+
+fn eval_ifnull(args: &[Value]) -> Value {
+    if args.len() < 2 {
+        return Value::Null;
+    }
+
+    if args[0].is_null() {
+        args[1].clone()
+    } else {
+        args[0].clone()
     }
 }
 
@@ -4099,7 +4480,7 @@ mod tests {
         // Column should no longer exist
         let result = engine.execute("SELECT * FROM users WHERE id = 1");
         match result.unwrap() {
-            QueryResult::Select { rows, columns } => {
+            QueryResult::Select { columns, .. } => {
                 assert_eq!(columns.len(), 2);
                 assert!(!columns.contains(&"email".to_string()));
             }
@@ -5705,6 +6086,382 @@ mod tests {
             QueryResult::Select { rows, .. } => {
                 assert_eq!(rows.len(), 1);
                 assert_eq!(rows[0][0], Value::Int(42));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_json_extract_function() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE json_data (id INT, data TEXT)")
+            .unwrap();
+        engine
+            .execute(
+                r#"INSERT INTO json_data (id, data) VALUES (1, '{"name": "alice", "age": 30}')"#,
+            )
+            .unwrap();
+        engine
+            .execute(r#"INSERT INTO json_data (id, data) VALUES (2, '{"name": "bob", "nested": {"city": "NYC"}}')"#)
+            .unwrap();
+
+        // Extract simple field
+        let result =
+            engine.execute(r#"SELECT json_extract(data, '$.name') FROM json_data WHERE id = 1"#);
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][0], Value::Text("alice".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // Extract nested field
+        let result = engine
+            .execute(r#"SELECT json_extract(data, '$.nested.city') FROM json_data WHERE id = 2"#);
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][0], Value::Text("NYC".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // Extract numeric field (integers are returned as Int)
+        let result =
+            engine.execute(r#"SELECT json_extract(data, '$.age') FROM json_data WHERE id = 1"#);
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][0], Value::Int(30));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_json_array_length_function() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE arrays (id INT, data TEXT)")
+            .unwrap();
+        engine
+            .execute(r#"INSERT INTO arrays (id, data) VALUES (1, '[1, 2, 3, 4, 5]')"#)
+            .unwrap();
+        engine
+            .execute(r#"INSERT INTO arrays (id, data) VALUES (2, '{"items": [10, 20]}')"#)
+            .unwrap();
+
+        // Top-level array length
+        let result = engine.execute(r#"SELECT json_array_length(data) FROM arrays WHERE id = 1"#);
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][0], Value::Int(5));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // Nested array length
+        let result =
+            engine.execute(r#"SELECT json_array_length(data, '$.items') FROM arrays WHERE id = 2"#);
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][0], Value::Int(2));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_json_type_function() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE types (id INT, data TEXT)")
+            .unwrap();
+        engine
+            .execute(r#"INSERT INTO types (id, data) VALUES (1, '"hello"')"#)
+            .unwrap();
+        engine
+            .execute(r#"INSERT INTO types (id, data) VALUES (2, '42')"#)
+            .unwrap();
+        engine
+            .execute(r#"INSERT INTO types (id, data) VALUES (3, 'true')"#)
+            .unwrap();
+        engine
+            .execute(r#"INSERT INTO types (id, data) VALUES (4, 'null')"#)
+            .unwrap();
+        engine
+            .execute(r#"INSERT INTO types (id, data) VALUES (5, '[1, 2, 3]')"#)
+            .unwrap();
+        engine
+            .execute(r#"INSERT INTO types (id, data) VALUES (6, '{"key": "value"}')"#)
+            .unwrap();
+
+        // String type
+        let result = engine.execute(r#"SELECT json_type(data) FROM types WHERE id = 1"#);
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Text("string".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // Number type
+        let result = engine.execute(r#"SELECT json_type(data) FROM types WHERE id = 2"#);
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Text("number".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // Boolean type
+        let result = engine.execute(r#"SELECT json_type(data) FROM types WHERE id = 3"#);
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Text("boolean".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // Null type
+        let result = engine.execute(r#"SELECT json_type(data) FROM types WHERE id = 4"#);
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Text("null".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // Array type
+        let result = engine.execute(r#"SELECT json_type(data) FROM types WHERE id = 5"#);
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Text("array".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // Object type
+        let result = engine.execute(r#"SELECT json_type(data) FROM types WHERE id = 6"#);
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Text("object".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_json_valid_function() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE validation (id INT, data TEXT)")
+            .unwrap();
+        engine
+            .execute(r#"INSERT INTO validation (id, data) VALUES (1, '{"valid": true}')"#)
+            .unwrap();
+        engine
+            .execute(r#"INSERT INTO validation (id, data) VALUES (2, 'not valid json')"#)
+            .unwrap();
+
+        // Valid JSON
+        let result = engine.execute(r#"SELECT json_valid(data) FROM validation WHERE id = 1"#);
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Bool(true));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // Invalid JSON
+        let result = engine.execute(r#"SELECT json_valid(data) FROM validation WHERE id = 2"#);
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Bool(false));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_string_functions() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE strings (id INT, name TEXT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO strings (id, name) VALUES (1, 'Hello World')")
+            .unwrap();
+
+        // UPPER
+        let result = engine.execute("SELECT upper(name) FROM strings WHERE id = 1");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Text("HELLO WORLD".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // LOWER
+        let result = engine.execute("SELECT lower(name) FROM strings WHERE id = 1");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Text("hello world".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // LENGTH
+        let result = engine.execute("SELECT length(name) FROM strings WHERE id = 1");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Int(11));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // TRIM
+        engine
+            .execute("INSERT INTO strings (id, name) VALUES (2, '  padded  ')")
+            .unwrap();
+        let result = engine.execute("SELECT trim(name) FROM strings WHERE id = 2");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Text("padded".to_string()));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_numeric_functions() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE numbers (id INT, val FLOAT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO numbers (id, val) VALUES (1, -3.7)")
+            .unwrap();
+
+        // ABS
+        let result = engine.execute("SELECT abs(val) FROM numbers WHERE id = 1");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Float(3.7));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // ROUND
+        let result = engine.execute("SELECT round(val) FROM numbers WHERE id = 1");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Float(-4.0));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // CEIL/CEILING (returns Int)
+        let result = engine.execute("SELECT ceil(val) FROM numbers WHERE id = 1");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Int(-3));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // FLOOR (returns Int)
+        let result = engine.execute("SELECT floor(val) FROM numbers WHERE id = 1");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Int(-4));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_coalesce_and_nullif_functions() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE nulls (id INT, a INT, b INT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO nulls (id, a, b) VALUES (1, NULL, 10)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO nulls (id, a, b) VALUES (2, 5, 10)")
+            .unwrap();
+
+        // COALESCE - returns first non-null
+        let result = engine.execute("SELECT coalesce(a, b) FROM nulls WHERE id = 1");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Int(10));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // COALESCE - returns first when non-null
+        let result = engine.execute("SELECT coalesce(a, b) FROM nulls WHERE id = 2");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Int(5));
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // NULLIF - returns null when equal
+        let result = engine.execute("SELECT nullif(b, 10) FROM nulls WHERE id = 1");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Null);
+            }
+            _ => panic!("Expected Select result"),
+        }
+
+        // NULLIF - returns first when not equal
+        let result = engine.execute("SELECT nullif(a, 10) FROM nulls WHERE id = 2");
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Int(5));
+            }
+            _ => panic!("Expected Select result"),
+        }
+    }
+
+    #[test]
+    fn test_function_in_where_clause() {
+        let mut engine = Engine::new();
+
+        engine
+            .execute("CREATE TABLE items (id INT, data TEXT)")
+            .unwrap();
+        engine
+            .execute(r#"INSERT INTO items (id, data) VALUES (1, '{"status": "active"}')"#)
+            .unwrap();
+        engine
+            .execute(r#"INSERT INTO items (id, data) VALUES (2, '{"status": "inactive"}')"#)
+            .unwrap();
+
+        // Use json_extract in WHERE clause
+        let result = engine
+            .execute(r#"SELECT id FROM items WHERE json_extract(data, '$.status') = 'active'"#);
+        match result.unwrap() {
+            QueryResult::Select { rows, .. } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][0], Value::Int(1));
             }
             _ => panic!("Expected Select result"),
         }

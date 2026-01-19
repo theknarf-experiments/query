@@ -239,6 +239,8 @@ pub enum Expr {
         partition_by: Vec<Expr>,
         order_by: Vec<OrderBy>,
     },
+    /// Scalar function call (e.g., json_extract, upper, lower)
+    Function { name: String, args: Vec<Expr> },
 }
 
 /// Window functions

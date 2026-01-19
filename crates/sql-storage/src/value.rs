@@ -226,7 +226,16 @@ impl JsonValue {
     fn parse_bool(
         chars: &mut std::iter::Peekable<std::str::Chars>,
     ) -> Result<Self, JsonParseError> {
-        let word: String = chars.take_while(|c| c.is_alphabetic()).collect();
+        // Use peek() to avoid consuming the character after the literal
+        let mut word = String::new();
+        while let Some(&c) = chars.peek() {
+            if c.is_alphabetic() {
+                word.push(c);
+                chars.next();
+            } else {
+                break;
+            }
+        }
         match word.as_str() {
             "true" => Ok(JsonValue::Bool(true)),
             "false" => Ok(JsonValue::Bool(false)),
@@ -237,7 +246,16 @@ impl JsonValue {
     fn parse_null(
         chars: &mut std::iter::Peekable<std::str::Chars>,
     ) -> Result<Self, JsonParseError> {
-        let word: String = chars.take_while(|c| c.is_alphabetic()).collect();
+        // Use peek() to avoid consuming the character after the literal
+        let mut word = String::new();
+        while let Some(&c) = chars.peek() {
+            if c.is_alphabetic() {
+                word.push(c);
+                chars.next();
+            } else {
+                break;
+            }
+        }
         if word == "null" {
             Ok(JsonValue::Null)
         } else {
@@ -519,6 +537,33 @@ mod tests {
         assert_eq!(
             JsonValue::parse("{\"a\": 1}").unwrap(),
             JsonValue::Object(vec![("a".to_string(), JsonValue::Number(1.0))])
+        );
+    }
+
+    #[test]
+    fn test_parse_object_with_bool_and_null() {
+        // Regression test: booleans and nulls inside objects must not consume the closing brace
+        assert_eq!(
+            JsonValue::parse("{\"valid\": true}").unwrap(),
+            JsonValue::Object(vec![("valid".to_string(), JsonValue::Bool(true))])
+        );
+        assert_eq!(
+            JsonValue::parse("{\"flag\": false}").unwrap(),
+            JsonValue::Object(vec![("flag".to_string(), JsonValue::Bool(false))])
+        );
+        assert_eq!(
+            JsonValue::parse("{\"value\": null}").unwrap(),
+            JsonValue::Object(vec![("value".to_string(), JsonValue::Null)])
+        );
+        // Multiple fields with mixed types
+        assert_eq!(
+            JsonValue::parse("{\"a\": true, \"b\": false, \"c\": null, \"d\": 1}").unwrap(),
+            JsonValue::Object(vec![
+                ("a".to_string(), JsonValue::Bool(true)),
+                ("b".to_string(), JsonValue::Bool(false)),
+                ("c".to_string(), JsonValue::Null),
+                ("d".to_string(), JsonValue::Number(1.0)),
+            ])
         );
     }
 

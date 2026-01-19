@@ -694,6 +694,23 @@ fn expr_parser() -> BoxedParser<'static, Token, Expr, Simple<Token>> {
                 None => Expr::Column(first),
             });
 
+        // Scalar function calls: func_name(arg1, arg2, ...)
+        // Parse by looking for identifier immediately followed by '('
+        // Use boxed() to reduce type complexity and stack usage
+        let function_call = identifier()
+            .then_ignore(just(Token::LParen))
+            .then(
+                expr.clone()
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing(),
+            )
+            .then_ignore(just(Token::RParen))
+            .map(|(name, args)| Expr::Function { name, args })
+            .boxed();
+
+        // Identifier expression: try function call first, then fall back to column
+        let identifier_expr = function_call.or(column).boxed();
+
         // Aggregate functions: COUNT(*), COUNT(col), SUM(col), AVG(col), MIN(col), MAX(col)
         let aggregate_func = select! {
             Token::Keyword(Keyword::Count) => AggregateFunc::Count,
@@ -815,14 +832,17 @@ fn expr_parser() -> BoxedParser<'static, Token, Expr, Simple<Token>> {
                 else_result: else_result.map(Box::new),
             });
 
-        let atom = literal
-            .or(aggregate)
-            .or(window_function)
-            .or(exists_subquery)
-            .or(case_expr)
-            .or(column)
-            .or(scalar_subquery)
-            .or(paren_expr);
+        // Using choice() for flatter type structure - better stack efficiency
+        let atom = choice((
+            literal,
+            aggregate,
+            window_function,
+            exists_subquery,
+            case_expr,
+            identifier_expr,
+            scalar_subquery,
+            paren_expr,
+        ));
 
         // Unary operators
         let unary = just(Token::Minus)

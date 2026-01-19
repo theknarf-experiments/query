@@ -145,6 +145,7 @@ fn value_to_string(value: &Value) -> String {
         Value::Date(d) => d.to_string(),
         Value::Time(t) => t.to_string(),
         Value::Timestamp(ts) => ts.to_string(),
+        Value::Json(j) => j.to_string(),
     }
 }
 
@@ -161,6 +162,10 @@ fn value_to_json(value: &Value) -> serde_json::Value {
         Value::Date(d) => serde_json::Value::String(d.to_string()),
         Value::Time(t) => serde_json::Value::String(t.to_string()),
         Value::Timestamp(ts) => serde_json::Value::String(ts.to_string()),
+        Value::Json(j) => {
+            // Parse our JsonValue into serde_json::Value
+            serde_json::from_str(&j.to_string()).unwrap_or(serde_json::Value::Null)
+        }
     }
 }
 

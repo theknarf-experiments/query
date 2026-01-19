@@ -54,6 +54,18 @@ fn identifier_strategy() -> impl Strategy<Value = String> {
                     | "AVG"
                     | "MIN"
                     | "MAX"
+                    | "IS"
+                    | "IN"
+                    | "LIKE"
+                    | "BETWEEN"
+                    | "CASE"
+                    | "WHEN"
+                    | "THEN"
+                    | "ELSE"
+                    | "END"
+                    | "EXISTS"
+                    | "GROUP"
+                    | "HAVING"
             )
         })
 }

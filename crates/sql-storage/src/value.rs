@@ -1,5 +1,6 @@
 //! SQL Value types
 
+use chumsky::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// Date value (year, month, day)
@@ -137,193 +138,118 @@ pub enum JsonValue {
     Object(Vec<(String, JsonValue)>), // Ordered map for deterministic serialization
 }
 
+/// Chumsky parser for JSON values
+fn json_parser() -> impl Parser<char, JsonValue, Error = Simple<char>> {
+    recursive(|value| {
+        // Whitespace
+        let ws = filter(|c: &char| c.is_whitespace()).repeated();
+
+        // Null literal
+        let null = text::keyword("null").to(JsonValue::Null);
+
+        // Boolean literals
+        let boolean = text::keyword("true")
+            .to(JsonValue::Bool(true))
+            .or(text::keyword("false").to(JsonValue::Bool(false)));
+
+        // Number: -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?
+        let number = just('-')
+            .or_not()
+            .chain::<char, _, _>(
+                just('0')
+                    .map(|c| vec![c])
+                    .or(filter(|c: &char| c.is_ascii_digit() && *c != '0')
+                        .chain(filter(|c: &char| c.is_ascii_digit()).repeated())),
+            )
+            .chain::<char, _, _>(
+                just('.')
+                    .chain(filter(|c: &char| c.is_ascii_digit()).repeated().at_least(1))
+                    .or_not()
+                    .flatten(),
+            )
+            .chain::<char, _, _>(
+                just('e')
+                    .or(just('E'))
+                    .chain(just('+').or(just('-')).or_not())
+                    .chain::<char, _, _>(
+                        filter(|c: &char| c.is_ascii_digit()).repeated().at_least(1),
+                    )
+                    .or_not()
+                    .flatten(),
+            )
+            .collect::<String>()
+            .try_map(|s, span| {
+                s.parse::<f64>()
+                    .map(JsonValue::Number)
+                    .map_err(|_| Simple::custom(span, format!("invalid number: {}", s)))
+            });
+
+        // String with escape sequences
+        let escape = just('\\').ignore_then(choice((
+            just('"').to('"'),
+            just('\\').to('\\'),
+            just('/').to('/'),
+            just('n').to('\n'),
+            just('r').to('\r'),
+            just('t').to('\t'),
+            just('b').to('\x08'),
+            just('f').to('\x0C'),
+        )));
+
+        let string_char = filter(|c: &char| *c != '"' && *c != '\\').or(escape);
+
+        let string = string_char
+            .repeated()
+            .delimited_by(just('"'), just('"'))
+            .collect::<String>()
+            .map(JsonValue::String);
+
+        // For object keys, we need just the string content (not wrapped in JsonValue)
+        let string_key = string_char
+            .repeated()
+            .delimited_by(just('"'), just('"'))
+            .collect::<String>();
+
+        // Array: [ value, value, ... ]
+        let array = value
+            .clone()
+            .padded_by(ws)
+            .separated_by(just(','))
+            .allow_trailing()
+            .delimited_by(just('[').then(ws), ws.then(just(']')))
+            .map(JsonValue::Array);
+
+        // Object: { "key": value, "key": value, ... }
+        let key_value = string_key
+            .padded_by(ws)
+            .then_ignore(just(':'))
+            .then(value.padded_by(ws));
+
+        let object = key_value
+            .separated_by(just(','))
+            .allow_trailing()
+            .delimited_by(just('{').then(ws), ws.then(just('}')))
+            .map(JsonValue::Object);
+
+        // Any JSON value
+        choice((null, boolean, number, string, array, object)).padded_by(ws)
+    })
+}
+
 impl JsonValue {
-    /// Parse a JSON string into a JsonValue
+    /// Parse a JSON string into a JsonValue using Chumsky parser
     pub fn parse(s: &str) -> Result<Self, JsonParseError> {
-        let s = s.trim();
-        if s.is_empty() {
-            return Err(JsonParseError::UnexpectedEnd);
-        }
-
-        let mut chars = s.chars().peekable();
-        Self::parse_value(&mut chars)
-    }
-
-    fn parse_value(
-        chars: &mut std::iter::Peekable<std::str::Chars>,
-    ) -> Result<Self, JsonParseError> {
-        Self::skip_whitespace(chars);
-
-        match chars.peek() {
-            Some('"') => Self::parse_string(chars),
-            Some('[') => Self::parse_array(chars),
-            Some('{') => Self::parse_object(chars),
-            Some('t') | Some('f') => Self::parse_bool(chars),
-            Some('n') => Self::parse_null(chars),
-            Some(c) if c.is_ascii_digit() || *c == '-' => Self::parse_number(chars),
-            Some(c) => Err(JsonParseError::UnexpectedChar(*c)),
-            None => Err(JsonParseError::UnexpectedEnd),
-        }
-    }
-
-    fn skip_whitespace(chars: &mut std::iter::Peekable<std::str::Chars>) {
-        while let Some(c) = chars.peek() {
-            if c.is_whitespace() {
-                chars.next();
-            } else {
-                break;
-            }
-        }
-    }
-
-    fn parse_string(
-        chars: &mut std::iter::Peekable<std::str::Chars>,
-    ) -> Result<Self, JsonParseError> {
-        chars.next(); // consume opening quote
-        let mut s = String::new();
-        let mut escaped = false;
-
-        for c in chars.by_ref() {
-            if escaped {
-                match c {
-                    '"' => s.push('"'),
-                    '\\' => s.push('\\'),
-                    'n' => s.push('\n'),
-                    'r' => s.push('\r'),
-                    't' => s.push('\t'),
-                    _ => s.push(c),
+        json_parser().parse(s.trim()).map_err(|errors| {
+            // Convert first Chumsky error to JsonParseError
+            if let Some(err) = errors.first() {
+                match err.found() {
+                    Some(c) => JsonParseError::UnexpectedChar(*c),
+                    None => JsonParseError::UnexpectedEnd,
                 }
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == '"' {
-                return Ok(JsonValue::String(s));
             } else {
-                s.push(c);
+                JsonParseError::UnexpectedEnd
             }
-        }
-        Err(JsonParseError::UnterminatedString)
-    }
-
-    fn parse_number(
-        chars: &mut std::iter::Peekable<std::str::Chars>,
-    ) -> Result<Self, JsonParseError> {
-        let mut num_str = String::new();
-        while let Some(&c) = chars.peek() {
-            if c.is_ascii_digit() || c == '.' || c == '-' || c == 'e' || c == 'E' || c == '+' {
-                num_str.push(c);
-                chars.next();
-            } else {
-                break;
-            }
-        }
-        num_str
-            .parse::<f64>()
-            .map(JsonValue::Number)
-            .map_err(|_| JsonParseError::InvalidNumber(num_str))
-    }
-
-    fn parse_bool(
-        chars: &mut std::iter::Peekable<std::str::Chars>,
-    ) -> Result<Self, JsonParseError> {
-        // Use peek() to avoid consuming the character after the literal
-        let mut word = String::new();
-        while let Some(&c) = chars.peek() {
-            if c.is_alphabetic() {
-                word.push(c);
-                chars.next();
-            } else {
-                break;
-            }
-        }
-        match word.as_str() {
-            "true" => Ok(JsonValue::Bool(true)),
-            "false" => Ok(JsonValue::Bool(false)),
-            _ => Err(JsonParseError::InvalidLiteral(word)),
-        }
-    }
-
-    fn parse_null(
-        chars: &mut std::iter::Peekable<std::str::Chars>,
-    ) -> Result<Self, JsonParseError> {
-        // Use peek() to avoid consuming the character after the literal
-        let mut word = String::new();
-        while let Some(&c) = chars.peek() {
-            if c.is_alphabetic() {
-                word.push(c);
-                chars.next();
-            } else {
-                break;
-            }
-        }
-        if word == "null" {
-            Ok(JsonValue::Null)
-        } else {
-            Err(JsonParseError::InvalidLiteral(word))
-        }
-    }
-
-    fn parse_array(
-        chars: &mut std::iter::Peekable<std::str::Chars>,
-    ) -> Result<Self, JsonParseError> {
-        chars.next(); // consume '['
-        let mut items = Vec::new();
-
-        loop {
-            Self::skip_whitespace(chars);
-            if let Some(']') = chars.peek() {
-                chars.next();
-                return Ok(JsonValue::Array(items));
-            }
-
-            if !items.is_empty() {
-                Self::skip_whitespace(chars);
-                if chars.next() != Some(',') {
-                    return Err(JsonParseError::ExpectedComma);
-                }
-                Self::skip_whitespace(chars);
-            }
-
-            items.push(Self::parse_value(chars)?);
-        }
-    }
-
-    fn parse_object(
-        chars: &mut std::iter::Peekable<std::str::Chars>,
-    ) -> Result<Self, JsonParseError> {
-        chars.next(); // consume '{'
-        let mut pairs = Vec::new();
-
-        loop {
-            Self::skip_whitespace(chars);
-            if let Some('}') = chars.peek() {
-                chars.next();
-                return Ok(JsonValue::Object(pairs));
-            }
-
-            if !pairs.is_empty() {
-                Self::skip_whitespace(chars);
-                if chars.next() != Some(',') {
-                    return Err(JsonParseError::ExpectedComma);
-                }
-                Self::skip_whitespace(chars);
-            }
-
-            // Parse key
-            let key = match Self::parse_string(chars)? {
-                JsonValue::String(s) => s,
-                _ => return Err(JsonParseError::ExpectedString),
-            };
-
-            Self::skip_whitespace(chars);
-            if chars.next() != Some(':') {
-                return Err(JsonParseError::ExpectedColon);
-            }
-
-            // Parse value
-            let value = Self::parse_value(chars)?;
-            pairs.push((key, value));
-        }
+        })
     }
 
     /// Format a number, using integer format when possible

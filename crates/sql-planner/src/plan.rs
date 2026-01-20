@@ -103,13 +103,21 @@ pub enum LogicalPlan {
     ReleaseSavepoint { name: String },
     /// Rollback to savepoint
     RollbackTo { name: String },
+    /// Create a function (for triggers)
+    CreateFunction {
+        name: String,
+        body: String,
+        language: String,
+    },
+    /// Drop a function
+    DropFunction { name: String },
     /// Create a trigger
     CreateTrigger {
         name: String,
         timing: sql_parser::TriggerTiming,
-        event: sql_parser::TriggerEvent,
+        events: Vec<sql_parser::TriggerEvent>,
         table: String,
-        body: Vec<sql_parser::TriggerAction>,
+        action: sql_parser::TriggerActionType,
     },
     /// Drop a trigger
     DropTrigger { name: String },

@@ -12,3 +12,6 @@ mod proptest_queries;
 
 #[cfg(test)]
 mod sql_compliance;
+
+#[cfg(test)]
+mod trigger_tests;

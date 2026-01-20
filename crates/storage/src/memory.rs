@@ -1,6 +1,7 @@
 //! In-memory storage engine implementation
 
 use crate::engine::{ColumnSchema, Row, StorageEngine, StorageError, StorageResult, TableSchema};
+use crate::metadata::{FunctionDef, TriggerDef, TriggerEvent, TriggerTiming};
 use crate::Value;
 use std::collections::HashMap;
 
@@ -9,6 +10,8 @@ use std::collections::HashMap;
 pub struct MemoryEngine {
     tables: HashMap<String, TableData>,
     indexes: HashMap<String, IndexData>,
+    functions: HashMap<String, FunctionDef>,
+    triggers: HashMap<String, TriggerDef>,
 }
 
 #[derive(Debug, Clone)]
@@ -548,6 +551,72 @@ impl StorageEngine for MemoryEngine {
             .iter()
             .filter_map(|&idx| table_data.rows.get(idx).cloned())
             .collect())
+    }
+
+    // ========== Function Metadata ==========
+
+    fn create_function(&mut self, func: FunctionDef) -> StorageResult<()> {
+        if self.functions.contains_key(&func.name) {
+            return Err(StorageError::FunctionAlreadyExists(func.name.clone()));
+        }
+        self.functions.insert(func.name.clone(), func);
+        Ok(())
+    }
+
+    fn drop_function(&mut self, name: &str) -> StorageResult<()> {
+        self.functions
+            .remove(name)
+            .ok_or_else(|| StorageError::FunctionNotFound(name.to_string()))?;
+        Ok(())
+    }
+
+    fn get_function(&self, name: &str) -> Option<&FunctionDef> {
+        self.functions.get(name)
+    }
+
+    fn list_functions(&self) -> Vec<&FunctionDef> {
+        self.functions.values().collect()
+    }
+
+    // ========== Trigger Metadata ==========
+
+    fn create_trigger(&mut self, trigger: TriggerDef) -> StorageResult<()> {
+        if self.triggers.contains_key(&trigger.name) {
+            return Err(StorageError::TriggerAlreadyExists(trigger.name.clone()));
+        }
+        self.triggers.insert(trigger.name.clone(), trigger);
+        Ok(())
+    }
+
+    fn drop_trigger(&mut self, name: &str) -> StorageResult<()> {
+        self.triggers
+            .remove(name)
+            .ok_or_else(|| StorageError::TriggerNotFound(name.to_string()))?;
+        Ok(())
+    }
+
+    fn get_trigger(&self, name: &str) -> Option<&TriggerDef> {
+        self.triggers.get(name)
+    }
+
+    fn get_triggers_for_table(
+        &self,
+        table: &str,
+        event: TriggerEvent,
+        timing: TriggerTiming,
+    ) -> Vec<&TriggerDef> {
+        let mut triggers: Vec<&TriggerDef> = self
+            .triggers
+            .values()
+            .filter(|t| t.table_name == table && t.timing == timing && t.events.contains(&event))
+            .collect();
+        // Sort alphabetically by name (PostgreSQL behavior)
+        triggers.sort_by(|a, b| a.name.cmp(&b.name));
+        triggers
+    }
+
+    fn list_triggers(&self) -> Vec<&TriggerDef> {
+        self.triggers.values().collect()
     }
 }
 

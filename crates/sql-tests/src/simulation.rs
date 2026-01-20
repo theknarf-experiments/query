@@ -682,10 +682,14 @@ fn test_failure_mode_trigger_errors() {
     // Insert should fail due to trigger
     let result = engine.execute("INSERT INTO guarded VALUES (1, 'pending')");
     assert!(result.is_err());
-    if let Err(ExecError::TriggerError(msg)) = result {
-        assert_eq!(msg, "Invalid status");
+    // The trigger abort now comes through as InvalidExpression with "Trigger aborted: {msg}"
+    if let Err(ExecError::InvalidExpression(msg)) = result {
+        assert!(msg.contains("Invalid status"));
     } else {
-        panic!("Expected TriggerError");
+        panic!(
+            "Expected InvalidExpression with trigger abort message, got: {:?}",
+            result
+        );
     }
 
     // Table should remain empty

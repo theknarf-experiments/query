@@ -5,6 +5,7 @@
 mod engine;
 mod io_types;
 mod memory;
+pub mod metadata;
 mod value;
 
 pub use engine::{
@@ -13,4 +14,7 @@ pub use engine::{
 };
 pub use io_types::{ExportData, ImportData};
 pub use memory::MemoryEngine;
+pub use metadata::{
+    events_from_json, events_to_json, FunctionDef, TriggerDef, TriggerEvent, TriggerTiming,
+};
 pub use value::{DateValue, JsonParseError, JsonValue, TimeValue, TimestampValue, Value};

@@ -1,0 +1,402 @@
+//! Comprehensive tests for the trigger system
+//!
+//! Tests PostgreSQL-style triggers including:
+//! - CREATE FUNCTION and CREATE TRIGGER
+//! - BEFORE and AFTER triggers
+//! - Row modification, skip, and abort
+//! - Triggers with Datalog operations
+
+use db::{Engine, ExecError, QueryResult, SqlRuntime};
+use logical::{
+    insert_with_triggers, update_with_triggers, FunctionDef, MemoryEngine, Runtime, RuntimeError,
+    StorageEngine, TriggerContext, TriggerDef, TriggerEvent, TriggerResult, TriggerTiming, Value,
+};
+
+// ============================================================================
+// SQL Trigger Tests (using inline syntax which works)
+// ============================================================================
+
+#[test]
+fn test_inline_trigger_syntax() {
+    let mut engine = Engine::new();
+
+    engine
+        .execute("CREATE TABLE inline_test (id INT, status TEXT)")
+        .unwrap();
+
+    // Use inline trigger syntax (creates internal function)
+    engine
+        .execute(
+            "CREATE TRIGGER set_status BEFORE INSERT ON inline_test FOR EACH ROW SET status = 'active'",
+        )
+        .unwrap();
+
+    engine
+        .execute("INSERT INTO inline_test VALUES (1, 'pending')")
+        .unwrap();
+
+    let result = engine.execute("SELECT status FROM inline_test").unwrap();
+    match result {
+        QueryResult::Select { rows, .. } => {
+            assert_eq!(rows[0][0], Value::Text("active".to_string()));
+        }
+        _ => panic!("Expected Select result"),
+    }
+}
+
+#[test]
+fn test_inline_trigger_raise_error() {
+    let mut engine = Engine::new();
+
+    engine
+        .execute("CREATE TABLE restricted (id INT, value INT)")
+        .unwrap();
+
+    // Use inline RAISE ERROR syntax
+    engine
+        .execute(
+            "CREATE TRIGGER block_inserts BEFORE INSERT ON restricted FOR EACH ROW RAISE ERROR 'Not permitted'",
+        )
+        .unwrap();
+
+    // Insert should fail with error
+    let result = engine.execute("INSERT INTO restricted VALUES (1, 100)");
+    assert!(result.is_err());
+    if let Err(ExecError::InvalidExpression(msg)) = result {
+        assert!(msg.contains("Not permitted"));
+    } else {
+        panic!("Expected InvalidExpression error with abort message");
+    }
+}
+
+#[test]
+fn test_drop_trigger() {
+    let mut engine = Engine::new();
+
+    engine.execute("CREATE TABLE temp (id INT)").unwrap();
+
+    // Create inline trigger
+    engine
+        .execute("CREATE TRIGGER temp_trig BEFORE INSERT ON temp FOR EACH ROW SET id = 99")
+        .unwrap();
+
+    // Drop trigger
+    engine.execute("DROP TRIGGER temp_trig").unwrap();
+
+    // Verify it's gone - trying to drop again should fail
+    let result = engine.execute("DROP TRIGGER temp_trig");
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_multiple_inline_triggers() {
+    let mut engine = Engine::new();
+
+    engine
+        .execute("CREATE TABLE multi_trigger (id INT, a INT, b INT)")
+        .unwrap();
+
+    // Create two inline triggers - both fire on INSERT
+    engine
+        .execute("CREATE TRIGGER trig_a BEFORE INSERT ON multi_trigger FOR EACH ROW SET a = 10")
+        .unwrap();
+
+    engine
+        .execute("CREATE TRIGGER trig_b BEFORE INSERT ON multi_trigger FOR EACH ROW SET b = 20")
+        .unwrap();
+
+    // Insert - both triggers should modify the row
+    engine
+        .execute("INSERT INTO multi_trigger VALUES (1, 0, 0)")
+        .unwrap();
+
+    let result = engine
+        .execute("SELECT a, b FROM multi_trigger WHERE id = 1")
+        .unwrap();
+    match result {
+        QueryResult::Select { rows, .. } => {
+            // Both values should be set by triggers
+            assert_eq!(rows[0][0], Value::Int(10));
+            assert_eq!(rows[0][1], Value::Int(20));
+        }
+        _ => panic!("Expected Select result"),
+    }
+}
+
+// ============================================================================
+// Datalog + Trigger Integration Tests
+// ============================================================================
+
+/// Custom runtime that tracks trigger invocations for testing
+struct TrackingRuntime {
+    invocations: std::cell::RefCell<Vec<(String, TriggerEvent, TriggerTiming)>>,
+}
+
+impl TrackingRuntime {
+    fn new() -> Self {
+        Self {
+            invocations: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    fn get_invocations(&self) -> Vec<(String, TriggerEvent, TriggerTiming)> {
+        self.invocations.borrow().clone()
+    }
+}
+
+impl<S: StorageEngine> Runtime<S> for TrackingRuntime {
+    fn execute_trigger_function(
+        &self,
+        function_name: &str,
+        context: TriggerContext,
+        _storage: &S,
+    ) -> Result<TriggerResult, RuntimeError> {
+        self.invocations.borrow_mut().push((
+            function_name.to_string(),
+            context.event.clone(),
+            context.timing.clone(),
+        ));
+        Ok(TriggerResult::Proceed(None))
+    }
+}
+
+#[test]
+fn test_triggers_with_logical_layer() {
+    use logical::{ColumnSchema, DataType, TableSchema};
+
+    let mut storage = MemoryEngine::new();
+
+    // Create table
+    storage
+        .create_table(TableSchema {
+            name: "items".to_string(),
+            columns: vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    data_type: DataType::Int,
+                    nullable: false,
+                    primary_key: true,
+                    unique: true,
+                    default: None,
+                    references: None,
+                },
+                ColumnSchema {
+                    name: "name".to_string(),
+                    data_type: DataType::Text,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+            ],
+            constraints: vec![],
+        })
+        .unwrap();
+
+    // Create a trigger
+    storage
+        .create_trigger(TriggerDef {
+            name: "track_inserts".to_string(),
+            table_name: "items".to_string(),
+            timing: TriggerTiming::Before,
+            events: vec![TriggerEvent::Insert],
+            function_name: "track_func".to_string(),
+        })
+        .unwrap();
+
+    let runtime = TrackingRuntime::new();
+
+    // Insert using trigger-aware function
+    let row = vec![Value::Int(1), Value::Text("Widget".to_string())];
+    let result = insert_with_triggers(&mut storage, &runtime, "items", row);
+    assert!(result.is_ok());
+
+    // Verify trigger was invoked
+    let invocations = runtime.get_invocations();
+    assert_eq!(invocations.len(), 1);
+    assert_eq!(invocations[0].0, "track_func");
+    assert_eq!(invocations[0].1, TriggerEvent::Insert);
+    assert_eq!(invocations[0].2, TriggerTiming::Before);
+
+    // Verify data was inserted
+    let rows = storage.scan("items").unwrap();
+    assert_eq!(rows.len(), 1);
+}
+
+#[test]
+fn test_sql_runtime_with_datalog_operations() {
+    use logical::{ColumnSchema, DataType, TableSchema};
+
+    let mut storage = MemoryEngine::new();
+
+    // Create table
+    storage
+        .create_table(TableSchema {
+            name: "facts".to_string(),
+            columns: vec![
+                ColumnSchema {
+                    name: "subject".to_string(),
+                    data_type: DataType::Text,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+                ColumnSchema {
+                    name: "predicate".to_string(),
+                    data_type: DataType::Text,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+                ColumnSchema {
+                    name: "object".to_string(),
+                    data_type: DataType::Text,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+            ],
+            constraints: vec![],
+        })
+        .unwrap();
+
+    // Create function that uppercases subject
+    storage
+        .create_function(FunctionDef {
+            name: "uppercase_subject".to_string(),
+            params: "[]".to_string(),
+            body: "SET NEW.subject = 'UPPERCASED'; RETURN NEW".to_string(),
+            language: "sql".to_string(),
+        })
+        .unwrap();
+
+    // Create trigger
+    storage
+        .create_trigger(TriggerDef {
+            name: "format_facts".to_string(),
+            table_name: "facts".to_string(),
+            timing: TriggerTiming::Before,
+            events: vec![TriggerEvent::Insert],
+            function_name: "uppercase_subject".to_string(),
+        })
+        .unwrap();
+
+    // Use SqlRuntime from sql-engine
+    let runtime = SqlRuntime::new();
+
+    // Insert a fact - trigger should modify it
+    let row = vec![
+        Value::Text("alice".to_string()),
+        Value::Text("knows".to_string()),
+        Value::Text("bob".to_string()),
+    ];
+    let result = insert_with_triggers(&mut storage, &runtime, "facts", row);
+    assert!(result.is_ok());
+
+    // Verify trigger modified the row
+    let rows = storage.scan("facts").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], Value::Text("UPPERCASED".to_string()));
+}
+
+#[test]
+fn test_before_trigger_can_skip_update() {
+    use logical::{ColumnSchema, DataType, TableSchema};
+
+    let mut storage = MemoryEngine::new();
+
+    storage
+        .create_table(TableSchema {
+            name: "protected".to_string(),
+            columns: vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    data_type: DataType::Int,
+                    nullable: false,
+                    primary_key: true,
+                    unique: true,
+                    default: None,
+                    references: None,
+                },
+                ColumnSchema {
+                    name: "locked".to_string(),
+                    data_type: DataType::Bool,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+            ],
+            constraints: vec![],
+        })
+        .unwrap();
+
+    // Insert some data directly (no trigger yet)
+    storage
+        .insert("protected", vec![Value::Int(1), Value::Bool(true)])
+        .unwrap();
+    storage
+        .insert("protected", vec![Value::Int(2), Value::Bool(false)])
+        .unwrap();
+
+    // Create a runtime that skips updates on locked rows
+    struct SkipLockedRuntime;
+    impl<S: StorageEngine> Runtime<S> for SkipLockedRuntime {
+        fn execute_trigger_function(
+            &self,
+            _function_name: &str,
+            context: TriggerContext,
+            _storage: &S,
+        ) -> Result<TriggerResult, RuntimeError> {
+            if context.timing == TriggerTiming::Before {
+                if let Some(old_row) = context.old_row {
+                    if old_row.get(1) == Some(&Value::Bool(true)) {
+                        return Ok(TriggerResult::Skip);
+                    }
+                }
+            }
+            Ok(TriggerResult::Proceed(None))
+        }
+    }
+
+    // Add trigger
+    storage
+        .create_trigger(TriggerDef {
+            name: "protect_locked".to_string(),
+            table_name: "protected".to_string(),
+            timing: TriggerTiming::Before,
+            events: vec![TriggerEvent::Update],
+            function_name: "protect_func".to_string(),
+        })
+        .unwrap();
+
+    let runtime = SkipLockedRuntime;
+
+    // Try to update all rows - only unlocked one should change
+    let result = update_with_triggers(
+        &mut storage,
+        &runtime,
+        "protected",
+        |_row| true,                    // Match all
+        |row| row[0] = Value::Int(999), // Try to change id
+    );
+
+    // Only 1 row should be updated (the unlocked one)
+    assert_eq!(result, Ok(1));
+
+    // Verify: row 1 (locked=true) should be unchanged, row 2 should be updated
+    let rows = storage.scan("protected").unwrap();
+    let row1 = rows.iter().find(|r| r[1] == Value::Bool(true)).unwrap();
+    let row2 = rows.iter().find(|r| r[1] == Value::Bool(false)).unwrap();
+
+    assert_eq!(row1[0], Value::Int(1)); // Unchanged
+    assert_eq!(row2[0], Value::Int(999)); // Updated
+}

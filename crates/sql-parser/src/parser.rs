@@ -59,10 +59,12 @@ fn statement_parser() -> impl Parser<Token, Statement, Error = Simple<Token>> {
     // Use choice() and boxed() to reduce parser type size and stack usage
     let ddl_parsers = create_table_parser()
         .map(Statement::CreateTable)
+        .or(create_function_parser().map(Statement::CreateFunction))
         .or(create_trigger_parser().map(Statement::CreateTrigger))
         .or(create_index_parser().map(Statement::CreateIndex))
         .or(create_view_parser().map(Statement::CreateView))
         .or(create_procedure_parser().map(Statement::CreateProcedure))
+        .or(drop_function_parser().map(Statement::DropFunction))
         .or(drop_trigger_parser().map(Statement::DropTrigger))
         .or(drop_index_parser().map(Statement::DropIndex))
         .or(drop_view_parser().map(Statement::DropView))
@@ -245,18 +247,62 @@ fn release_savepoint_parser() -> impl Parser<Token, Statement, Error = Simple<To
 }
 
 /// Parse CREATE TRIGGER
-/// CREATE TRIGGER name (BEFORE|AFTER) (INSERT|UPDATE|DELETE) ON table
-/// FOR EACH ROW (SET column = value | RAISE ERROR 'message'), ...
+/// CREATE FUNCTION name() RETURNS TRIGGER AS $$ body $$ LANGUAGE sql
+fn create_function_parser() -> impl Parser<Token, CreateFunctionStatement, Error = Simple<Token>> {
+    just(Token::Keyword(Keyword::Create))
+        .ignore_then(just(Token::Keyword(Keyword::Function)))
+        .ignore_then(identifier())
+        .then_ignore(just(Token::LParen))
+        .then_ignore(just(Token::RParen))
+        .then_ignore(just(Token::Keyword(Keyword::Returns)))
+        .then_ignore(just(Token::Keyword(Keyword::Trigger)))
+        .then_ignore(just(Token::Keyword(Keyword::As)))
+        .then(string_literal()) // Function body as string
+        .then_ignore(just(Token::Keyword(Keyword::Language)))
+        .then(identifier()) // Language name
+        .map(|((name, body), language)| CreateFunctionStatement {
+            name,
+            body,
+            language,
+        })
+}
+
+/// DROP FUNCTION name
+fn drop_function_parser() -> impl Parser<Token, String, Error = Simple<Token>> {
+    just(Token::Keyword(Keyword::Drop))
+        .ignore_then(just(Token::Keyword(Keyword::Function)))
+        .ignore_then(identifier())
+}
+
+/// CREATE TRIGGER - supports both PostgreSQL style and legacy inline style
+///
+/// PostgreSQL style: CREATE TRIGGER name BEFORE INSERT ON table EXECUTE FUNCTION func()
+/// Legacy style: CREATE TRIGGER name BEFORE INSERT ON table FOR EACH ROW SET col = val, ...
 fn create_trigger_parser() -> impl Parser<Token, CreateTriggerStatement, Error = Simple<Token>> {
     let timing = just(Token::Keyword(Keyword::Before))
         .to(TriggerTiming::Before)
         .or(just(Token::Keyword(Keyword::After)).to(TriggerTiming::After));
 
-    let event = just(Token::Keyword(Keyword::Insert))
+    let single_event = just(Token::Keyword(Keyword::Insert))
         .to(TriggerEvent::Insert)
         .or(just(Token::Keyword(Keyword::Update)).to(TriggerEvent::Update))
         .or(just(Token::Keyword(Keyword::Delete)).to(TriggerEvent::Delete));
 
+    // Events separated by OR: INSERT OR UPDATE OR DELETE
+    let events = single_event
+        .clone()
+        .separated_by(just(Token::Keyword(Keyword::Or)))
+        .at_least(1);
+
+    // PostgreSQL style: EXECUTE FUNCTION func_name()
+    let execute_function = just(Token::Keyword(Keyword::Execute))
+        .ignore_then(just(Token::Keyword(Keyword::Function)))
+        .ignore_then(identifier())
+        .then_ignore(just(Token::LParen))
+        .then_ignore(just(Token::RParen))
+        .map(TriggerActionType::ExecuteFunction);
+
+    // Legacy inline style: FOR EACH ROW SET col = val, ...
     let set_action = just(Token::Keyword(Keyword::Set))
         .ignore_then(identifier())
         .then_ignore(just(Token::Eq))
@@ -268,26 +314,31 @@ fn create_trigger_parser() -> impl Parser<Token, CreateTriggerStatement, Error =
         .ignore_then(string_literal())
         .map(TriggerAction::RaiseError);
 
-    let action = set_action.or(raise_action);
+    let inline_action = set_action.or(raise_action);
+
+    let inline_actions = just(Token::Keyword(Keyword::For))
+        .ignore_then(just(Token::Keyword(Keyword::Each)))
+        .ignore_then(just(Token::Keyword(Keyword::Row)))
+        .ignore_then(inline_action.separated_by(just(Token::Comma)).at_least(1))
+        .map(TriggerActionType::InlineActions);
+
+    let action_type = execute_function.or(inline_actions);
 
     just(Token::Keyword(Keyword::Create))
         .ignore_then(just(Token::Keyword(Keyword::Trigger)))
         .ignore_then(identifier())
         .then(timing)
-        .then(event)
+        .then(events)
         .then_ignore(just(Token::Keyword(Keyword::On)))
         .then(identifier())
-        .then_ignore(just(Token::Keyword(Keyword::For)))
-        .then_ignore(just(Token::Keyword(Keyword::Each)))
-        .then_ignore(just(Token::Keyword(Keyword::Row)))
-        .then(action.separated_by(just(Token::Comma)).at_least(1))
+        .then(action_type)
         .map(
-            |((((name, timing), event), table), body)| CreateTriggerStatement {
+            |((((name, timing), events), table), action)| CreateTriggerStatement {
                 name,
                 timing,
-                event,
+                events,
                 table,
-                body,
+                action,
             },
         )
 }
@@ -2597,6 +2648,42 @@ mod tests {
                 assert!(call.args.is_empty());
             }
             _ => panic!("Expected CallProcedure statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_create_function() {
+        let result =
+            parse("CREATE FUNCTION my_func() RETURNS TRIGGER AS 'RETURN NEW' LANGUAGE sql");
+        assert!(result.is_ok(), "Parse failed: {:?}", result);
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::CreateFunction(func) => {
+                assert_eq!(func.name, "my_func");
+                assert_eq!(func.body, "RETURN NEW");
+                assert_eq!(func.language, "sql");
+            }
+            _ => panic!("Expected CreateFunction statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_create_trigger_with_function() {
+        let result =
+            parse("CREATE TRIGGER my_trigger BEFORE INSERT ON users EXECUTE FUNCTION my_func()");
+        assert!(result.is_ok(), "Parse failed: {:?}", result);
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::CreateTrigger(trig) => {
+                assert_eq!(trig.name, "my_trigger");
+                assert_eq!(trig.table, "users");
+                assert_eq!(trig.timing, TriggerTiming::Before);
+                assert!(matches!(
+                    trig.action,
+                    TriggerActionType::ExecuteFunction(f) if f == "my_func"
+                ));
+            }
+            _ => panic!("Expected CreateTrigger statement"),
         }
     }
 }

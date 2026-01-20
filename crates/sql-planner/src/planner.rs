@@ -1,10 +1,11 @@
 //! Query planner - converts AST statements to logical plans
 
 use sql_parser::{
-    CallProcedureStatement, CreateIndexStatement, CreateProcedureStatement, CreateTableStatement,
-    CreateTriggerStatement, CreateViewStatement, Cte, CteQuery, CteSetOperation, DeleteStatement,
-    Expr, InsertStatement, SelectColumn, SelectOrSet, SelectStatement, SetOperationStatement,
-    SetOperator, Statement, UpdateStatement, WithClause,
+    CallProcedureStatement, CreateFunctionStatement, CreateIndexStatement,
+    CreateProcedureStatement, CreateTableStatement, CreateTriggerStatement, CreateViewStatement,
+    Cte, CteQuery, CteSetOperation, DeleteStatement, Expr, InsertStatement, SelectColumn,
+    SelectOrSet, SelectStatement, SetOperationStatement, SetOperator, Statement, UpdateStatement,
+    WithClause,
 };
 
 use crate::plan::LogicalPlan;
@@ -32,6 +33,8 @@ pub fn plan(statement: Statement) -> PlanResult {
         Statement::Update(update) => plan_update(update),
         Statement::Delete(delete) => plan_delete(delete),
         Statement::CreateTable(create) => plan_create_table(create),
+        Statement::CreateFunction(create) => plan_create_function(create),
+        Statement::DropFunction(name) => Ok(LogicalPlan::DropFunction { name }),
         Statement::CreateTrigger(create) => plan_create_trigger(create),
         Statement::DropTrigger(name) => Ok(LogicalPlan::DropTrigger { name }),
         Statement::DropTable(name) => Ok(LogicalPlan::DropTable { name }),
@@ -497,14 +500,23 @@ fn plan_delete(delete: DeleteStatement) -> PlanResult {
     })
 }
 
+/// Plan a CREATE FUNCTION statement
+fn plan_create_function(create: CreateFunctionStatement) -> PlanResult {
+    Ok(LogicalPlan::CreateFunction {
+        name: create.name,
+        body: create.body,
+        language: create.language,
+    })
+}
+
 /// Plan a CREATE TRIGGER statement
 fn plan_create_trigger(create: CreateTriggerStatement) -> PlanResult {
     Ok(LogicalPlan::CreateTrigger {
         name: create.name,
         timing: create.timing,
-        event: create.event,
+        events: create.events,
         table: create.table,
-        body: create.body,
+        action: create.action,
     })
 }
 

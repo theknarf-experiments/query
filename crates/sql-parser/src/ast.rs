@@ -37,6 +37,10 @@ pub enum Statement {
     DropProcedure(String),
     /// CALL/EXEC procedure
     CallProcedure(CallProcedureStatement),
+    /// CREATE FUNCTION statement (for triggers)
+    CreateFunction(CreateFunctionStatement),
+    /// DROP FUNCTION statement
+    DropFunction(String),
     /// BEGIN TRANSACTION
     Begin,
     /// COMMIT TRANSACTION
@@ -455,14 +459,40 @@ pub struct CallProcedureStatement {
     pub args: Vec<Expr>,
 }
 
+/// CREATE FUNCTION statement (for trigger functions)
+///
+/// Syntax: CREATE FUNCTION name() RETURNS TRIGGER AS $$ body $$ LANGUAGE sql;
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateFunctionStatement {
+    pub name: String,
+    /// Function body (simple SQL-like DSL for triggers)
+    pub body: String,
+    /// Language (currently only "sql" supported)
+    pub language: String,
+}
+
 /// CREATE TRIGGER statement
+///
+/// Supports two styles:
+/// 1. PostgreSQL style: CREATE TRIGGER name BEFORE INSERT ON table EXECUTE FUNCTION func_name()
+/// 2. Legacy inline style: CREATE TRIGGER name BEFORE INSERT ON table BEGIN ... END
 #[derive(Debug, Clone, PartialEq)]
 pub struct CreateTriggerStatement {
     pub name: String,
     pub timing: TriggerTiming,
-    pub event: TriggerEvent,
+    pub events: Vec<TriggerEvent>,
     pub table: String,
-    pub body: Vec<TriggerAction>,
+    /// Either a function reference (PostgreSQL style) or inline actions (legacy)
+    pub action: TriggerActionType,
+}
+
+/// How trigger actions are specified
+#[derive(Debug, Clone, PartialEq)]
+pub enum TriggerActionType {
+    /// Execute a named function (PostgreSQL style)
+    ExecuteFunction(String),
+    /// Inline actions (legacy style)
+    InlineActions(Vec<TriggerAction>),
 }
 
 /// When the trigger fires (BEFORE or AFTER)

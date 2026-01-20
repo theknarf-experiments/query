@@ -1,5 +1,6 @@
 //! Storage Engine trait definition
 
+use crate::metadata::{FunctionDef, TriggerDef, TriggerEvent, TriggerTiming};
 use crate::Value;
 
 /// Result type for storage operations
@@ -15,6 +16,10 @@ pub enum StorageError {
     ConstraintViolation(String),
     IndexNotFound(String),
     IndexAlreadyExists(String),
+    FunctionNotFound(String),
+    FunctionAlreadyExists(String),
+    TriggerNotFound(String),
+    TriggerAlreadyExists(String),
 }
 
 /// Schema for a table column
@@ -197,4 +202,42 @@ pub trait StorageEngine: Send + Sync {
 
     /// Get row by index (returns specific row indices from a table scan)
     fn get_rows_by_indices(&self, table: &str, indices: &[usize]) -> StorageResult<Vec<Row>>;
+
+    // ========== Function Metadata ==========
+
+    /// Create a stored function
+    fn create_function(&mut self, func: FunctionDef) -> StorageResult<()>;
+
+    /// Drop a stored function
+    fn drop_function(&mut self, name: &str) -> StorageResult<()>;
+
+    /// Get a stored function by name
+    fn get_function(&self, name: &str) -> Option<&FunctionDef>;
+
+    /// Get all stored functions
+    fn list_functions(&self) -> Vec<&FunctionDef>;
+
+    // ========== Trigger Metadata ==========
+
+    /// Create a trigger
+    fn create_trigger(&mut self, trigger: TriggerDef) -> StorageResult<()>;
+
+    /// Drop a trigger
+    fn drop_trigger(&mut self, name: &str) -> StorageResult<()>;
+
+    /// Get a trigger by name
+    fn get_trigger(&self, name: &str) -> Option<&TriggerDef>;
+
+    /// Get all triggers for a specific table, event, and timing
+    ///
+    /// Returns triggers sorted alphabetically by name (PostgreSQL behavior).
+    fn get_triggers_for_table(
+        &self,
+        table: &str,
+        event: TriggerEvent,
+        timing: TriggerTiming,
+    ) -> Vec<&TriggerDef>;
+
+    /// Get all triggers
+    fn list_triggers(&self) -> Vec<&TriggerDef>;
 }

@@ -193,6 +193,10 @@ pub enum Keyword {
     Execute,
     Returns,
     Return,
+
+    // Functions
+    Function,
+    Language,
 }
 
 /// Error when parsing a keyword fails
@@ -325,6 +329,8 @@ impl std::str::FromStr for Keyword {
             "EXECUTE" => Ok(Self::Execute),
             "RETURNS" => Ok(Self::Returns),
             "RETURN" => Ok(Self::Return),
+            "FUNCTION" => Ok(Self::Function),
+            "LANGUAGE" => Ok(Self::Language),
             _ => Err(ParseKeywordError),
         }
     }

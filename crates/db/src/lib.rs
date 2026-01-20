@@ -18,7 +18,7 @@
 pub mod io;
 
 // Re-export sql-engine as the main interface
-pub use sql_engine::{datalog, Engine, ExecError, ExecResult, QueryResult};
+pub use sql_engine::{datalog, Engine, ExecError, ExecResult, QueryResult, SqlRuntime};
 
 // Re-export I/O functionality
 pub use io::{export_csv, export_json, import_csv, import_json, ExportError, ImportError};

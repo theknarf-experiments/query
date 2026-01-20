@@ -2281,4 +2281,425 @@ mod tests {
         // alice is NOT unarmed (has weapon)
         assert!(!result.contains(&make_atom("unarmed", vec![atom_term("alice")]), &storage));
     }
+
+    // NOTE: Zero-arity predicates are not supported by the storage layer
+    // (requires at least one column for indexing). Tests for those are skipped.
+
+    // ===== Eligibility/Complex Stratification Tests =====
+
+    #[test]
+    fn test_stratified_eligibility() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        // Facts about students
+        db.insert(make_atom("student", vec![atom_term("alice")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("student", vec![atom_term("bob")]), &mut storage)
+            .unwrap();
+        db.insert(
+            make_atom("student", vec![atom_term("charlie")]),
+            &mut storage,
+        )
+        .unwrap();
+
+        // Some students have scholarships
+        db.insert(
+            make_atom("has_scholarship", vec![atom_term("alice")]),
+            &mut storage,
+        )
+        .unwrap();
+
+        // Some students have jobs
+        db.insert(make_atom("has_job", vec![atom_term("bob")]), &mut storage)
+            .unwrap();
+
+        // Rules:
+        // needs_financial_aid(X) :- student(X), not has_scholarship(X), not has_job(X).
+        // priority_candidate(X) :- needs_financial_aid(X).
+        let rules = vec![
+            Rule {
+                head: make_atom("needs_financial_aid", vec![var_term("X")]),
+                body: vec![
+                    Literal::Positive(make_atom("student", vec![var_term("X")])),
+                    Literal::Negative(make_atom("has_scholarship", vec![var_term("X")])),
+                    Literal::Negative(make_atom("has_job", vec![var_term("X")])),
+                ],
+            },
+            Rule {
+                head: make_atom("priority_candidate", vec![var_term("X")]),
+                body: vec![Literal::Positive(make_atom(
+                    "needs_financial_aid",
+                    vec![var_term("X")],
+                ))],
+            },
+        ];
+
+        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+
+        // charlie needs financial aid (no scholarship, no job)
+        assert!(result.contains(
+            &make_atom("needs_financial_aid", vec![atom_term("charlie")]),
+            &storage
+        ));
+
+        // alice doesn't need aid (has scholarship)
+        assert!(!result.contains(
+            &make_atom("needs_financial_aid", vec![atom_term("alice")]),
+            &storage
+        ));
+
+        // bob doesn't need aid (has job)
+        assert!(!result.contains(
+            &make_atom("needs_financial_aid", vec![atom_term("bob")]),
+            &storage
+        ));
+
+        // charlie is a priority candidate
+        assert!(result.contains(
+            &make_atom("priority_candidate", vec![atom_term("charlie")]),
+            &storage
+        ));
+    }
+
+    #[test]
+    fn test_semi_naive_delta_at_different_positions() {
+        // This test verifies that delta is tried at EACH position in multi-literal rules
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        // A chain: a -> b -> c
+        db.insert(
+            make_atom("edge", vec![atom_term("a"), atom_term("b")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("edge", vec![atom_term("b"), atom_term("c")]),
+            &mut storage,
+        )
+        .unwrap();
+
+        // A separate chain: x -> y
+        db.insert(
+            make_atom("edge", vec![atom_term("x"), atom_term("y")]),
+            &mut storage,
+        )
+        .unwrap();
+
+        // Rules for transitive closure
+        let rules = vec![
+            Rule {
+                head: make_atom("path", vec![var_term("X"), var_term("Y")]),
+                body: vec![Literal::Positive(make_atom(
+                    "edge",
+                    vec![var_term("X"), var_term("Y")],
+                ))],
+            },
+            Rule {
+                head: make_atom("path", vec![var_term("X"), var_term("Z")]),
+                body: vec![
+                    Literal::Positive(make_atom("path", vec![var_term("X"), var_term("Y")])),
+                    Literal::Positive(make_atom("edge", vec![var_term("Y"), var_term("Z")])),
+                ],
+            },
+        ];
+
+        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+
+        // Should derive path(a,c) by combining path(a,b) + edge(b,c)
+        assert!(result.contains(
+            &make_atom("path", vec![atom_term("a"), atom_term("c")]),
+            &storage
+        ));
+
+        // Should have: path(a,b), path(b,c), path(x,y), path(a,c)
+        let path_count = result.count_facts("path", &storage);
+        assert_eq!(path_count, 4);
+    }
+
+    #[test]
+    fn test_multiple_recursive_predicates_with_negation() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        db.insert(
+            make_atom("parent", vec![atom_term("alice"), atom_term("bob")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("bob"), atom_term("charlie")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("charlie"), atom_term("dave")]),
+            &mut storage,
+        )
+        .unwrap();
+
+        let rules = vec![
+            // ancestor(X,Y) :- parent(X,Y)
+            Rule {
+                head: make_atom("ancestor", vec![var_term("X"), var_term("Y")]),
+                body: vec![Literal::Positive(make_atom(
+                    "parent",
+                    vec![var_term("X"), var_term("Y")],
+                ))],
+            },
+            // ancestor(X,Z) :- ancestor(X,Y), parent(Y,Z)
+            Rule {
+                head: make_atom("ancestor", vec![var_term("X"), var_term("Z")]),
+                body: vec![
+                    Literal::Positive(make_atom("ancestor", vec![var_term("X"), var_term("Y")])),
+                    Literal::Positive(make_atom("parent", vec![var_term("Y"), var_term("Z")])),
+                ],
+            },
+            // ancestor(X,Z) :- parent(X,Y), ancestor(Y,Z) - different position for recursion
+            Rule {
+                head: make_atom("ancestor", vec![var_term("X"), var_term("Z")]),
+                body: vec![
+                    Literal::Positive(make_atom("parent", vec![var_term("X"), var_term("Y")])),
+                    Literal::Positive(make_atom("ancestor", vec![var_term("Y"), var_term("Z")])),
+                ],
+            },
+        ];
+
+        let (result, stats) = evaluate_instrumented(&rules, &[], db, &mut storage).unwrap();
+
+        // Should derive all ancestor relationships
+        let ancestor_count = result.count_facts("ancestor", &storage);
+        assert_eq!(ancestor_count, 6);
+
+        // Verify alice is ancestor of dave
+        assert!(result.contains(
+            &make_atom("ancestor", vec![atom_term("alice"), atom_term("dave")]),
+            &storage
+        ));
+
+        // Verify stats - semi-naive should be efficient
+        assert!(stats.iterations > 0);
+        assert!(stats.facts_derived > 0);
+    }
+
+    #[test]
+    fn test_ancestor_with_exclusions() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        // Family tree
+        db.insert(
+            make_atom("parent", vec![atom_term("grandpa"), atom_term("dad")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("dad"), atom_term("alice")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("alice"), atom_term("charlie")]),
+            &mut storage,
+        )
+        .unwrap();
+
+        // Estrangement (family dispute)
+        db.insert(make_atom("estranged", vec![atom_term("dad")]), &mut storage)
+            .unwrap();
+
+        let rules = vec![
+            // ancestor(X, Y) :- parent(X, Y).
+            Rule {
+                head: make_atom("ancestor", vec![var_term("X"), var_term("Y")]),
+                body: vec![Literal::Positive(make_atom(
+                    "parent",
+                    vec![var_term("X"), var_term("Y")],
+                ))],
+            },
+            // ancestor(X, Z) :- ancestor(X, Y), parent(Y, Z).
+            Rule {
+                head: make_atom("ancestor", vec![var_term("X"), var_term("Z")]),
+                body: vec![
+                    Literal::Positive(make_atom("ancestor", vec![var_term("X"), var_term("Y")])),
+                    Literal::Positive(make_atom("parent", vec![var_term("Y"), var_term("Z")])),
+                ],
+            },
+            // recognized_family(X, Y) :- parent(X, Y), not estranged(X), not estranged(Y).
+            Rule {
+                head: make_atom("recognized_family", vec![var_term("X"), var_term("Y")]),
+                body: vec![
+                    Literal::Positive(make_atom("parent", vec![var_term("X"), var_term("Y")])),
+                    Literal::Negative(make_atom("estranged", vec![var_term("X")])),
+                    Literal::Negative(make_atom("estranged", vec![var_term("Y")])),
+                ],
+            },
+        ];
+
+        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+
+        // Grandpa -> dad -> alice should exist in ancestor
+        assert!(result.contains(
+            &make_atom("ancestor", vec![atom_term("grandpa"), atom_term("alice")]),
+            &storage
+        ));
+
+        // But grandpa -> dad should NOT be in recognized_family (dad is estranged)
+        assert!(!result.contains(
+            &make_atom(
+                "recognized_family",
+                vec![atom_term("grandpa"), atom_term("dad")]
+            ),
+            &storage
+        ));
+
+        // Alice -> charlie should be in recognized_family (neither estranged)
+        assert!(result.contains(
+            &make_atom(
+                "recognized_family",
+                vec![atom_term("alice"), atom_term("charlie")]
+            ),
+            &storage
+        ));
+    }
+
+    #[test]
+    fn test_negation_with_different_datatypes() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        // Player stats
+        db.insert(make_atom("player", vec![atom_term("alice")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("player", vec![atom_term("bob")]), &mut storage)
+            .unwrap();
+
+        // Alice has a shield (with boolean)
+        db.insert(
+            make_atom("has_shield", vec![atom_term("alice"), bool_term(true)]),
+            &mut storage,
+        )
+        .unwrap();
+
+        // Bob does not have a shield (no fact)
+
+        // Damage values
+        db.insert(make_atom("base_damage", vec![int_term(10)]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("base_damage", vec![int_term(20)]), &mut storage)
+            .unwrap();
+
+        let rules = vec![
+            // vulnerable(P) :- player(P), not has_shield(P, true).
+            Rule {
+                head: make_atom("vulnerable", vec![var_term("P")]),
+                body: vec![
+                    Literal::Positive(make_atom("player", vec![var_term("P")])),
+                    Literal::Negative(make_atom(
+                        "has_shield",
+                        vec![var_term("P"), bool_term(true)],
+                    )),
+                ],
+            },
+            // will_take_damage(P, D) :- vulnerable(P), base_damage(D).
+            Rule {
+                head: make_atom("will_take_damage", vec![var_term("P"), var_term("D")]),
+                body: vec![
+                    Literal::Positive(make_atom("vulnerable", vec![var_term("P")])),
+                    Literal::Positive(make_atom("base_damage", vec![var_term("D")])),
+                ],
+            },
+        ];
+
+        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+
+        // Bob is vulnerable (no shield)
+        assert!(result.contains(&make_atom("vulnerable", vec![atom_term("bob")]), &storage));
+
+        // Alice is NOT vulnerable (has shield)
+        assert!(!result.contains(&make_atom("vulnerable", vec![atom_term("alice")]), &storage));
+
+        // Bob will take damage (vulnerable)
+        assert!(result.contains(
+            &make_atom("will_take_damage", vec![atom_term("bob"), int_term(10)]),
+            &storage
+        ));
+        assert!(result.contains(
+            &make_atom("will_take_damage", vec![atom_term("bob"), int_term(20)]),
+            &storage
+        ));
+
+        // Alice will NOT take damage (not vulnerable)
+        assert!(!result.contains(
+            &make_atom("will_take_damage", vec![atom_term("alice"), int_term(10)]),
+            &storage
+        ));
+    }
+
+    #[test]
+    fn test_compound_terms_in_recursion() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        // Graph with compound term labels
+        db.insert(
+            make_atom(
+                "edge",
+                vec![
+                    compound_term("node", vec![atom_term("a"), int_term(1)]),
+                    compound_term("node", vec![atom_term("b"), int_term(2)]),
+                ],
+            ),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom(
+                "edge",
+                vec![
+                    compound_term("node", vec![atom_term("b"), int_term(2)]),
+                    compound_term("node", vec![atom_term("c"), int_term(3)]),
+                ],
+            ),
+            &mut storage,
+        )
+        .unwrap();
+
+        // Transitive closure with compound terms
+        let rules = vec![
+            Rule {
+                head: make_atom("path", vec![var_term("X"), var_term("Y")]),
+                body: vec![Literal::Positive(make_atom(
+                    "edge",
+                    vec![var_term("X"), var_term("Y")],
+                ))],
+            },
+            Rule {
+                head: make_atom("path", vec![var_term("X"), var_term("Z")]),
+                body: vec![
+                    Literal::Positive(make_atom("path", vec![var_term("X"), var_term("Y")])),
+                    Literal::Positive(make_atom("edge", vec![var_term("Y"), var_term("Z")])),
+                ],
+            },
+        ];
+
+        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+
+        // Should derive path from node(a,1) to node(c,3)
+        assert!(result.contains(
+            &make_atom(
+                "path",
+                vec![
+                    compound_term("node", vec![atom_term("a"), int_term(1)]),
+                    compound_term("node", vec![atom_term("c"), int_term(3)])
+                ]
+            ),
+            &storage
+        ));
+
+        // Should have: (a,1)->(b,2), (b,2)->(c,3), (a,1)->(c,3)
+        let path_count = result.count_facts("path", &storage);
+        assert_eq!(path_count, 3);
+    }
 }

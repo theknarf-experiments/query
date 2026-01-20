@@ -394,4 +394,373 @@ mod tests {
 
         assert!(parse_builtin(&non_builtin_atom).is_none());
     }
+
+    // ===== Additional Arithmetic Tests =====
+
+    fn float_term(f: f64) -> Term {
+        Term::Constant(Value::Float(f))
+    }
+
+    #[test]
+    fn test_eval_arith_negative_integers() {
+        let subst = Substitution::new();
+        assert_eq!(
+            eval_arith(&int_term(-10), &subst),
+            Some(Value::Integer(-10))
+        );
+        assert_eq!(eval_arith(&int_term(0), &subst), Some(Value::Integer(0)));
+    }
+
+    #[test]
+    fn test_eval_arith_division_by_zero() {
+        let subst = Substitution::new();
+        let div = Term::Compound(sym("/"), vec![int_term(10), int_term(0)]);
+        assert_eq!(eval_arith(&div, &subst), None);
+    }
+
+    #[test]
+    fn test_eval_arith_modulo_by_zero() {
+        let subst = Substitution::new();
+        let modulo = Term::Compound(sym("mod"), vec![int_term(10), int_term(0)]);
+        assert_eq!(eval_arith(&modulo, &subst), None);
+    }
+
+    #[test]
+    fn test_eval_arith_nested_expression() {
+        let subst = Substitution::new();
+        // (3 + 4) * 2 = 14
+        let inner = Term::Compound(sym("+"), vec![int_term(3), int_term(4)]);
+        let expr = Term::Compound(sym("*"), vec![inner, int_term(2)]);
+        assert_eq!(eval_arith(&expr, &subst), Some(Value::Integer(14)));
+    }
+
+    #[test]
+    fn test_eval_arith_unbound_variable() {
+        let subst = Substitution::new();
+        let expr = Term::Compound(sym("+"), vec![var_term("X"), int_term(5)]);
+        assert_eq!(eval_arith(&expr, &subst), None);
+    }
+
+    #[test]
+    fn test_eval_arith_float_constants() {
+        let subst = Substitution::new();
+        assert_eq!(
+            eval_arith(&float_term(3.5), &subst),
+            Some(Value::Float(3.5))
+        );
+    }
+
+    #[test]
+    fn test_eval_arith_mixed_addition() {
+        let subst = Substitution::new();
+        let expr = Term::Compound(sym("+"), vec![int_term(2), float_term(0.5)]);
+        assert_eq!(eval_arith(&expr, &subst), Some(Value::Float(2.5)));
+    }
+
+    #[test]
+    fn test_eval_arith_float_division() {
+        let subst = Substitution::new();
+        let expr = Term::Compound(sym("/"), vec![float_term(7.5), int_term(2)]);
+        assert_eq!(eval_arith(&expr, &subst), Some(Value::Float(3.75)));
+    }
+
+    #[test]
+    fn test_eval_arith_float_division_by_zero() {
+        let subst = Substitution::new();
+        let expr = Term::Compound(sym("/"), vec![float_term(3.0), float_term(0.0)]);
+        assert_eq!(eval_arith(&expr, &subst), None);
+    }
+
+    #[test]
+    fn test_eval_arith_float_modulo_by_zero() {
+        let subst = Substitution::new();
+        let expr = Term::Compound(sym("mod"), vec![float_term(3.0), float_term(0.0)]);
+        assert_eq!(eval_arith(&expr, &subst), None);
+    }
+
+    #[test]
+    fn test_eval_arith_float_modulo() {
+        let subst = Substitution::new();
+        let expr = Term::Compound(sym("mod"), vec![float_term(5.5), int_term(2)]);
+        assert_eq!(eval_arith(&expr, &subst), Some(Value::Float(1.5)));
+    }
+
+    // ===== Additional Comparison Tests =====
+
+    #[test]
+    fn test_eval_comparison_equal_integers() {
+        let subst = Substitution::new();
+        assert_eq!(
+            eval_comparison(&CompOp::Eq, &int_term(5), &int_term(5), &subst),
+            Some(true)
+        );
+        assert_eq!(
+            eval_comparison(&CompOp::Eq, &int_term(5), &int_term(3), &subst),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_eval_comparison_less_than() {
+        let subst = Substitution::new();
+        assert_eq!(
+            eval_comparison(&CompOp::Lt, &int_term(3), &int_term(5), &subst),
+            Some(true)
+        );
+        assert_eq!(
+            eval_comparison(&CompOp::Lt, &int_term(5), &int_term(3), &subst),
+            Some(false)
+        );
+        assert_eq!(
+            eval_comparison(&CompOp::Lt, &int_term(5), &int_term(5), &subst),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_eval_comparison_greater_than() {
+        let subst = Substitution::new();
+        assert_eq!(
+            eval_comparison(&CompOp::Gt, &int_term(5), &int_term(3), &subst),
+            Some(true)
+        );
+        assert_eq!(
+            eval_comparison(&CompOp::Gt, &int_term(3), &int_term(5), &subst),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_eval_comparison_less_or_equal() {
+        let subst = Substitution::new();
+        assert_eq!(
+            eval_comparison(&CompOp::Lte, &int_term(3), &int_term(5), &subst),
+            Some(true)
+        );
+        assert_eq!(
+            eval_comparison(&CompOp::Lte, &int_term(5), &int_term(5), &subst),
+            Some(true)
+        );
+        assert_eq!(
+            eval_comparison(&CompOp::Lte, &int_term(6), &int_term(5), &subst),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_eval_comparison_greater_or_equal() {
+        let subst = Substitution::new();
+        assert_eq!(
+            eval_comparison(&CompOp::Gte, &int_term(5), &int_term(3), &subst),
+            Some(true)
+        );
+        assert_eq!(
+            eval_comparison(&CompOp::Gte, &int_term(5), &int_term(5), &subst),
+            Some(true)
+        );
+        assert_eq!(
+            eval_comparison(&CompOp::Gte, &int_term(4), &int_term(5), &subst),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_eval_comparison_with_arithmetic() {
+        let subst = Substitution::new();
+        // 3 + 4 = 7
+        let left = Term::Compound(sym("+"), vec![int_term(3), int_term(4)]);
+        let right = int_term(7);
+        assert_eq!(
+            eval_comparison(&CompOp::Eq, &left, &right, &subst),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn test_eval_comparison_float_semantics() {
+        let subst = Substitution::new();
+        assert_eq!(
+            eval_comparison(&CompOp::Eq, &float_term(2.5), &float_term(2.5), &subst),
+            Some(true)
+        );
+        assert_eq!(
+            eval_comparison(&CompOp::Gt, &float_term(3.1), &float_term(3.0), &subst),
+            Some(true)
+        );
+        assert_eq!(
+            eval_comparison(&CompOp::Lt, &float_term(3.1), &float_term(3.0), &subst),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_eval_comparison_mixed_numeric_types() {
+        let subst = Substitution::new();
+        assert_eq!(
+            eval_comparison(&CompOp::Eq, &int_term(5), &float_term(5.0), &subst),
+            Some(true)
+        );
+        assert_eq!(
+            eval_comparison(&CompOp::Lt, &int_term(4), &float_term(4.1), &subst),
+            Some(true)
+        );
+        assert_eq!(
+            eval_comparison(&CompOp::Gt, &float_term(6.2), &int_term(6), &subst),
+            Some(true)
+        );
+    }
+
+    // ===== Parse Builtin Tests =====
+
+    #[test]
+    fn test_parse_builtin_comparison_operators() {
+        // Equal
+        let eq_atom = Atom {
+            predicate: sym("="),
+            terms: vec![int_term(5), int_term(5)],
+        };
+        assert!(parse_builtin(&eq_atom).is_some());
+
+        // Not equal (!=)
+        let neq_atom = Atom {
+            predicate: sym("!="),
+            terms: vec![int_term(3), int_term(5)],
+        };
+        assert!(parse_builtin(&neq_atom).is_some());
+
+        // Not equal (\=)
+        let neq_atom2 = Atom {
+            predicate: sym("\\="),
+            terms: vec![int_term(3), int_term(5)],
+        };
+        assert!(parse_builtin(&neq_atom2).is_some());
+
+        // Less than or equal (<=)
+        let lte_atom = Atom {
+            predicate: sym("<="),
+            terms: vec![int_term(3), int_term(5)],
+        };
+        assert!(parse_builtin(&lte_atom).is_some());
+
+        // Less than or equal (=<)
+        let lte_atom2 = Atom {
+            predicate: sym("=<"),
+            terms: vec![int_term(3), int_term(5)],
+        };
+        assert!(parse_builtin(&lte_atom2).is_some());
+
+        // Greater than or equal
+        let gte_atom = Atom {
+            predicate: sym(">="),
+            terms: vec![int_term(5), int_term(3)],
+        };
+        assert!(parse_builtin(&gte_atom).is_some());
+    }
+
+    #[test]
+    fn test_parse_builtin_not_builtin() {
+        let atom = Atom {
+            predicate: sym("parent"),
+            terms: vec![
+                Term::Constant(Value::Atom(sym("john"))),
+                Term::Constant(Value::Atom(sym("mary"))),
+            ],
+        };
+        assert!(parse_builtin(&atom).is_none());
+    }
+
+    #[test]
+    fn test_parse_and_eval_ground_comparison() {
+        // Test that we can parse and evaluate a ground comparison like "5 > 3"
+        let atom = Atom {
+            predicate: sym(">"),
+            terms: vec![int_term(5), int_term(3)],
+        };
+
+        let builtin = parse_builtin(&atom).expect("Should parse as built-in");
+        let subst = Substitution::new();
+        let result = eval_builtin(&builtin, &subst);
+
+        assert_eq!(result, Some(true));
+    }
+
+    #[test]
+    fn test_parse_and_eval_ground_comparison_false() {
+        let atom = Atom {
+            predicate: sym(">"),
+            terms: vec![int_term(3), int_term(5)],
+        };
+
+        let builtin = parse_builtin(&atom).expect("Should parse as built-in");
+        let subst = Substitution::new();
+        let result = eval_builtin(&builtin, &subst);
+
+        assert_eq!(result, Some(false));
+    }
+
+    // ===== Built-in Special Values Tests =====
+
+    #[test]
+    fn test_parse_builtin_true() {
+        let atom = Atom {
+            predicate: sym("true"),
+            terms: vec![],
+        };
+        let builtin = parse_builtin(&atom);
+        assert!(matches!(builtin, Some(BuiltIn::True)));
+
+        let subst = Substitution::new();
+        assert_eq!(eval_builtin(&BuiltIn::True, &subst), Some(true));
+    }
+
+    #[test]
+    fn test_parse_builtin_fail() {
+        let atom = Atom {
+            predicate: sym("fail"),
+            terms: vec![],
+        };
+        let builtin = parse_builtin(&atom);
+        assert!(matches!(builtin, Some(BuiltIn::Fail)));
+
+        let subst = Substitution::new();
+        assert_eq!(eval_builtin(&BuiltIn::Fail, &subst), Some(false));
+    }
+
+    #[test]
+    fn test_parse_builtin_false() {
+        let atom = Atom {
+            predicate: sym("false"),
+            terms: vec![],
+        };
+        let builtin = parse_builtin(&atom);
+        assert!(matches!(builtin, Some(BuiltIn::Fail)));
+    }
+
+    // ===== Comparison with Variables Tests =====
+
+    #[test]
+    fn test_eval_comparison_with_variables() {
+        let mut subst = Substitution::new();
+        subst.bind(sym("X"), int_term(10));
+        subst.bind(sym("Y"), int_term(5));
+
+        assert_eq!(
+            eval_comparison(&CompOp::Gt, &var_term("X"), &var_term("Y"), &subst),
+            Some(true)
+        );
+        assert_eq!(
+            eval_comparison(&CompOp::Lt, &var_term("X"), &var_term("Y"), &subst),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_eval_comparison_unbound_variable() {
+        let subst = Substitution::new();
+        // X is unbound
+        assert_eq!(
+            eval_comparison(&CompOp::Lt, &var_term("X"), &int_term(5), &subst),
+            None
+        );
+    }
 }

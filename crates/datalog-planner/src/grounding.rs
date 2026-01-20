@@ -21,7 +21,7 @@
 
 use crate::builtins;
 use datalog_parser::{Atom, Literal, Rule, Term};
-use sql_storage::{DatalogContext, StorageEngine, Substitution};
+use logical::{DatalogContext, StorageEngine, Substitution};
 
 #[cfg(test)]
 mod allocation_tracker {
@@ -364,7 +364,7 @@ fn satisfy_body_mixed<S: StorageEngine>(
 // DeltaTracker-Based Semi-Naive Evaluation
 // ============================================================================
 
-use sql_storage::DeltaTracker;
+use logical::DeltaTracker;
 
 /// Ground a rule using semi-naive evaluation with lightweight DeltaTracker
 ///
@@ -569,7 +569,7 @@ pub fn ground_rule_semi_naive_with_storage<S: StorageEngine>(
 mod tests {
     use super::*;
     use datalog_parser::{Atom, Rule, Symbol, Value};
-    use sql_storage::MemoryEngine;
+    use logical::MemoryEngine;
 
     fn sym(s: &str) -> Symbol {
         Symbol::new(s.to_string())

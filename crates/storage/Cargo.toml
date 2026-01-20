@@ -1,5 +1,5 @@
 [package]
-name = "sql-storage"
+name = "storage"
 version.workspace = true
 edition.workspace = true
 

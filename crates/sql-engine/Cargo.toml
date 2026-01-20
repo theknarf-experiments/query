@@ -6,7 +6,7 @@ edition.workspace = true
 [dependencies]
 sql-parser = { workspace = true }
 sql-planner = { workspace = true }
-sql-storage = { workspace = true }
+logical = { workspace = true }
 
 # Datalog support
 datalog-parser = { path = "../datalog-parser" }

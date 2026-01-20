@@ -4,7 +4,7 @@
 //! handles them correctly.
 
 use db::{Engine, ExecError};
-use sql_storage::Value;
+use logical::Value;
 
 /// A deterministic random number generator for simulation
 struct SimRng {

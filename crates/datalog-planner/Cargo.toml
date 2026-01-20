@@ -5,8 +5,8 @@ edition = "2021"
 
 [dependencies]
 datalog-parser = { path = "../datalog-parser" }
-sql-storage = { path = "../sql-storage" }
+logical = { path = "../logical" }
 
 [dev-dependencies]
-sql-storage = { path = "../sql-storage", features = ["test-utils"] }
+logical = { path = "../logical", features = ["test-utils"] }
 internment = "0.8"

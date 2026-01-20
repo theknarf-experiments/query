@@ -22,9 +22,9 @@ pub use sql_engine::{datalog, Engine, ExecError, ExecResult, QueryResult};
 
 // Re-export I/O functionality
 pub use io::{export_csv, export_json, import_csv, import_json, ExportError, ImportError};
-pub use sql_storage::{ExportData, ImportData};
+pub use logical::{ExportData, ImportData};
 
 // Re-export underlying crates for advanced usage
+pub use logical;
 pub use sql_parser;
 pub use sql_planner;
-pub use sql_storage;

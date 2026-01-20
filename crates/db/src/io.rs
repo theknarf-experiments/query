@@ -1,8 +1,8 @@
 //! Import/Export functionality for CSV and JSON formats
 
 use csv::{Reader, Writer};
+use logical::{ExportData, ImportData, Value};
 use serde_json;
-use sql_storage::{ExportData, ImportData, Value};
 use std::io::{Read, Write};
 
 /// Export data to CSV format

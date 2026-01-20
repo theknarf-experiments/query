@@ -18,7 +18,7 @@
 
 use datalog_parser::{Query, Symbol};
 use datalog_planner::satisfy_body;
-use sql_storage::{DatalogContext, StorageEngine, Substitution};
+use logical::{DatalogContext, StorageEngine, Substitution};
 use std::collections::HashSet;
 
 /// Result of query evaluation - list of substitutions that satisfy the query
@@ -92,7 +92,7 @@ pub fn query_variables(query: &Query) -> HashSet<Symbol> {
 mod tests {
     use super::*;
     use datalog_parser::{Atom, Literal, Term, Value};
-    use sql_storage::MemoryEngine;
+    use logical::MemoryEngine;
 
     fn sym(s: &str) -> Symbol {
         Symbol::new(s.to_string())

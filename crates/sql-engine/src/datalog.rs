@@ -22,8 +22,8 @@
 use datalog_eval::{evaluate, EvaluationError};
 use datalog_parser::{Constraint, Literal, Query, Rule, SrcId, Symbol, Term, Value as DValue};
 use datalog_planner::satisfy_body;
-use sql_storage::DatalogContext;
-use sql_storage::{PredicateSchema, StorageEngine, Value as SValue};
+use logical::DatalogContext;
+use logical::{PredicateSchema, StorageEngine, Value as SValue};
 
 use crate::{ExecError, QueryResult};
 
@@ -318,7 +318,7 @@ fn collect_term_variables(term: &Term, vars: &mut Vec<Symbol>) {
 #[cfg(test)]
 mod tests {
     use crate::{Engine, QueryResult};
-    use sql_storage::Value;
+    use logical::Value;
 
     fn setup_test_db() -> Engine {
         let mut engine = Engine::new();
@@ -2099,7 +2099,7 @@ mod tests {
 
     #[test]
     fn test_datalog_with_indexed_column() {
-        use sql_storage::Value;
+        use logical::Value;
 
         let mut engine = Engine::new();
 
@@ -2237,7 +2237,7 @@ mod tests {
 
     #[test]
     fn test_datalog_large_dataset_with_index() {
-        use sql_storage::Value;
+        use logical::Value;
 
         let mut engine = Engine::new();
 

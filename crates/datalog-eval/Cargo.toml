@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 datalog-parser = { path = "../datalog-parser" }
 datalog-planner = { path = "../datalog-planner" }
-sql-storage = { path = "../sql-storage" }
+logical = { path = "../logical" }
 
 [dev-dependencies]
 internment = "0.8"

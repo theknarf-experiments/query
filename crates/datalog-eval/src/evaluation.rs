@@ -17,7 +17,7 @@ use datalog_planner::{
     check_program_safety, ground_rule, ground_rule_semi_naive_with_delta, satisfy_body, stratify,
     SafetyError, StratificationError,
 };
-use sql_storage::{DatalogContext, DeltaTracker, InsertError, StorageEngine, StorageError};
+use logical::{DatalogContext, DeltaTracker, InsertError, StorageEngine, StorageError};
 
 /// Errors that can occur during evaluation
 #[derive(Debug, Clone, PartialEq)]
@@ -420,7 +420,7 @@ pub fn evaluate_with_storage<S: StorageEngine>(
 mod tests {
     use super::*;
     use datalog_parser::{Atom, Literal, Symbol, Term, Value};
-    use sql_storage::MemoryEngine;
+    use logical::MemoryEngine;
 
     fn sym(s: &str) -> Symbol {
         Symbol::new(s.to_string())

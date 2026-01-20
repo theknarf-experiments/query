@@ -4,8 +4,8 @@
 //! that the database handles them correctly.
 
 use db::Engine;
+use logical::Value;
 use proptest::prelude::*;
-use sql_storage::Value;
 
 /// Generate a valid identifier (table or column name)
 fn identifier_strategy() -> impl Strategy<Value = String> {

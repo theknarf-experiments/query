@@ -2,6 +2,11 @@
 
 use std::collections::HashMap;
 
+use logical::{
+    ColumnSchema, DataType as StorageDataType, ExportData, ForeignKeyRef, ImportData, JsonValue,
+    MemoryEngine, ReferentialAction as StorageRefAction, Row, StorageEngine, StorageError,
+    TableConstraint as StorageTableConstraint, TableSchema, Value,
+};
 use sql_parser::{
     AggregateFunc, AlterAction, Assignment, BinaryOp, ColumnDef, Cte, DataType, Expr,
     ForeignKeyRef as ParserFKRef, JoinType, OrderBy, ProcedureStatement,
@@ -10,11 +15,6 @@ use sql_parser::{
     WindowFunc,
 };
 use sql_planner::LogicalPlan;
-use sql_storage::{
-    ColumnSchema, DataType as StorageDataType, ExportData, ForeignKeyRef, ImportData, JsonValue,
-    MemoryEngine, ReferentialAction as StorageRefAction, Row, StorageEngine, StorageError,
-    TableConstraint as StorageTableConstraint, TableSchema, Value,
-};
 
 /// CTE context - stores materialized CTE results during query execution
 #[derive(Default, Clone)]
@@ -4952,7 +4952,7 @@ mod tests {
 
         // Get schema and verify DATE type
         let schema = engine.storage.get_schema("events").unwrap();
-        assert_eq!(schema.columns[1].data_type, sql_storage::DataType::Date);
+        assert_eq!(schema.columns[1].data_type, logical::DataType::Date);
     }
 
     #[test]
@@ -4965,10 +4965,7 @@ mod tests {
 
         // Get schema and verify TIMESTAMP type
         let schema = engine.storage.get_schema("logs").unwrap();
-        assert_eq!(
-            schema.columns[1].data_type,
-            sql_storage::DataType::Timestamp
-        );
+        assert_eq!(schema.columns[1].data_type, logical::DataType::Timestamp);
     }
 
     #[test]
@@ -4981,7 +4978,7 @@ mod tests {
 
         // Get schema and verify TIME type
         let schema = engine.storage.get_schema("schedules").unwrap();
-        assert_eq!(schema.columns[1].data_type, sql_storage::DataType::Time);
+        assert_eq!(schema.columns[1].data_type, logical::DataType::Time);
     }
 
     #[test]

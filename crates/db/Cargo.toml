@@ -7,7 +7,7 @@ edition = "2021"
 # Re-export all components
 sql-parser = { path = "../sql-parser" }
 sql-planner = { path = "../sql-planner" }
-sql-storage = { path = "../sql-storage" }
+logical = { path = "../logical" }
 sql-engine = { path = "../sql-engine" }
 
 # I/O

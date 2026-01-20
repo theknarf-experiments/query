@@ -3,18 +3,20 @@ resolver = "2"
 members = [
     # Core types
     "crates/json-value",
+    # Storage layer
+    "crates/storage",
+    "crates/logical",
     # SQL frontend
     "crates/sql-parser",
     "crates/sql-planner",
-    "crates/sql-storage",
     "crates/sql-engine",
-    # Top-level database crate
-    "crates/db",
-    "crates/sql-tests",
     # Datalog frontend
     "crates/datalog-parser",
     "crates/datalog-planner",
     "crates/datalog-eval",
+    # Top-level database crate
+    "crates/db",
+    "crates/sql-tests",
 ]
 
 [workspace.package]
@@ -32,10 +34,13 @@ internment = "0.8"
 # Core types
 json-value = { path = "crates/json-value" }
 
+# Storage layer
+storage = { path = "crates/storage" }
+logical = { path = "crates/logical" }
+
 # SQL crates
 sql-parser = { path = "crates/sql-parser" }
 sql-planner = { path = "crates/sql-planner" }
-sql-storage = { path = "crates/sql-storage" }
 sql-engine = { path = "crates/sql-engine" }
 
 # Top-level crate

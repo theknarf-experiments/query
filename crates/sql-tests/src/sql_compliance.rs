@@ -6,7 +6,7 @@
 //! Reference: ISO/IEC 9075 (SQL standard)
 
 use db::Engine;
-use sql_storage::Value;
+use logical::Value;
 
 /// Helper to run a query and get results
 fn query_rows(engine: &mut Engine, sql: &str) -> Vec<Vec<Value>> {

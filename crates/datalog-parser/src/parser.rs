@@ -314,11 +314,45 @@ pub fn parse_query(input: &str, src: SrcId) -> Result<Query, Vec<ParseError>> {
 mod tests {
     use super::*;
 
+    // ===== Lexer Tests =====
+
     #[test]
     fn test_lex_fact() {
         let result = lex("parent(john, mary).");
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn test_lex_with_whitespace() {
+        let result = lex("  parent( john ,  mary ) . ");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_lex_numbers() {
+        let result = lex("age(john, 30).");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_lex_float() {
+        let result = lex("weight(item, 3.14).");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_lex_negative_number() {
+        let result = lex("temp(room, -5).");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_lex_string() {
+        let result = lex("name(person, \"John Doe\").");
+        assert!(result.is_ok());
+    }
+
+    // ===== Fact Parsing Tests =====
 
     #[test]
     fn test_parse_fact() {
@@ -334,6 +368,131 @@ mod tests {
             _ => panic!("Expected fact"),
         }
     }
+
+    #[test]
+    fn test_parse_fact_single_arg() {
+        let result = parse_program("person(john).", SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Fact(f) => {
+                assert_eq!(f.atom.terms.len(), 1);
+            }
+            _ => panic!("Expected fact"),
+        }
+    }
+
+    #[test]
+    fn test_parse_fact_zero_arity() {
+        let result = parse_program("done.", SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Fact(f) => {
+                assert_eq!(f.atom.predicate.as_ref(), "done");
+                assert_eq!(f.atom.terms.len(), 0);
+            }
+            _ => panic!("Expected fact"),
+        }
+    }
+
+    #[test]
+    fn test_parse_fact_with_integer() {
+        let result = parse_program("age(john, 30).", SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Fact(f) => {
+                match &f.atom.terms[1] {
+                    Term::Constant(Value::Integer(n)) => assert_eq!(*n, 30),
+                    _ => panic!("Expected integer"),
+                }
+            }
+            _ => panic!("Expected fact"),
+        }
+    }
+
+    #[test]
+    fn test_parse_fact_with_negative_integer() {
+        let result = parse_program("temp(room, -10).", SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Fact(f) => {
+                match &f.atom.terms[1] {
+                    Term::Constant(Value::Integer(n)) => assert_eq!(*n, -10),
+                    _ => panic!("Expected negative integer"),
+                }
+            }
+            _ => panic!("Expected fact"),
+        }
+    }
+
+    #[test]
+    fn test_parse_fact_with_float() {
+        let result = parse_program("weight(item, 3.14).", SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Fact(f) => {
+                match &f.atom.terms[1] {
+                    Term::Constant(Value::Float(n)) => assert!((*n - 3.14).abs() < 0.001),
+                    _ => panic!("Expected float"),
+                }
+            }
+            _ => panic!("Expected fact"),
+        }
+    }
+
+    #[test]
+    fn test_parse_fact_with_string() {
+        let result = parse_program("name(person, \"John Doe\").", SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Fact(f) => {
+                match &f.atom.terms[1] {
+                    Term::Constant(Value::String(s)) => assert_eq!(s.as_ref(), "John Doe"),
+                    _ => panic!("Expected string"),
+                }
+            }
+            _ => panic!("Expected fact"),
+        }
+    }
+
+    #[test]
+    fn test_parse_fact_with_boolean_true() {
+        let result = parse_program("active(service, true).", SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Fact(f) => {
+                match &f.atom.terms[1] {
+                    Term::Constant(Value::Boolean(b)) => assert!(*b),
+                    _ => panic!("Expected boolean true"),
+                }
+            }
+            _ => panic!("Expected fact"),
+        }
+    }
+
+    #[test]
+    fn test_parse_fact_with_boolean_false() {
+        let result = parse_program("active(service, false).", SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Fact(f) => {
+                match &f.atom.terms[1] {
+                    Term::Constant(Value::Boolean(b)) => assert!(!*b),
+                    _ => panic!("Expected boolean false"),
+                }
+            }
+            _ => panic!("Expected fact"),
+        }
+    }
+
+    // ===== Rule Parsing Tests =====
 
     #[test]
     fn test_parse_rule() {
@@ -367,6 +526,45 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_rule_multiple_body_literals() {
+        let result = parse_program(
+            "result(X, Y, Z) :- a(X), b(Y), c(Z), d(X, Y).",
+            SrcId::empty(),
+        );
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Rule(r) => {
+                assert_eq!(r.body.len(), 4);
+            }
+            _ => panic!("Expected rule"),
+        }
+    }
+
+    #[test]
+    fn test_parse_rule_with_underscore_variable() {
+        let result = parse_program("has_child(X) :- parent(X, _).", SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Rule(r) => {
+                match &r.body[0] {
+                    Literal::Positive(atom) => {
+                        match &atom.terms[1] {
+                            Term::Variable(v) => assert!(v.as_ref().starts_with('_')),
+                            _ => panic!("Expected variable"),
+                        }
+                    }
+                    _ => panic!("Expected positive literal"),
+                }
+            }
+            _ => panic!("Expected rule"),
+        }
+    }
+
+    // ===== Query Parsing Tests =====
+
+    #[test]
     fn test_parse_query() {
         let result = parse_program("?- ancestor(X, mary).", SrcId::empty());
         assert!(result.is_ok());
@@ -380,6 +578,27 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_query_multiple_literals() {
+        let result = parse_program("?- parent(X, Y), age(Y, A), A > 18.", SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Query(q) => {
+                assert_eq!(q.body.len(), 3);
+            }
+            _ => panic!("Expected query"),
+        }
+    }
+
+    #[test]
+    fn test_parse_query_ground() {
+        let result = parse_program("?- parent(john, mary).", SrcId::empty());
+        assert!(result.is_ok());
+    }
+
+    // ===== Constraint Parsing Tests =====
+
+    #[test]
     fn test_parse_constraint() {
         let result = parse_program(":- unsafe(X).", SrcId::empty());
         assert!(result.is_ok());
@@ -391,6 +610,21 @@ mod tests {
             _ => panic!("Expected constraint"),
         }
     }
+
+    #[test]
+    fn test_parse_constraint_multiple_literals() {
+        let result = parse_program(":- edge(X, Y), edge(Y, X), X != Y.", SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Constraint(c) => {
+                assert_eq!(c.body.len(), 3);
+            }
+            _ => panic!("Expected constraint"),
+        }
+    }
+
+    // ===== Negation Parsing Tests =====
 
     #[test]
     fn test_parse_negation() {
@@ -407,6 +641,26 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_multiple_negations() {
+        let result = parse_program(
+            "valid(X) :- item(X), not blocked(X), not expired(X).",
+            SrcId::empty(),
+        );
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Rule(r) => {
+                assert_eq!(r.body.len(), 3);
+                assert!(r.body[1].is_negative());
+                assert!(r.body[2].is_negative());
+            }
+            _ => panic!("Expected rule"),
+        }
+    }
+
+    // ===== Comparison Parsing Tests =====
+
+    #[test]
     fn test_parse_comparison() {
         let result = parse_program("big(X) :- size(X, N), N > 100.", SrcId::empty());
         assert!(result.is_ok());
@@ -418,5 +672,187 @@ mod tests {
             }
             _ => panic!("Expected rule"),
         }
+    }
+
+    #[test]
+    fn test_parse_comparison_less_than() {
+        let result = parse_program("small(X) :- size(X, N), N < 100.", SrcId::empty());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_comparison_less_or_equal() {
+        let result = parse_program("small(X) :- size(X, N), N <= 100.", SrcId::empty());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_comparison_greater_or_equal() {
+        let result = parse_program("big(X) :- size(X, N), N >= 100.", SrcId::empty());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_comparison_both_variables() {
+        let result = parse_program("different(X, Y) :- pair(X, Y), X != Y.", SrcId::empty());
+        assert!(result.is_ok());
+    }
+
+    // ===== Compound Term Parsing Tests =====
+
+    #[test]
+    fn test_parse_compound_term() {
+        let result = parse_program("has(john, item(sword, 10)).", SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Fact(f) => {
+                match &f.atom.terms[1] {
+                    Term::Compound(functor, args) => {
+                        assert_eq!(functor.as_ref(), "item");
+                        assert_eq!(args.len(), 2);
+                    }
+                    _ => panic!("Expected compound term"),
+                }
+            }
+            _ => panic!("Expected fact"),
+        }
+    }
+
+    #[test]
+    fn test_parse_nested_compound_term() {
+        let result = parse_program("data(wrapper(inner(x))).", SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Fact(f) => {
+                match &f.atom.terms[0] {
+                    Term::Compound(functor, args) => {
+                        assert_eq!(functor.as_ref(), "wrapper");
+                        match &args[0] {
+                            Term::Compound(inner_functor, _) => {
+                                assert_eq!(inner_functor.as_ref(), "inner");
+                            }
+                            _ => panic!("Expected nested compound"),
+                        }
+                    }
+                    _ => panic!("Expected compound term"),
+                }
+            }
+            _ => panic!("Expected fact"),
+        }
+    }
+
+    #[test]
+    fn test_parse_compound_with_variable() {
+        let result = parse_program("match(item(X, Y)) :- inventory(item(X, Y)).", SrcId::empty());
+        assert!(result.is_ok());
+    }
+
+    // ===== Arithmetic Parsing Tests =====
+
+    #[test]
+    fn test_parse_arithmetic_addition() {
+        let result = parse_program("sum(X, Y, X + Y) :- num(X), num(Y).", SrcId::empty());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_arithmetic_subtraction() {
+        let result = parse_program("diff(X, Y, X - Y) :- num(X), num(Y).", SrcId::empty());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_arithmetic_multiplication() {
+        let result = parse_program("prod(X, Y, X * Y) :- num(X), num(Y).", SrcId::empty());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_arithmetic_division() {
+        let result = parse_program("quot(X, Y, X / Y) :- num(X), num(Y).", SrcId::empty());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_arithmetic_complex() {
+        let result = parse_program("calc(X, Y, Z, X + Y * Z) :- num(X), num(Y), num(Z).", SrcId::empty());
+        assert!(result.is_ok());
+    }
+
+    // ===== Multiple Statement Parsing Tests =====
+
+    #[test]
+    fn test_parse_multiple_facts() {
+        let result = parse_program(
+            "parent(john, mary). parent(mary, sue). parent(bob, alice).",
+            SrcId::empty(),
+        );
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        assert_eq!(program.statements.len(), 3);
+    }
+
+    #[test]
+    fn test_parse_mixed_statements() {
+        let input = r#"
+            parent(john, mary).
+            ancestor(X, Y) :- parent(X, Y).
+            ancestor(X, Z) :- parent(X, Y), ancestor(Y, Z).
+            :- ancestor(X, X).
+            ?- ancestor(john, Who).
+        "#;
+        let result = parse_program(input, SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        assert_eq!(program.statements.len(), 5);
+    }
+
+    // ===== Edge Cases and Error Handling =====
+
+    #[test]
+    fn test_parse_empty_program() {
+        let result = parse_program("", SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        assert_eq!(program.statements.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_whitespace_only() {
+        // Note: Parser may return error or empty program for whitespace-only input
+        // depending on implementation. We accept either behavior.
+        let result = parse_program("   \n\t  ", SrcId::empty());
+        if let Ok(program) = result {
+            assert_eq!(program.statements.len(), 0);
+        }
+        // If it errors, that's also acceptable
+    }
+
+    #[test]
+    fn test_parse_missing_dot() {
+        let result = parse_program("parent(john, mary)", SrcId::empty());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_invalid_rule() {
+        let result = parse_program("ancestor(X, Y) :- .", SrcId::empty());
+        assert!(result.is_err());
+    }
+
+    // ===== Unicode and Special Characters =====
+
+    #[test]
+    fn test_parse_underscores_in_names() {
+        let result = parse_program("has_parent(john_doe, mary_doe).", SrcId::empty());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_numbers_in_names() {
+        let result = parse_program("item1(value2).", SrcId::empty());
+        assert!(result.is_ok());
     }
 }

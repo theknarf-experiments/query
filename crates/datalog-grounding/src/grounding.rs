@@ -1224,4 +1224,253 @@ mod tests {
         // Starting positions: 0, 1, 2, ..., 14 (14+6=20)
         assert_eq!(results.len(), 15);
     }
+
+    // ===== Additional Edge Case Tests =====
+
+    #[test]
+    fn test_ground_rule_same_variable_multiple_positions() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(make_atom("edge", vec![atom_term("a"), atom_term("a")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("edge", vec![atom_term("a"), atom_term("b")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("edge", vec![atom_term("b"), atom_term("b")]), &mut storage)
+            .unwrap();
+
+        // Rule: self_loop(X) :- edge(X, X).
+        let rule = make_rule(
+            make_atom("self_loop", vec![var_term("X")]),
+            vec![Literal::Positive(make_atom("edge", vec![var_term("X"), var_term("X")]))],
+        );
+
+        let results = ground_rule(&rule, &db, &storage);
+
+        // Should find self_loop(a) and self_loop(b) - the self loops
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_ground_rule_negation_no_match() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(make_atom("bird", vec![atom_term("tweety")]), &mut storage)
+            .unwrap();
+
+        // Rule: mammal(X) :- not bird(X).
+        // Since only tweety exists and is a bird, no mammals
+        let rule = make_rule(
+            make_atom("mammal", vec![var_term("X")]),
+            vec![Literal::Negative(make_atom("bird", vec![var_term("X")]))],
+        );
+
+        let results = ground_rule(&rule, &db, &storage);
+
+        // No results - we can't prove something is NOT a bird
+        // unless we have a closed world assumption with a finite domain
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_ground_rule_join_same_predicate() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(make_atom("knows", vec![atom_term("a"), atom_term("b")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("knows", vec![atom_term("b"), atom_term("c")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("knows", vec![atom_term("a"), atom_term("c")]), &mut storage)
+            .unwrap();
+
+        // Rule: friend_of_friend(X, Z) :- knows(X, Y), knows(Y, Z).
+        let rule = make_rule(
+            make_atom("friend_of_friend", vec![var_term("X"), var_term("Z")]),
+            vec![
+                Literal::Positive(make_atom("knows", vec![var_term("X"), var_term("Y")])),
+                Literal::Positive(make_atom("knows", vec![var_term("Y"), var_term("Z")])),
+            ],
+        );
+
+        let results = ground_rule(&rule, &db, &storage);
+
+        // a knows b, b knows c -> friend_of_friend(a, c)
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].terms[0], atom_term("a"));
+        assert_eq!(results[0].terms[1], atom_term("c"));
+    }
+
+    #[test]
+    fn test_ground_rule_multiple_same_variable() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(
+            make_atom("triple", vec![atom_term("a"), atom_term("a"), atom_term("a")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("triple", vec![atom_term("a"), atom_term("b"), atom_term("c")]),
+            &mut storage,
+        )
+        .unwrap();
+
+        // Rule: same_all(X) :- triple(X, X, X).
+        let rule = make_rule(
+            make_atom("same_all", vec![var_term("X")]),
+            vec![Literal::Positive(make_atom(
+                "triple",
+                vec![var_term("X"), var_term("X"), var_term("X")],
+            ))],
+        );
+
+        let results = ground_rule(&rule, &db, &storage);
+
+        // Only triple(a, a, a) matches
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].terms[0], atom_term("a"));
+    }
+
+    #[test]
+    fn test_ground_rule_four_literals() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(make_atom("step", vec![int_term(0), int_term(1)]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("step", vec![int_term(1), int_term(2)]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("step", vec![int_term(2), int_term(3)]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("step", vec![int_term(3), int_term(4)]), &mut storage)
+            .unwrap();
+
+        // Rule: path4(A, E) :- step(A, B), step(B, C), step(C, D), step(D, E).
+        let rule = make_rule(
+            make_atom("path4", vec![var_term("A"), var_term("E")]),
+            vec![
+                Literal::Positive(make_atom("step", vec![var_term("A"), var_term("B")])),
+                Literal::Positive(make_atom("step", vec![var_term("B"), var_term("C")])),
+                Literal::Positive(make_atom("step", vec![var_term("C"), var_term("D")])),
+                Literal::Positive(make_atom("step", vec![var_term("D"), var_term("E")])),
+            ],
+        );
+
+        let results = ground_rule(&rule, &db, &storage);
+
+        // Only 0 -> 1 -> 2 -> 3 -> 4
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].terms[0], int_term(0));
+        assert_eq!(results[0].terms[1], int_term(4));
+    }
+
+    #[test]
+    fn test_ground_rule_negation_all_filtered() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(make_atom("person", vec![atom_term("john")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("person", vec![atom_term("mary")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("blocked", vec![atom_term("john")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("blocked", vec![atom_term("mary")]), &mut storage)
+            .unwrap();
+
+        // Rule: allowed(X) :- person(X), not blocked(X).
+        let rule = make_rule(
+            make_atom("allowed", vec![var_term("X")]),
+            vec![
+                Literal::Positive(make_atom("person", vec![var_term("X")])),
+                Literal::Negative(make_atom("blocked", vec![var_term("X")])),
+            ],
+        );
+
+        let results = ground_rule(&rule, &db, &storage);
+
+        // All people are blocked
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_satisfy_body_with_different_predicates() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(make_atom("person", vec![atom_term("john")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("age", vec![atom_term("john"), int_term(30)]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("city", vec![atom_term("john"), atom_term("nyc")]), &mut storage)
+            .unwrap();
+
+        // Body: person(X), age(X, A), city(X, C).
+        let body = vec![
+            Literal::Positive(make_atom("person", vec![var_term("X")])),
+            Literal::Positive(make_atom("age", vec![var_term("X"), var_term("A")])),
+            Literal::Positive(make_atom("city", vec![var_term("X"), var_term("C")])),
+        ];
+
+        let results = satisfy_body(&body, &db, &storage);
+
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_ground_rule_cartesian_product() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(make_atom("a", vec![atom_term("x")]), &mut storage).unwrap();
+        db.insert(make_atom("a", vec![atom_term("y")]), &mut storage).unwrap();
+        db.insert(make_atom("b", vec![atom_term("1")]), &mut storage).unwrap();
+        db.insert(make_atom("b", vec![atom_term("2")]), &mut storage).unwrap();
+
+        // Rule: pair(X, Y) :- a(X), b(Y).
+        // No shared variables - cartesian product
+        let rule = make_rule(
+            make_atom("pair", vec![var_term("X"), var_term("Y")]),
+            vec![
+                Literal::Positive(make_atom("a", vec![var_term("X")])),
+                Literal::Positive(make_atom("b", vec![var_term("Y")])),
+            ],
+        );
+
+        let results = ground_rule(&rule, &db, &storage);
+
+        // 2 * 2 = 4 pairs
+        assert_eq!(results.len(), 4);
+    }
+
+    #[test]
+    fn test_ground_rule_mixed_constants_and_variables() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(
+            make_atom("rel", vec![atom_term("a"), atom_term("b"), atom_term("c")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("rel", vec![atom_term("a"), atom_term("x"), atom_term("y")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("rel", vec![atom_term("d"), atom_term("b"), atom_term("c")]),
+            &mut storage,
+        )
+        .unwrap();
+
+        // Rule: matched(X, Z) :- rel(a, X, Z).
+        // First argument is constant
+        let rule = make_rule(
+            make_atom("matched", vec![var_term("X"), var_term("Z")]),
+            vec![Literal::Positive(make_atom(
+                "rel",
+                vec![atom_term("a"), var_term("X"), var_term("Z")],
+            ))],
+        );
+
+        let results = ground_rule(&rule, &db, &storage);
+
+        // Only rel(a, b, c) and rel(a, x, y) match
+        assert_eq!(results.len(), 2);
+    }
 }

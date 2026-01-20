@@ -262,7 +262,7 @@ pub fn stratify(rules: &[Rule]) -> Result<Stratification, StratificationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datalog_parser::{Atom, Literal, Rule};
+    use datalog_parser::{Atom, Literal, Rule, Value};
 
     fn sym(s: &str) -> Symbol {
         Symbol::new(s.to_string())
@@ -272,6 +272,10 @@ mod tests {
         datalog_parser::Term::Variable(sym(name))
     }
 
+    fn atom_term(name: &str) -> datalog_parser::Term {
+        datalog_parser::Term::Constant(Value::Atom(sym(name)))
+    }
+
     fn atom(pred: &str, terms: Vec<datalog_parser::Term>) -> Atom {
         Atom {
             predicate: sym(pred),
@@ -279,25 +283,31 @@ mod tests {
         }
     }
 
+    fn make_rule(head: Atom, body: Vec<Literal>) -> Rule {
+        Rule { head, body }
+    }
+
+    // ===== Basic Stratification Tests =====
+
     #[test]
     fn test_no_negation_single_stratum() {
         // ancestor(X, Y) :- parent(X, Y).
         // ancestor(X, Z) :- ancestor(X, Y), parent(Y, Z).
         let rules = vec![
-            Rule {
-                head: atom("ancestor", vec![var_term("X"), var_term("Y")]),
-                body: vec![Literal::Positive(atom(
+            make_rule(
+                atom("ancestor", vec![var_term("X"), var_term("Y")]),
+                vec![Literal::Positive(atom(
                     "parent",
                     vec![var_term("X"), var_term("Y")],
                 ))],
-            },
-            Rule {
-                head: atom("ancestor", vec![var_term("X"), var_term("Z")]),
-                body: vec![
+            ),
+            make_rule(
+                atom("ancestor", vec![var_term("X"), var_term("Z")]),
+                vec![
                     Literal::Positive(atom("ancestor", vec![var_term("X"), var_term("Y")])),
                     Literal::Positive(atom("parent", vec![var_term("Y"), var_term("Z")])),
                 ],
-            },
+            ),
         ];
 
         let result = stratify(&rules).unwrap();
@@ -308,13 +318,13 @@ mod tests {
     #[test]
     fn test_negation_two_strata() {
         // not_parent(X) :- person(X), not parent(X, _).
-        let rules = vec![Rule {
-            head: atom("not_parent", vec![var_term("X")]),
-            body: vec![
+        let rules = vec![make_rule(
+            atom("not_parent", vec![var_term("X")]),
+            vec![
                 Literal::Positive(atom("person", vec![var_term("X")])),
                 Literal::Negative(atom("parent", vec![var_term("X"), var_term("_Y")])),
             ],
-        }];
+        )];
 
         let result = stratify(&rules).unwrap();
         // parent should be in stratum 0, not_parent in stratum 1
@@ -323,19 +333,21 @@ mod tests {
         assert_eq!(*result.predicate_strata.get(&sym("not_parent")).unwrap(), 1);
     }
 
+    // ===== Cycle Detection Tests =====
+
     #[test]
     fn test_cycle_through_negation_error() {
         // p(X) :- not q(X).
         // q(X) :- not p(X).
         let rules = vec![
-            Rule {
-                head: atom("p", vec![var_term("X")]),
-                body: vec![Literal::Negative(atom("q", vec![var_term("X")]))],
-            },
-            Rule {
-                head: atom("q", vec![var_term("X")]),
-                body: vec![Literal::Negative(atom("p", vec![var_term("X")]))],
-            },
+            make_rule(
+                atom("p", vec![var_term("X")]),
+                vec![Literal::Negative(atom("q", vec![var_term("X")]))],
+            ),
+            make_rule(
+                atom("q", vec![var_term("X")]),
+                vec![Literal::Negative(atom("p", vec![var_term("X")]))],
+            ),
         ];
 
         let result = stratify(&rules);
@@ -344,5 +356,258 @@ mod tests {
             Err(StratificationError::CycleThroughNegation(_)) => {}
             _ => panic!("Expected CycleThroughNegation error"),
         }
+    }
+
+    #[test]
+    fn test_positive_cycle_ok() {
+        // p(X) :- q(X).
+        // q(X) :- p(X).
+        // Positive cycles are allowed
+        let rules = vec![
+            make_rule(
+                atom("p", vec![var_term("X")]),
+                vec![Literal::Positive(atom("q", vec![var_term("X")]))],
+            ),
+            make_rule(
+                atom("q", vec![var_term("X")]),
+                vec![Literal::Positive(atom("p", vec![var_term("X")]))],
+            ),
+        ];
+
+        let result = stratify(&rules);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_self_negation_error() {
+        // UNSTRATIFIABLE: p(X) :- not p(X).
+        let rules = vec![make_rule(
+            atom("p", vec![var_term("X")]),
+            vec![Literal::Negative(atom("p", vec![var_term("X")]))],
+        )];
+
+        let result = stratify(&rules);
+        assert!(result.is_err());
+    }
+
+    // ===== Chain of Negations Tests =====
+
+    #[test]
+    fn test_chain_of_negations() {
+        // a(X) :- base(X).
+        // b(X) :- a(X), not c(X).
+        // c(X) :- base(X).
+        // d(X) :- b(X), not e(X).
+        // e(X) :- base(X).
+        let rules = vec![
+            make_rule(
+                atom("a", vec![var_term("X")]),
+                vec![Literal::Positive(atom("base", vec![var_term("X")]))],
+            ),
+            make_rule(
+                atom("b", vec![var_term("X")]),
+                vec![
+                    Literal::Positive(atom("a", vec![var_term("X")])),
+                    Literal::Negative(atom("c", vec![var_term("X")])),
+                ],
+            ),
+            make_rule(
+                atom("c", vec![var_term("X")]),
+                vec![Literal::Positive(atom("base", vec![var_term("X")]))],
+            ),
+            make_rule(
+                atom("d", vec![var_term("X")]),
+                vec![
+                    Literal::Positive(atom("b", vec![var_term("X")])),
+                    Literal::Negative(atom("e", vec![var_term("X")])),
+                ],
+            ),
+            make_rule(
+                atom("e", vec![var_term("X")]),
+                vec![Literal::Positive(atom("base", vec![var_term("X")]))],
+            ),
+        ];
+
+        let result = stratify(&rules).unwrap();
+        // d depends on negated e (stratum 0), so d is stratum 1
+        // d depends on b, b depends on negated c (stratum 0), so b is stratum 1
+        // d must be >= max(b, e+1) = max(1, 1) = 1, but b needs c computed first
+        assert!(result.num_strata >= 2);
+    }
+
+    #[test]
+    fn test_three_level_stratification() {
+        // level0(X) :- base(X).
+        // level1(X) :- level0(X), not blocked0(X).
+        // level2(X) :- level1(X), not blocked1(X).
+        let rules = vec![
+            make_rule(
+                atom("level0", vec![var_term("X")]),
+                vec![Literal::Positive(atom("base", vec![var_term("X")]))],
+            ),
+            make_rule(
+                atom("level1", vec![var_term("X")]),
+                vec![
+                    Literal::Positive(atom("level0", vec![var_term("X")])),
+                    Literal::Negative(atom("blocked0", vec![var_term("X")])),
+                ],
+            ),
+            make_rule(
+                atom("level2", vec![var_term("X")]),
+                vec![
+                    Literal::Positive(atom("level1", vec![var_term("X")])),
+                    Literal::Negative(atom("blocked1", vec![var_term("X")])),
+                ],
+            ),
+        ];
+
+        let result = stratify(&rules).unwrap();
+        // level0: stratum 0
+        // level1: stratum 1 (depends on not blocked0)
+        // level2: stratum 2 (depends on level1 and not blocked1)
+        assert!(result.num_strata >= 2);
+        assert!(
+            result.predicate_strata.get(&sym("level2")).unwrap()
+                > result.predicate_strata.get(&sym("level0")).unwrap()
+        );
+    }
+
+    // ===== Rules by Stratum Tests =====
+
+    #[test]
+    fn test_rules_by_stratum() {
+        // Rule in stratum 0
+        // Rule in stratum 1
+        let rules = vec![
+            make_rule(
+                atom("base", vec![var_term("X")]),
+                vec![Literal::Positive(atom("input", vec![var_term("X")]))],
+            ),
+            make_rule(
+                atom("derived", vec![var_term("X")]),
+                vec![
+                    Literal::Positive(atom("input", vec![var_term("X")])),
+                    Literal::Negative(atom("base", vec![var_term("X")])),
+                ],
+            ),
+        ];
+
+        let result = stratify(&rules).unwrap();
+
+        // Check rules are organized by stratum
+        assert_eq!(result.rules_by_stratum.len(), result.num_strata);
+
+        // Stratum 0 should have the base rule
+        let stratum0_preds: Vec<_> = result.rules_by_stratum[0]
+            .iter()
+            .map(|r| r.head.predicate)
+            .collect();
+        assert!(stratum0_preds.contains(&sym("base")));
+    }
+
+    // ===== Empty and Edge Cases =====
+
+    #[test]
+    fn test_empty_program() {
+        let rules: Vec<Rule> = vec![];
+        let result = stratify(&rules).unwrap();
+        assert_eq!(result.num_strata, 0);
+        assert!(result.rules_by_stratum.is_empty());
+    }
+
+    #[test]
+    fn test_single_fact_rule() {
+        // fact(a).
+        let rules = vec![make_rule(atom("fact", vec![atom_term("a")]), vec![])];
+
+        let result = stratify(&rules).unwrap();
+        assert_eq!(result.num_strata, 1);
+    }
+
+    #[test]
+    fn test_multiple_negations_same_rule() {
+        // p(X) :- a(X), not b(X), not c(X), not d(X).
+        let rules = vec![make_rule(
+            atom("p", vec![var_term("X")]),
+            vec![
+                Literal::Positive(atom("a", vec![var_term("X")])),
+                Literal::Negative(atom("b", vec![var_term("X")])),
+                Literal::Negative(atom("c", vec![var_term("X")])),
+                Literal::Negative(atom("d", vec![var_term("X")])),
+            ],
+        )];
+
+        let result = stratify(&rules).unwrap();
+        // p depends on negations of b, c, d - all at stratum 0
+        // So p is at stratum 1
+        assert_eq!(*result.predicate_strata.get(&sym("p")).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_diamond_dependency() {
+        // Diamond: a -> b, a -> c, b -> d, c -> d
+        // With negation on the paths
+        // a(X) :- base(X).
+        // b(X) :- a(X), not block_b(X).
+        // c(X) :- a(X), not block_c(X).
+        // d(X) :- b(X), c(X).
+        let rules = vec![
+            make_rule(
+                atom("a", vec![var_term("X")]),
+                vec![Literal::Positive(atom("base", vec![var_term("X")]))],
+            ),
+            make_rule(
+                atom("b", vec![var_term("X")]),
+                vec![
+                    Literal::Positive(atom("a", vec![var_term("X")])),
+                    Literal::Negative(atom("block_b", vec![var_term("X")])),
+                ],
+            ),
+            make_rule(
+                atom("c", vec![var_term("X")]),
+                vec![
+                    Literal::Positive(atom("a", vec![var_term("X")])),
+                    Literal::Negative(atom("block_c", vec![var_term("X")])),
+                ],
+            ),
+            make_rule(
+                atom("d", vec![var_term("X")]),
+                vec![
+                    Literal::Positive(atom("b", vec![var_term("X")])),
+                    Literal::Positive(atom("c", vec![var_term("X")])),
+                ],
+            ),
+        ];
+
+        let result = stratify(&rules).unwrap();
+        // a: stratum 0
+        // b, c: stratum 1 (depend on negations)
+        // d: stratum 1 (depends on b and c positively)
+        assert!(result.predicate_strata.get(&sym("d")).unwrap() >= &1);
+    }
+
+    #[test]
+    fn test_indirect_negative_cycle_error() {
+        // Indirect cycle through negation:
+        // a(X) :- not b(X).
+        // b(X) :- c(X).
+        // c(X) :- not a(X).
+        let rules = vec![
+            make_rule(
+                atom("a", vec![var_term("X")]),
+                vec![Literal::Negative(atom("b", vec![var_term("X")]))],
+            ),
+            make_rule(
+                atom("b", vec![var_term("X")]),
+                vec![Literal::Positive(atom("c", vec![var_term("X")]))],
+            ),
+            make_rule(
+                atom("c", vec![var_term("X")]),
+                vec![Literal::Negative(atom("a", vec![var_term("X")]))],
+            ),
+        ];
+
+        let result = stratify(&rules);
+        assert!(result.is_err());
     }
 }

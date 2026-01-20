@@ -152,66 +152,317 @@ mod tests {
     use datalog_parser::Value;
     use internment::Intern;
 
-    fn make_var(name: &str) -> Term {
+    fn var(name: &str) -> Term {
         Term::Variable(Intern::new(name.to_string()))
     }
 
-    #[allow(dead_code)]
-    fn make_atom_val(name: &str) -> Term {
+    fn atom_const(name: &str) -> Term {
         Term::Constant(Value::Atom(Intern::new(name.to_string())))
     }
 
+    fn make_atom(predicate: &str, terms: Vec<Term>) -> Atom {
+        Atom {
+            predicate: Intern::new(predicate.to_string()),
+            terms,
+        }
+    }
+
+    fn make_rule(head: Atom, body: Vec<Literal>) -> Rule {
+        Rule { head, body }
+    }
+
+    // ===== Basic Safety Tests =====
+
     #[test]
-    fn test_safe_rule() {
+    fn test_safe_rule_all_positive() {
+        // p(X) :- q(X).
+        let rule = make_rule(
+            make_atom("p", vec![var("X")]),
+            vec![Literal::Positive(make_atom("q", vec![var("X")]))],
+        );
+        assert!(check_rule_safety(&rule).is_ok());
+    }
+
+    #[test]
+    fn test_safe_rule_multiple_variables() {
         // ancestor(X, Y) :- parent(X, Y).
-        let rule = Rule {
-            head: Atom {
-                predicate: Intern::new("ancestor".to_string()),
-                terms: vec![make_var("X"), make_var("Y")],
-            },
-            body: vec![Literal::Positive(Atom {
-                predicate: Intern::new("parent".to_string()),
-                terms: vec![make_var("X"), make_var("Y")],
-            })],
-        };
+        let rule = make_rule(
+            make_atom("ancestor", vec![var("X"), var("Y")]),
+            vec![Literal::Positive(make_atom("parent", vec![var("X"), var("Y")]))],
+        );
         assert!(check_rule_safety(&rule).is_ok());
     }
 
     #[test]
-    fn test_unsafe_negation() {
-        // bad(X) :- not good(X). -- X only appears in negation
-        let rule = Rule {
-            head: Atom {
-                predicate: Intern::new("bad".to_string()),
-                terms: vec![make_var("X")],
-            },
-            body: vec![Literal::Negative(Atom {
-                predicate: Intern::new("good".to_string()),
-                terms: vec![make_var("X")],
-            })],
-        };
-        assert!(check_rule_safety(&rule).is_err());
-    }
-
-    #[test]
-    fn test_safe_negation() {
-        // safe(X) :- node(X), not unsafe(X).
-        let rule = Rule {
-            head: Atom {
-                predicate: Intern::new("safe".to_string()),
-                terms: vec![make_var("X")],
-            },
-            body: vec![
-                Literal::Positive(Atom {
-                    predicate: Intern::new("node".to_string()),
-                    terms: vec![make_var("X")],
-                }),
-                Literal::Negative(Atom {
-                    predicate: Intern::new("unsafe".to_string()),
-                    terms: vec![make_var("X")],
-                }),
+    fn test_safe_rule_with_negation() {
+        // p(X) :- q(X), not r(X).
+        let rule = make_rule(
+            make_atom("p", vec![var("X")]),
+            vec![
+                Literal::Positive(make_atom("q", vec![var("X")])),
+                Literal::Negative(make_atom("r", vec![var("X")])),
             ],
-        };
+        );
         assert!(check_rule_safety(&rule).is_ok());
+    }
+
+    // ===== Unsafe Negation Tests =====
+
+    #[test]
+    fn test_unsafe_negation_only() {
+        // UNSAFE: bad(X) :- not good(X).
+        let rule = make_rule(
+            make_atom("bad", vec![var("X")]),
+            vec![Literal::Negative(make_atom("good", vec![var("X")]))],
+        );
+
+        let result = check_rule_safety(&rule);
+        assert!(result.is_err());
+
+        if let Err(SafetyError::UnsafeNegation { variables, .. }) = result {
+            assert_eq!(variables.len(), 1);
+            assert!(variables.contains(&Intern::new("X".to_string())));
+        } else {
+            panic!("Expected UnsafeNegation error");
+        }
+    }
+
+    #[test]
+    fn test_unsafe_variable_in_negation_only() {
+        // UNSAFE: p(X) :- q(X), not r(X, Y).
+        // Y only appears in negated literal
+        let rule = make_rule(
+            make_atom("p", vec![var("X")]),
+            vec![
+                Literal::Positive(make_atom("q", vec![var("X")])),
+                Literal::Negative(make_atom("r", vec![var("X"), var("Y")])),
+            ],
+        );
+
+        let result = check_rule_safety(&rule);
+        assert!(result.is_err());
+
+        if let Err(SafetyError::UnsafeNegation { variables, .. }) = result {
+            assert!(variables.contains(&Intern::new("Y".to_string())));
+        }
+    }
+
+    // ===== Unsafe Head Variable Tests =====
+
+    #[test]
+    fn test_unsafe_head_variable() {
+        // UNSAFE: p(X, Y) :- q(X).
+        // Y appears in head but not in any positive body literal
+        let rule = make_rule(
+            make_atom("p", vec![var("X"), var("Y")]),
+            vec![Literal::Positive(make_atom("q", vec![var("X")]))],
+        );
+
+        let result = check_rule_safety(&rule);
+        assert!(result.is_err());
+
+        if let Err(SafetyError::UnsafeNegation { variables, .. }) = result {
+            assert!(variables.contains(&Intern::new("Y".to_string())));
+        }
+    }
+
+    #[test]
+    fn test_unsafe_head_variable_multiple() {
+        // UNSAFE: p(X, Y, Z) :- q(X).
+        // Y and Z appear in head but not in body
+        let rule = make_rule(
+            make_atom("p", vec![var("X"), var("Y"), var("Z")]),
+            vec![Literal::Positive(make_atom("q", vec![var("X")]))],
+        );
+
+        let result = check_rule_safety(&rule);
+        assert!(result.is_err());
+
+        if let Err(SafetyError::UnsafeNegation { variables, .. }) = result {
+            assert!(variables.len() >= 2);
+        }
+    }
+
+    // ===== Safe with Multiple Positive Literals =====
+
+    #[test]
+    fn test_safe_with_multiple_positive_literals() {
+        // p(X, Y) :- q(X), r(Y), not s(X, Y).
+        let rule = make_rule(
+            make_atom("p", vec![var("X"), var("Y")]),
+            vec![
+                Literal::Positive(make_atom("q", vec![var("X")])),
+                Literal::Positive(make_atom("r", vec![var("Y")])),
+                Literal::Negative(make_atom("s", vec![var("X"), var("Y")])),
+            ],
+        );
+
+        assert!(check_rule_safety(&rule).is_ok());
+    }
+
+    // ===== Compound Term Tests =====
+
+    #[test]
+    fn test_safe_with_compound_terms() {
+        // p(X) :- q(item(X, Y)), not r(item(X, Y)).
+        let rule = make_rule(
+            make_atom("p", vec![var("X")]),
+            vec![
+                Literal::Positive(make_atom(
+                    "q",
+                    vec![Term::Compound(
+                        Intern::new("item".to_string()),
+                        vec![var("X"), var("Y")],
+                    )],
+                )),
+                Literal::Negative(make_atom(
+                    "r",
+                    vec![Term::Compound(
+                        Intern::new("item".to_string()),
+                        vec![var("X"), var("Y")],
+                    )],
+                )),
+            ],
+        );
+
+        assert!(check_rule_safety(&rule).is_ok());
+    }
+
+    #[test]
+    fn test_unsafe_compound_term_variable() {
+        // UNSAFE: p(X) :- q(X), not r(item(Y)).
+        // Y only appears in negated literal within compound term
+        let rule = make_rule(
+            make_atom("p", vec![var("X")]),
+            vec![
+                Literal::Positive(make_atom("q", vec![var("X")])),
+                Literal::Negative(make_atom(
+                    "r",
+                    vec![Term::Compound(Intern::new("item".to_string()), vec![var("Y")])],
+                )),
+            ],
+        );
+
+        let result = check_rule_safety(&rule);
+        assert!(result.is_err());
+    }
+
+    // ===== Anonymous Variable Tests =====
+
+    #[test]
+    fn test_anonymous_variable_safe() {
+        // p(X) :- q(X, _).
+        // Anonymous variables are always safe
+        let rule = make_rule(
+            make_atom("p", vec![var("X")]),
+            vec![Literal::Positive(make_atom("q", vec![var("X"), var("_Y")]))],
+        );
+
+        assert!(check_rule_safety(&rule).is_ok());
+    }
+
+    #[test]
+    fn test_anonymous_variable_in_negation_safe() {
+        // p(X) :- q(X), not r(X, _).
+        // Anonymous in negation is safe (doesn't need to be bound)
+        let rule = make_rule(
+            make_atom("p", vec![var("X")]),
+            vec![
+                Literal::Positive(make_atom("q", vec![var("X")])),
+                Literal::Negative(make_atom("r", vec![var("X"), var("_")])),
+            ],
+        );
+
+        assert!(check_rule_safety(&rule).is_ok());
+    }
+
+    // ===== Program Safety Tests =====
+
+    #[test]
+    fn test_program_safety_all_safe() {
+        let rules = vec![
+            make_rule(
+                make_atom("p", vec![var("X")]),
+                vec![Literal::Positive(make_atom("q", vec![var("X")]))],
+            ),
+            make_rule(
+                make_atom("r", vec![var("X")]),
+                vec![
+                    Literal::Positive(make_atom("s", vec![var("X")])),
+                    Literal::Negative(make_atom("t", vec![var("X")])),
+                ],
+            ),
+        ];
+
+        assert!(check_program_safety(&rules).is_ok());
+    }
+
+    #[test]
+    fn test_program_safety_one_unsafe() {
+        let rules = vec![
+            make_rule(
+                make_atom("p", vec![var("X")]),
+                vec![Literal::Positive(make_atom("q", vec![var("X")]))],
+            ),
+            // This one is unsafe
+            make_rule(
+                make_atom("bad", vec![var("X")]),
+                vec![Literal::Negative(make_atom("good", vec![var("X")]))],
+            ),
+        ];
+
+        let result = check_program_safety(&rules);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_program_safety_empty() {
+        let rules: Vec<Rule> = vec![];
+        assert!(check_program_safety(&rules).is_ok());
+    }
+
+    // ===== Edge Cases =====
+
+    #[test]
+    fn test_ground_rule_safe() {
+        // p(a) :- q(a).
+        // Ground rules are always safe
+        let rule = make_rule(
+            make_atom("p", vec![atom_const("a")]),
+            vec![Literal::Positive(make_atom("q", vec![atom_const("a")]))],
+        );
+
+        assert!(check_rule_safety(&rule).is_ok());
+    }
+
+    #[test]
+    fn test_ground_negation_safe() {
+        // p :- not q(a).
+        // Ground negations are safe
+        let rule = make_rule(
+            make_atom("p", vec![]),
+            vec![Literal::Negative(make_atom("q", vec![atom_const("a")]))],
+        );
+
+        assert!(check_rule_safety(&rule).is_ok());
+    }
+
+    #[test]
+    fn test_empty_body_safe() {
+        // fact(a) :- .
+        // Empty body is safe for ground head
+        let rule = make_rule(make_atom("fact", vec![atom_const("a")]), vec![]);
+
+        assert!(check_rule_safety(&rule).is_ok());
+    }
+
+    #[test]
+    fn test_empty_body_unsafe_variable_head() {
+        // UNSAFE: fact(X) :- .
+        // Empty body with variable in head
+        let rule = make_rule(make_atom("fact", vec![var("X")]), vec![]);
+
+        let result = check_rule_safety(&rule);
+        assert!(result.is_err());
     }
 }

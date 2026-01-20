@@ -1591,4 +1591,658 @@ mod tests {
         let expected = compound_term("pair", vec![atom_term("a"), atom_term("b")]);
         assert!(result.contains(&make_atom("combined", vec![expected]), &storage));
     }
+
+    // ===== Facts-Only Program Tests =====
+
+    #[test]
+    fn test_facts_only_no_rules() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        db.insert(make_atom("fact1", vec![atom_term("a")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("fact2", vec![atom_term("b")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("fact3", vec![atom_term("c")]), &mut storage)
+            .unwrap();
+
+        let rules = vec![]; // No rules!
+
+        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+
+        // Database should remain unchanged - only original facts
+        assert!(result.contains(&make_atom("fact1", vec![atom_term("a")]), &storage));
+        assert!(result.contains(&make_atom("fact2", vec![atom_term("b")]), &storage));
+        assert!(result.contains(&make_atom("fact3", vec![atom_term("c")]), &storage));
+    }
+
+    #[test]
+    fn test_facts_only_with_query() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        db.insert(
+            make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("john"), atom_term("bob")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("mary"), atom_term("alice")]),
+            &mut storage,
+        )
+        .unwrap();
+
+        // Query: parent(john, X)?
+        let query = make_atom("parent", vec![atom_term("john"), var_term("X")]);
+        let results = db.query(&query, &storage);
+
+        assert_eq!(results.len(), 2); // john is parent of mary and bob
+    }
+
+    // ===== Duplicate Facts/Rules Tests =====
+
+    #[test]
+    fn test_duplicate_facts() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        db.insert(make_atom("fact", vec![atom_term("a")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("fact", vec![atom_term("a")]), &mut storage)
+            .unwrap(); // Duplicate!
+        db.insert(make_atom("fact", vec![atom_term("a")]), &mut storage)
+            .unwrap(); // Another duplicate!
+
+        // Query should return only one result (deduplication)
+        let query = make_atom("fact", vec![var_term("X")]);
+        let results = db.query(&query, &storage);
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_duplicate_rules() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        db.insert(
+            make_atom("edge", vec![atom_term("a"), atom_term("b")]),
+            &mut storage,
+        )
+        .unwrap();
+
+        // Same rule twice
+        let rules = vec![
+            Rule {
+                head: make_atom("path", vec![var_term("X"), var_term("Y")]),
+                body: vec![Literal::Positive(make_atom(
+                    "edge",
+                    vec![var_term("X"), var_term("Y")],
+                ))],
+            },
+            Rule {
+                head: make_atom("path", vec![var_term("X"), var_term("Y")]),
+                body: vec![Literal::Positive(make_atom(
+                    "edge",
+                    vec![var_term("X"), var_term("Y")],
+                ))],
+            },
+        ];
+
+        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+
+        // Should work fine, duplicate derivations get deduplicated
+        assert!(result.contains(
+            &make_atom("path", vec![atom_term("a"), atom_term("b")]),
+            &storage
+        ));
+    }
+
+    // ===== Query Tests =====
+
+    #[test]
+    fn test_query_ground_true() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        let fact = make_atom("parent", vec![atom_term("john"), atom_term("mary")]);
+        db.insert(fact.clone(), &mut storage).unwrap();
+
+        // Ground query should match
+        let results = db.query(&fact, &storage);
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_query_ground_false() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        db.insert(
+            make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
+            &mut storage,
+        )
+        .unwrap();
+
+        // Query for non-existent fact
+        let query = make_atom("parent", vec![atom_term("alice"), atom_term("bob")]);
+        let results = db.query(&query, &storage);
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_query_with_join() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        db.insert(
+            make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("mary"), atom_term("sue")]),
+            &mut storage,
+        )
+        .unwrap();
+
+        // Derive grandparent relationships
+        let rules = vec![Rule {
+            head: make_atom("grandparent", vec![var_term("X"), var_term("Z")]),
+            body: vec![
+                Literal::Positive(make_atom("parent", vec![var_term("X"), var_term("Y")])),
+                Literal::Positive(make_atom("parent", vec![var_term("Y"), var_term("Z")])),
+            ],
+        }];
+
+        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+
+        // Should find: john is grandparent of sue
+        assert!(result.contains(
+            &make_atom("grandparent", vec![atom_term("john"), atom_term("sue")]),
+            &storage
+        ));
+    }
+
+    #[test]
+    fn test_query_multiple_variables() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        db.insert(
+            make_atom("edge", vec![atom_term("a"), atom_term("b")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("edge", vec![atom_term("b"), atom_term("c")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("edge", vec![atom_term("c"), atom_term("d")]),
+            &mut storage,
+        )
+        .unwrap();
+
+        // Query: edge(X, Y)?
+        let query = make_atom("edge", vec![var_term("X"), var_term("Y")]);
+        let results = db.query(&query, &storage);
+
+        assert_eq!(results.len(), 3);
+    }
+
+    // ===== All Datatypes Evaluation Tests =====
+
+    fn int_term(n: i64) -> Term {
+        Term::Constant(Value::Integer(n))
+    }
+
+    fn float_term(f: f64) -> Term {
+        Term::Constant(Value::Float(f))
+    }
+
+    fn bool_term(b: bool) -> Term {
+        Term::Constant(Value::Boolean(b))
+    }
+
+    fn string_term(s: &str) -> Term {
+        Term::Constant(Value::String(sym(s)))
+    }
+
+    #[test]
+    fn test_all_datatypes_in_evaluation() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        // Integer facts
+        db.insert(
+            make_atom("health", vec![atom_term("player"), int_term(100)]),
+            &mut storage,
+        )
+        .unwrap();
+
+        // Float facts
+        db.insert(
+            make_atom("position", vec![atom_term("player"), float_term(3.14)]),
+            &mut storage,
+        )
+        .unwrap();
+
+        // Boolean facts
+        db.insert(
+            make_atom("is_alive", vec![atom_term("player"), bool_term(true)]),
+            &mut storage,
+        )
+        .unwrap();
+
+        // String facts
+        db.insert(
+            make_atom("name", vec![atom_term("player"), string_term("Alice")]),
+            &mut storage,
+        )
+        .unwrap();
+
+        // Compound term facts
+        db.insert(
+            make_atom(
+                "inventory",
+                vec![
+                    atom_term("player"),
+                    compound_term("item", vec![atom_term("sword"), int_term(10)]),
+                ],
+            ),
+            &mut storage,
+        )
+        .unwrap();
+
+        // Rule: has_weapon(P) :- inventory(P, item(sword, Qty)).
+        let rules = vec![Rule {
+            head: make_atom("has_weapon", vec![var_term("P")]),
+            body: vec![Literal::Positive(make_atom(
+                "inventory",
+                vec![
+                    var_term("P"),
+                    compound_term("item", vec![atom_term("sword"), var_term("Qty")]),
+                ],
+            ))],
+        }];
+
+        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+
+        // Verify compound term matching worked
+        assert!(result.contains(&make_atom("has_weapon", vec![atom_term("player")]), &storage));
+
+        // Query with integer
+        let health_query = make_atom("health", vec![var_term("Who"), int_term(100)]);
+        let health_results = result.query(&health_query, &storage);
+        assert_eq!(health_results.len(), 1);
+
+        // Query with boolean
+        let alive_query = make_atom("is_alive", vec![var_term("Who"), bool_term(true)]);
+        let alive_results = result.query(&alive_query, &storage);
+        assert_eq!(alive_results.len(), 1);
+    }
+
+    #[test]
+    fn test_mixed_datatypes_in_rules() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        db.insert(
+            make_atom("player", vec![atom_term("alice"), int_term(100), bool_term(true)]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("player", vec![atom_term("bob"), int_term(0), bool_term(false)]),
+            &mut storage,
+        )
+        .unwrap();
+
+        // Rule: alive_player(Name) :- player(Name, Health, true).
+        let rules = vec![Rule {
+            head: make_atom("alive_player", vec![var_term("Name")]),
+            body: vec![Literal::Positive(make_atom(
+                "player",
+                vec![var_term("Name"), var_term("Health"), bool_term(true)],
+            ))],
+        }];
+
+        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+
+        // Only alice should be alive
+        assert!(result.contains(&make_atom("alive_player", vec![atom_term("alice")]), &storage));
+
+        let query = make_atom("alive_player", vec![var_term("X")]);
+        let results = result.query(&query, &storage);
+        assert_eq!(results.len(), 1);
+    }
+
+    // ===== Multiple Constraint Tests =====
+
+    #[test]
+    fn test_constraint_no_violation() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        db.insert(make_atom("safe", vec![atom_term("a")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("safe", vec![atom_term("b")]), &mut storage)
+            .unwrap();
+
+        // Constraint: :- unsafe(X).
+        let constraints = vec![Constraint {
+            body: vec![Literal::Positive(make_atom("unsafe", vec![var_term("X")]))],
+        }];
+
+        // Should pass - no unsafe facts
+        let result = evaluate(&[], &constraints, db, &mut storage);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_constraint_multiple_violations() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        db.insert(make_atom("unsafe", vec![atom_term("a")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("unsafe", vec![atom_term("b")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("unsafe", vec![atom_term("c")]), &mut storage)
+            .unwrap();
+
+        // Constraint: :- unsafe(X).
+        let constraints = vec![Constraint {
+            body: vec![Literal::Positive(make_atom("unsafe", vec![var_term("X")]))],
+        }];
+
+        let result = evaluate(&[], &constraints, db, &mut storage);
+        assert!(result.is_err());
+
+        if let Err(EvaluationError::ConstraintViolation { violation_count, .. }) = result {
+            assert_eq!(violation_count, 3);
+        } else {
+            panic!("Expected ConstraintViolation error");
+        }
+    }
+
+    #[test]
+    fn test_constraint_with_conjunction() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        db.insert(make_atom("player", vec![atom_term("alice")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("player", vec![atom_term("bob")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("dead", vec![atom_term("alice")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("has_weapon", vec![atom_term("alice")]), &mut storage)
+            .unwrap();
+
+        // Constraint: :- dead(X), has_weapon(X).
+        // (Dead players shouldn't have weapons)
+        let constraints = vec![Constraint {
+            body: vec![
+                Literal::Positive(make_atom("dead", vec![var_term("X")])),
+                Literal::Positive(make_atom("has_weapon", vec![var_term("X")])),
+            ],
+        }];
+
+        let result = evaluate(&[], &constraints, db, &mut storage);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_constraint_with_negation() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        db.insert(make_atom("player", vec![atom_term("alice")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("player", vec![atom_term("bob")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("has_health", vec![atom_term("alice")]), &mut storage)
+            .unwrap();
+        // bob has no health
+
+        // Constraint: :- player(X), not has_health(X).
+        // (All players must have health)
+        let constraints = vec![Constraint {
+            body: vec![
+                Literal::Positive(make_atom("player", vec![var_term("X")])),
+                Literal::Negative(make_atom("has_health", vec![var_term("X")])),
+            ],
+        }];
+
+        let result = evaluate(&[], &constraints, db, &mut storage);
+        assert!(result.is_err());
+
+        if let Err(EvaluationError::ConstraintViolation { violation_count, .. }) = result {
+            assert_eq!(violation_count, 1); // bob violates
+        }
+    }
+
+    #[test]
+    fn test_constraint_after_derivation() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        db.insert(
+            make_atom("edge", vec![atom_term("a"), atom_term("b")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("edge", vec![atom_term("b"), atom_term("c")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(make_atom("blocked", vec![atom_term("a")]), &mut storage)
+            .unwrap();
+
+        // path(X, Y) :- edge(X, Y).
+        // path(X, Z) :- path(X, Y), edge(Y, Z).
+        let rules = vec![
+            Rule {
+                head: make_atom("path", vec![var_term("X"), var_term("Y")]),
+                body: vec![Literal::Positive(make_atom(
+                    "edge",
+                    vec![var_term("X"), var_term("Y")],
+                ))],
+            },
+            Rule {
+                head: make_atom("path", vec![var_term("X"), var_term("Z")]),
+                body: vec![
+                    Literal::Positive(make_atom("path", vec![var_term("X"), var_term("Y")])),
+                    Literal::Positive(make_atom("edge", vec![var_term("Y"), var_term("Z")])),
+                ],
+            },
+        ];
+
+        // Constraint: :- path(X, Y), blocked(X).
+        // (No paths from blocked nodes)
+        let constraints = vec![Constraint {
+            body: vec![
+                Literal::Positive(make_atom("path", vec![var_term("X"), var_term("Y")])),
+                Literal::Positive(make_atom("blocked", vec![var_term("X")])),
+            ],
+        }];
+
+        // Should fail - paths exist from blocked node 'a'
+        let result = evaluate(&rules, &constraints, db, &mut storage);
+        assert!(result.is_err());
+    }
+
+    // ===== Deep Nesting Stress Tests =====
+
+    #[test]
+    fn test_very_deep_nested_compound() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        // Create deeply nested term: nest(nest(nest(nest(nest(value)))))
+        let mut deep_term = atom_term("value");
+        for _ in 0..10 {
+            deep_term = compound_term("nest", vec![deep_term]);
+        }
+
+        db.insert(make_atom("deep", vec![deep_term.clone()]), &mut storage)
+            .unwrap();
+
+        // Query for it
+        let query = make_atom("deep", vec![var_term("X")]);
+        let results = db.query(&query, &storage);
+
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_deep_nesting_in_rules() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        db.insert(make_atom("value", vec![atom_term("a")]), &mut storage)
+            .unwrap();
+
+        // Create rules that progressively wrap the value
+        // level0(X) :- value(X).
+        // level1(wrap(X)) :- level0(X).
+        // level2(wrap(X)) :- level1(X).
+        // ...
+        let mut rules = vec![Rule {
+            head: make_atom("level0", vec![var_term("X")]),
+            body: vec![Literal::Positive(make_atom("value", vec![var_term("X")]))],
+        }];
+
+        for i in 0..5 {
+            let predicate = format!("level{}", i);
+            let next_predicate = format!("level{}", i + 1);
+
+            rules.push(Rule {
+                head: make_atom(&next_predicate, vec![compound_term("wrap", vec![var_term("X")])]),
+                body: vec![Literal::Positive(make_atom(&predicate, vec![var_term("X")]))],
+            });
+        }
+
+        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+
+        // Should derive level5(wrap(wrap(wrap(wrap(wrap(a))))))
+        let mut expected = atom_term("a");
+        for _ in 0..5 {
+            expected = compound_term("wrap", vec![expected]);
+        }
+
+        assert!(result.contains(&make_atom("level5", vec![expected]), &storage));
+    }
+
+    // ===== Negated Compound Term Tests =====
+
+    #[test]
+    fn test_negated_compound_term() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        db.insert(make_atom("item", vec![atom_term("sword")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("item", vec![atom_term("shield")]), &mut storage)
+            .unwrap();
+        db.insert(
+            make_atom(
+                "dangerous",
+                vec![compound_term("property", vec![atom_term("sword"), atom_term("sharp")])],
+            ),
+            &mut storage,
+        )
+        .unwrap();
+
+        // safe_item(X) :- item(X), not dangerous(property(X, sharp)).
+        let rules = vec![Rule {
+            head: make_atom("safe_item", vec![var_term("X")]),
+            body: vec![
+                Literal::Positive(make_atom("item", vec![var_term("X")])),
+                Literal::Negative(make_atom(
+                    "dangerous",
+                    vec![compound_term("property", vec![var_term("X"), atom_term("sharp")])],
+                )),
+            ],
+        }];
+
+        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+
+        // shield is safe (no dangerous(property(shield, sharp)))
+        assert!(result.contains(&make_atom("safe_item", vec![atom_term("shield")]), &storage));
+        // sword is not safe (dangerous(property(sword, sharp)) exists)
+        assert!(!result.contains(&make_atom("safe_item", vec![atom_term("sword")]), &storage));
+    }
+
+    #[test]
+    fn test_nested_compound_in_negation() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        db.insert(make_atom("player", vec![atom_term("alice")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("player", vec![atom_term("bob")]), &mut storage)
+            .unwrap();
+        db.insert(
+            make_atom(
+                "has_item",
+                vec![
+                    atom_term("alice"),
+                    compound_term(
+                        "item",
+                        vec![
+                            atom_term("weapon"),
+                            compound_term("stats", vec![int_term(10), int_term(5)]),
+                        ],
+                    ),
+                ],
+            ),
+            &mut storage,
+        )
+        .unwrap();
+
+        // First, derive who has weapons
+        // has_weapon(P) :- has_item(P, item(weapon, stats(D, W))).
+        // Then: unarmed(P) :- player(P), not has_weapon(P).
+        let rules = vec![
+            Rule {
+                head: make_atom("has_weapon", vec![var_term("P")]),
+                body: vec![Literal::Positive(make_atom(
+                    "has_item",
+                    vec![
+                        var_term("P"),
+                        compound_term(
+                            "item",
+                            vec![
+                                atom_term("weapon"),
+                                compound_term("stats", vec![var_term("D"), var_term("W")]),
+                            ],
+                        ),
+                    ],
+                ))],
+            },
+            Rule {
+                head: make_atom("unarmed", vec![var_term("P")]),
+                body: vec![
+                    Literal::Positive(make_atom("player", vec![var_term("P")])),
+                    Literal::Negative(make_atom("has_weapon", vec![var_term("P")])),
+                ],
+            },
+        ];
+
+        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+
+        // bob is unarmed (no weapon)
+        assert!(result.contains(&make_atom("unarmed", vec![atom_term("bob")]), &storage));
+        // alice is NOT unarmed (has weapon)
+        assert!(!result.contains(&make_atom("unarmed", vec![atom_term("alice")]), &storage));
+    }
 }

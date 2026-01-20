@@ -19,9 +19,8 @@
 //! "#)?;
 //! ```
 
-use datalog_eval::{evaluate, EvaluationError};
+use datalog_eval::{evaluate, satisfy_body, EvaluationError};
 use datalog_parser::{Constraint, Literal, Query, Rule, SrcId, Symbol, Term, Value as DValue};
-use datalog_planner::satisfy_body;
 use logical::DatalogContext;
 use logical::{PredicateSchema, StorageEngine, Value as SValue};
 

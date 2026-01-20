@@ -16,9 +16,10 @@
 //! // Returns: [{X -> john}, {X -> alice}]
 //! ```
 
+use crate::satisfy_body;
+use crate::Substitution;
 use datalog_parser::{Query, Symbol};
-use datalog_planner::satisfy_body;
-use logical::{DatalogContext, StorageEngine, Substitution};
+use logical::{DatalogContext, StorageEngine};
 use std::collections::HashSet;
 
 /// Result of query evaluation - list of substitutions that satisfy the query

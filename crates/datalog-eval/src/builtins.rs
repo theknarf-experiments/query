@@ -17,8 +17,8 @@
 //!
 //! During grounding, built-ins are evaluated to filter or compute values.
 
+use crate::Substitution;
 use datalog_parser::{Atom, Term, Value};
-use logical::Substitution;
 
 /// Comparison operators
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

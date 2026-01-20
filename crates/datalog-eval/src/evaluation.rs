@@ -12,12 +12,10 @@
 //! let result = evaluate(&rules, &constraints, initial_facts)?;
 //! ```
 
+use crate::{ground_rule, ground_rule_semi_naive_with_delta, satisfy_body, DeltaTracker};
 use datalog_parser::{Constraint, Rule};
-use datalog_planner::{
-    check_program_safety, ground_rule, ground_rule_semi_naive_with_delta, satisfy_body, stratify,
-    SafetyError, StratificationError,
-};
-use logical::{DatalogContext, DeltaTracker, InsertError, Runtime, StorageEngine, StorageError};
+use datalog_planner::{check_program_safety, stratify, SafetyError, StratificationError};
+use logical::{DatalogContext, InsertError, Runtime, StorageEngine, StorageError};
 
 /// Errors that can occur during evaluation
 #[derive(Debug, Clone, PartialEq)]

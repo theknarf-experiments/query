@@ -4,10 +4,8 @@
 //! of the system. It re-exports storage types and provides Datalog integration,
 //! as well as the Runtime trait for trigger function execution.
 
-// Datalog adapter modules
+// Datalog adapter module
 pub mod datalog_context;
-pub mod datalog_unification;
-pub mod delta_tracker;
 
 // Runtime module for trigger execution
 pub mod runtime;
@@ -20,11 +18,9 @@ pub use storage::*;
 
 // Re-export Datalog types
 pub use datalog_context::{
-    atom_to_row, create_derived_schema, ensure_derived_table, row_to_atom, DatalogContext,
-    InsertError, InsertOutcome, PredicateSchema,
+    atom_to_row, create_derived_schema, ensure_derived_table, row_to_atom, sql_value_to_term,
+    DatalogContext, InsertError, InsertOutcome, PredicateSchema,
 };
-pub use datalog_unification::{unify, unify_atoms, Substitution};
-pub use delta_tracker::DeltaTracker;
 
 // Re-export Runtime types
 pub use runtime::{NoOpRuntime, Runtime, RuntimeError, TriggerContext, TriggerResult};

@@ -27,7 +27,7 @@
 //! }
 //! ```
 
-use crate::datalog_unification::{unify_atoms, Substitution};
+use crate::{unify_atoms, Substitution};
 use datalog_parser::{Atom, Symbol, Term};
 use std::collections::HashMap;
 

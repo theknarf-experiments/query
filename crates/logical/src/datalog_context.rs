@@ -22,7 +22,6 @@
 //! let results = ctx.query(&pattern_with_variables, &storage);
 //! ```
 
-use crate::datalog_unification::{unify_atoms, Substitution};
 use crate::operations::{insert as insert_row, OperationError};
 use crate::runtime::Runtime;
 use datalog_parser::{Atom, Symbol, Term, Value as DatalogValue};
@@ -231,11 +230,12 @@ impl DatalogContext {
             || self.derived_predicates.contains(predicate)
     }
 
-    /// Query for facts matching a pattern
+    /// Query for rows matching a predicate
     ///
     /// All predicates (EDB and IDB) are queried from storage.
-    /// Uses indexes for O(1) lookups when constants are present.
-    pub fn query<S: StorageEngine>(&self, pattern: &Atom, storage: &S) -> Vec<Substitution> {
+    /// Uses indexes for O(1) lookups when constants are present in the pattern.
+    /// Returns raw rows - caller is responsible for unification.
+    pub fn query<S: StorageEngine>(&self, pattern: &Atom, storage: &S) -> Vec<Row> {
         #[cfg(any(test, feature = "test-utils"))]
         TRACK_GROUND_QUERIES.with(|flag| {
             if flag.get() && is_ground(pattern) {
@@ -258,11 +258,7 @@ impl DatalogContext {
     }
 
     /// Try to query using an index if a constant column has one
-    fn query_via_index<S: StorageEngine>(
-        &self,
-        pattern: &Atom,
-        storage: &S,
-    ) -> Option<Vec<Substitution>> {
+    fn query_via_index<S: StorageEngine>(&self, pattern: &Atom, storage: &S) -> Option<Vec<Row>> {
         let table = pattern.predicate.as_ref();
         let schema = self.schemas.get(&pattern.predicate)?;
 
@@ -275,7 +271,8 @@ impl DatalogContext {
                 if storage.has_index(table, column) {
                     if let Some(indices) = storage.index_lookup(table, column, &sql_value) {
                         let rows = storage.get_rows_by_indices(table, &indices).ok()?;
-                        return Some(self.unify_rows_with_pattern(pattern, &rows));
+                        // Still need to filter by other constants not covered by the index
+                        return Some(self.filter_rows_by_constants(pattern, rows));
                     }
                 }
             }
@@ -283,34 +280,34 @@ impl DatalogContext {
         None // No usable index found
     }
 
-    /// Query by scanning all rows in the table
-    fn query_via_scan<S: StorageEngine>(&self, pattern: &Atom, storage: &S) -> Vec<Substitution> {
+    /// Query by scanning all rows in the table, filtering by constants in pattern
+    fn query_via_scan<S: StorageEngine>(&self, pattern: &Atom, storage: &S) -> Vec<Row> {
         let table = pattern.predicate.as_ref();
 
         if let Ok(rows) = storage.scan(table) {
-            return self.unify_rows_with_pattern(pattern, &rows);
+            return self.filter_rows_by_constants(pattern, rows);
         }
         vec![]
     }
 
-    /// Convert rows to substitutions by unifying with the pattern
-    fn unify_rows_with_pattern(&self, pattern: &Atom, rows: &[Row]) -> Vec<Substitution> {
-        let mut results = Vec::new();
-        for row in rows {
-            // Convert row to atom (handles JSON → compound term conversion)
-            let terms: Vec<Term> = row.iter().map(sql_value_to_term).collect();
-            let fact = Atom {
-                predicate: pattern.predicate,
-                terms,
-            };
-
-            // Try to unify
-            let mut subst = Substitution::new();
-            if unify_atoms(pattern, &fact, &mut subst) {
-                results.push(subst);
-            }
-        }
-        results
+    /// Filter rows to only those matching constants in the pattern
+    fn filter_rows_by_constants(&self, pattern: &Atom, rows: Vec<Row>) -> Vec<Row> {
+        rows.into_iter()
+            .filter(|row| {
+                for (i, term) in pattern.terms.iter().enumerate() {
+                    if let Term::Constant(value) = term {
+                        if i >= row.len() {
+                            return false;
+                        }
+                        let expected = datalog_to_sql_value(value);
+                        if row[i] != expected {
+                            return false;
+                        }
+                    }
+                }
+                true
+            })
+            .collect()
     }
 
     /// Insert a ground fact into storage with trigger support
@@ -1222,12 +1219,9 @@ mod tests {
         let results = db.query(&pattern, &storage);
         assert_eq!(results.len(), 1);
 
-        // Verify the result
-        let name = results[0].get(&Intern::new("Name".to_string())).unwrap();
-        assert_eq!(
-            name,
-            &Term::Constant(Value::Atom(Intern::new("person_42".to_string())))
-        );
+        // Verify the result - row is [id, name]
+        // Name is the second column (index 1)
+        assert_eq!(results[0][1], SqlValue::Text("person_42".to_string()));
     }
 
     #[test]
@@ -1518,9 +1512,9 @@ mod tests {
         let results = db.query(&pattern, &storage);
         assert_eq!(results.len(), 1);
 
-        // The bound variable should be the compound term
-        let subst = &results[0];
-        let bound = subst.apply(&Term::Variable(Intern::new("X".to_string())));
+        // The row should contain the compound term (as JSON)
+        // Convert the row value back to a term to verify
+        let bound = sql_value_to_term(&results[0][0]);
         assert_eq!(bound, compound_term);
     }
 
@@ -1552,7 +1546,8 @@ mod tests {
         let results = db.query(&pattern, &storage);
         assert_eq!(results.len(), 1);
 
-        let bound = results[0].apply(&Term::Variable(Intern::new("X".to_string())));
+        // Convert the row value back to a term to verify
+        let bound = sql_value_to_term(&results[0][0]);
         assert_eq!(bound, term);
     }
 }

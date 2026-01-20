@@ -20,8 +20,9 @@
 //! ```
 
 use crate::builtins;
+use crate::{unify_atoms, Substitution};
 use datalog_parser::{Atom, Literal, Rule, Term};
-use logical::{DatalogContext, StorageEngine, Substitution};
+use logical::{sql_value_to_term, DatalogContext, Row, StorageEngine};
 
 #[cfg(test)]
 #[allow(unused_imports)]
@@ -71,6 +72,26 @@ mod allocation_tracker {
 #[cfg(test)]
 #[global_allocator]
 static GLOBAL: allocation_tracker::CountingAllocator = allocation_tracker::CountingAllocator;
+
+/// Convert rows to substitutions by unifying with the pattern
+fn unify_rows_with_pattern(pattern: &Atom, rows: &[Row]) -> Vec<Substitution> {
+    let mut results = Vec::new();
+    for row in rows {
+        // Convert row to atom (handles JSON → compound term conversion)
+        let terms: Vec<Term> = row.iter().map(sql_value_to_term).collect();
+        let fact = Atom {
+            predicate: pattern.predicate,
+            terms,
+        };
+
+        // Try to unify
+        let mut subst = Substitution::new();
+        if unify_atoms(pattern, &fact, &mut subst) {
+            results.push(subst);
+        }
+    }
+    results
+}
 
 /// Ground a rule: generate all ground instances by substituting variables
 /// For a rule like `ancestor(X, Z) :- parent(X, Y), parent(Y, Z)`
@@ -177,7 +198,8 @@ where
                 };
                 let mut result = Vec::new();
 
-                for atom_subst in db.query(&grounded_atom, storage) {
+                let rows = db.query(&grounded_atom, storage);
+                for atom_subst in unify_rows_with_pattern(&grounded_atom, &rows) {
                     if let Some(combined) = combine_substs(current_subst, &atom_subst) {
                         let mut rest_results = satisfy_body_with_selector_recursive(
                             body,
@@ -287,7 +309,8 @@ fn database_has_match<S: StorageEngine>(db: &DatalogContext, storage: &S, atom: 
     if atom_is_ground(atom) {
         db.contains(atom, storage)
     } else {
-        !db.query(atom, storage).is_empty()
+        let rows = db.query(atom, storage);
+        !unify_rows_with_pattern(atom, &rows).is_empty()
     }
 }
 
@@ -370,7 +393,7 @@ fn satisfy_body_mixed<S: StorageEngine>(
 // DeltaTracker-Based Semi-Naive Evaluation
 // ============================================================================
 
-use logical::DeltaTracker;
+use crate::DeltaTracker;
 
 /// Ground a rule using semi-naive evaluation with lightweight DeltaTracker
 ///
@@ -463,9 +486,10 @@ fn satisfy_body_with_delta_recursive<S: StorageEngine>(
 
                 // Choose data source: delta for this position, full_db for others
                 let matches: Vec<Substitution> = if index == delta_pos {
-                    delta.query(&grounded_atom) // In-memory query!
+                    delta.query(&grounded_atom) // In-memory query (already returns Substitutions)
                 } else {
-                    full_db.query(&grounded_atom, storage) // Storage query
+                    let rows = full_db.query(&grounded_atom, storage);
+                    unify_rows_with_pattern(&grounded_atom, &rows)
                 };
 
                 let mut result = Vec::new();

@@ -116,6 +116,8 @@ pub enum InsertError {
     StorageError(String),
     /// Trigger aborted the operation
     TriggerAbort(String),
+    /// Trigger depth exceeded (infinite recursion prevention)
+    TriggerDepthExceeded { depth: u32, max_depth: u32 },
 }
 
 impl fmt::Display for InsertError {
@@ -140,6 +142,13 @@ impl fmt::Display for InsertError {
             }
             InsertError::TriggerAbort(msg) => {
                 write!(f, "trigger aborted: {}", msg)
+            }
+            InsertError::TriggerDepthExceeded { depth, max_depth } => {
+                write!(
+                    f,
+                    "trigger depth exceeded: depth {} > max {}",
+                    depth, max_depth
+                )
             }
         }
     }
@@ -353,6 +362,9 @@ impl DatalogContext {
             Err(OperationError::Storage(e)) => Err(InsertError::StorageError(format!("{:?}", e))),
             Err(OperationError::Runtime(e)) => Err(InsertError::StorageError(format!("{:?}", e))),
             Err(OperationError::TriggerAbort(msg)) => Err(InsertError::TriggerAbort(msg)),
+            Err(OperationError::TriggerDepthExceeded { depth, max_depth }) => {
+                Err(InsertError::TriggerDepthExceeded { depth, max_depth })
+            }
         }
     }
 

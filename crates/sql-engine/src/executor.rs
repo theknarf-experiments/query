@@ -68,6 +68,8 @@ pub enum ExecError {
     ProcedureAlreadyExists(String),
     /// Procedure parameter count mismatch
     ProcedureArgCountMismatch { expected: usize, got: usize },
+    /// Trigger depth exceeded (infinite recursion prevention)
+    TriggerDepthExceeded { depth: u32, max_depth: u32 },
 }
 
 impl From<StorageError> for ExecError {
@@ -135,6 +137,13 @@ struct FkTriggerInfo {
     parent_column: String,
     on_delete: StorageRefAction,
     on_update: StorageRefAction,
+}
+
+/// Unique constraint trigger info for creating implicit triggers
+struct UniqueConstraintInfo {
+    table: String,
+    columns: Vec<String>,
+    is_primary_key: bool,
 }
 
 /// Database engine that executes queries
@@ -214,6 +223,9 @@ impl Engine {
                 }
                 Err(logical::OperationError::Runtime(e)) => {
                     return Err(ExecError::InvalidExpression(e.to_string()));
+                }
+                Err(logical::OperationError::TriggerDepthExceeded { depth, max_depth }) => {
+                    return Err(ExecError::TriggerDepthExceeded { depth, max_depth });
                 }
             }
 
@@ -493,6 +505,38 @@ impl Engine {
             })
             .collect();
 
+        // Collect unique constraints (column-level)
+        let mut unique_constraints: Vec<UniqueConstraintInfo> = columns
+            .iter()
+            .filter(|c| c.unique || c.primary_key)
+            .map(|c| UniqueConstraintInfo {
+                table: name.to_string(),
+                columns: vec![c.name.clone()],
+                is_primary_key: c.primary_key,
+            })
+            .collect();
+
+        // Collect unique constraints (table-level)
+        for constraint in constraints {
+            match constraint {
+                ParserTableConstraint::PrimaryKey { columns: cols, .. } => {
+                    unique_constraints.push(UniqueConstraintInfo {
+                        table: name.to_string(),
+                        columns: cols.clone(),
+                        is_primary_key: true,
+                    });
+                }
+                ParserTableConstraint::Unique { columns: cols, .. } => {
+                    unique_constraints.push(UniqueConstraintInfo {
+                        table: name.to_string(),
+                        columns: cols.clone(),
+                        is_primary_key: false,
+                    });
+                }
+                _ => {}
+            }
+        }
+
         self.storage.create_table(schema)?;
 
         // Create implicit triggers for FK constraints
@@ -500,7 +544,120 @@ impl Engine {
             self.create_fk_triggers(&fk)?;
         }
 
+        // Create implicit triggers for unique/primary key constraints
+        for uc in unique_constraints {
+            self.create_unique_triggers(&uc)?;
+        }
+
         Ok(QueryResult::Success)
+    }
+
+    /// Create implicit triggers for a unique constraint
+    fn create_unique_triggers(&mut self, uc: &UniqueConstraintInfo) -> Result<(), ExecError> {
+        // Create BEFORE INSERT trigger to check uniqueness
+        self.create_unique_insert_trigger(uc)?;
+
+        // Create BEFORE UPDATE trigger to check uniqueness
+        self.create_unique_update_trigger(uc)?;
+
+        Ok(())
+    }
+
+    /// Create BEFORE INSERT trigger for unique constraint
+    fn create_unique_insert_trigger(&mut self, uc: &UniqueConstraintInfo) -> Result<(), ExecError> {
+        let cols_str = uc.columns.join("_");
+        let constraint_type = if uc.is_primary_key { "pk" } else { "unique" };
+        let func_name = format!("__{}_insert_{}_{}__", constraint_type, uc.table, cols_str);
+        let trigger_name = format!("__{}_insert_{}_{}__", constraint_type, uc.table, cols_str);
+
+        // Build the WHERE clause for checking existing rows
+        let where_parts: Vec<String> = uc
+            .columns
+            .iter()
+            .map(|col| format!("{} = NEW.{}", col, col))
+            .collect();
+        let where_clause = where_parts.join(" AND ");
+
+        // Build the constraint description for error message
+        let constraint_desc = if uc.is_primary_key {
+            format!("PRIMARY KEY ({})", uc.columns.join(", "))
+        } else {
+            format!("UNIQUE ({})", uc.columns.join(", "))
+        };
+
+        // Function body: IF EXISTS (SELECT 1 FROM table WHERE cols = NEW.cols) THEN RAISE ERROR
+        let body = format!(
+            "IF EXISTS (SELECT 1 FROM {} WHERE {}) THEN RAISE ERROR '{}'; RETURN NEW",
+            uc.table, where_clause, constraint_desc
+        );
+
+        // Create function
+        self.storage.create_function(FunctionDef {
+            name: func_name.clone(),
+            params: "[]".to_string(),
+            body,
+            language: "sql".to_string(),
+        })?;
+
+        // Create trigger
+        self.storage.create_trigger(TriggerDef {
+            name: trigger_name,
+            table_name: uc.table.clone(),
+            timing: StorageTriggerTiming::Before,
+            events: vec![StorageTriggerEvent::Insert],
+            function_name: func_name,
+        })?;
+
+        Ok(())
+    }
+
+    /// Create BEFORE UPDATE trigger for unique constraint
+    fn create_unique_update_trigger(&mut self, uc: &UniqueConstraintInfo) -> Result<(), ExecError> {
+        let cols_str = uc.columns.join("_");
+        let constraint_type = if uc.is_primary_key { "pk" } else { "unique" };
+        let func_name = format!("__{}_update_{}_{}__", constraint_type, uc.table, cols_str);
+        let trigger_name = format!("__{}_update_{}_{}__", constraint_type, uc.table, cols_str);
+
+        // Build the WHERE clause for checking existing rows
+        let where_parts: Vec<String> = uc
+            .columns
+            .iter()
+            .map(|col| format!("{} = NEW.{}", col, col))
+            .collect();
+        let where_clause = where_parts.join(" AND ");
+
+        // Build the constraint description for error message
+        let constraint_desc = if uc.is_primary_key {
+            format!("PRIMARY KEY ({})", uc.columns.join(", "))
+        } else {
+            format!("UNIQUE ({})", uc.columns.join(", "))
+        };
+
+        // Function body: check if any OTHER row has the same values
+        // Use IF EXISTS EXCLUDING OLD to skip the row being updated
+        let body = format!(
+            "IF EXISTS EXCLUDING OLD (SELECT 1 FROM {} WHERE {}) THEN RAISE ERROR '{}'; RETURN NEW",
+            uc.table, where_clause, constraint_desc
+        );
+
+        // Create function
+        self.storage.create_function(FunctionDef {
+            name: func_name.clone(),
+            params: "[]".to_string(),
+            body,
+            language: "sql".to_string(),
+        })?;
+
+        // Create trigger
+        self.storage.create_trigger(TriggerDef {
+            name: trigger_name,
+            table_name: uc.table.clone(),
+            timing: StorageTriggerTiming::Before,
+            events: vec![StorageTriggerEvent::Update],
+            function_name: func_name,
+        })?;
+
+        Ok(())
     }
 
     /// Create implicit triggers for a foreign key constraint
@@ -788,6 +945,9 @@ impl Engine {
                         msg
                     )));
                 }
+                Err(OperationError::TriggerDepthExceeded { depth, max_depth }) => {
+                    return Err(ExecError::TriggerDepthExceeded { depth, max_depth });
+                }
             }
         }
         Ok(QueryResult::RowsAffected(count))
@@ -843,6 +1003,9 @@ impl Engine {
                     msg
                 )))
             }
+            Err(OperationError::TriggerDepthExceeded { depth, max_depth }) => {
+                Err(ExecError::TriggerDepthExceeded { depth, max_depth })
+            }
         }
     }
 
@@ -877,6 +1040,9 @@ impl Engine {
                     "Constraint violation: {}",
                     msg
                 )))
+            }
+            Err(OperationError::TriggerDepthExceeded { depth, max_depth }) => {
+                Err(ExecError::TriggerDepthExceeded { depth, max_depth })
             }
         }
     }

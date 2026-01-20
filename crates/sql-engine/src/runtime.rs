@@ -99,6 +99,14 @@ impl SqlRuntime {
                 if let Some(abort_msg) = self.execute_if_not_exists(stmt, context, storage)? {
                     return Ok(TriggerResult::Abort(abort_msg));
                 }
+            } else if upper.starts_with("IF EXISTS EXCLUDING OLD") {
+                // Parse: IF EXISTS EXCLUDING OLD (SELECT ...) THEN RAISE ERROR '...'
+                // This excludes rows matching OLD values from the check
+                if let Some(abort_msg) =
+                    self.execute_if_exists_excluding_old(stmt, context, storage)?
+                {
+                    return Ok(TriggerResult::Abort(abort_msg));
+                }
             } else if upper.starts_with("IF EXISTS") {
                 // Parse: IF EXISTS (SELECT 1 FROM table WHERE col = val) THEN RAISE ERROR '...'
                 if let Some(abort_msg) = self.execute_if_exists(stmt, context, storage)? {
@@ -258,6 +266,122 @@ impl SqlRuntime {
         }
 
         Ok(None)
+    }
+
+    /// Execute IF EXISTS EXCLUDING OLD check for unique constraint on UPDATE
+    /// Format: IF EXISTS EXCLUDING OLD (SELECT 1 FROM table WHERE col = val) THEN RAISE ERROR 'msg'
+    /// This excludes rows that match ALL of the OLD row's values in the specified columns
+    fn execute_if_exists_excluding_old<S: StorageEngine>(
+        &self,
+        stmt: &str,
+        context: &TriggerContext,
+        storage: &mut S,
+    ) -> Result<Option<String>, RuntimeError> {
+        let upper = stmt.to_uppercase();
+
+        // Find the SELECT part between parentheses
+        let select_start = stmt.find('(').ok_or_else(|| {
+            RuntimeError::ExecutionError(
+                "Missing opening parenthesis in IF EXISTS EXCLUDING OLD".to_string(),
+            )
+        })?;
+        let select_end = stmt.find(')').ok_or_else(|| {
+            RuntimeError::ExecutionError(
+                "Missing closing parenthesis in IF EXISTS EXCLUDING OLD".to_string(),
+            )
+        })?;
+
+        let select_stmt = &stmt[select_start + 1..select_end];
+        let exists = self.check_exists_excluding_old(select_stmt, context, storage)?;
+
+        if exists {
+            // Find THEN RAISE ERROR '...'
+            if let Some(then_pos) = upper.find("THEN RAISE ERROR") {
+                let after_then = &stmt[then_pos + 16..];
+                let msg = extract_string_literal(&format!("'{}", after_then), "'")
+                    .unwrap_or_else(|| "Constraint violation".to_string());
+                return Ok(Some(msg));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Check if a SELECT query returns any rows, excluding the OLD row
+    /// Format: SELECT 1 FROM table WHERE col = val
+    fn check_exists_excluding_old<S: StorageEngine>(
+        &self,
+        select_stmt: &str,
+        context: &TriggerContext,
+        storage: &mut S,
+    ) -> Result<bool, RuntimeError> {
+        let upper = select_stmt.to_uppercase();
+
+        // Parse: SELECT 1 FROM table WHERE col = val
+        let from_pos = upper
+            .find("FROM")
+            .ok_or_else(|| RuntimeError::ExecutionError("Missing FROM in SELECT".to_string()))?;
+
+        let after_from = &select_stmt[from_pos + 4..].trim_start();
+        let where_pos = after_from.to_uppercase().find("WHERE");
+
+        let table_name = if let Some(pos) = where_pos {
+            after_from[..pos].trim()
+        } else {
+            after_from.trim()
+        };
+
+        // Get rows from table
+        let rows = storage
+            .scan(table_name)
+            .map_err(|e| RuntimeError::ExecutionError(format!("Scan failed: {:?}", e)))?;
+
+        // If no WHERE clause, just check if table has any rows (excluding OLD)
+        if where_pos.is_none() {
+            if let Some(old_row) = context.old_row {
+                // Exclude old row - count rows that don't match old_row
+                return Ok(rows.iter().any(|row| row != old_row));
+            }
+            return Ok(!rows.is_empty());
+        }
+
+        // Parse WHERE clause
+        let where_clause = &after_from[where_pos.unwrap() + 5..].trim();
+
+        // Get schema for column lookup
+        let schema = storage
+            .get_schema(table_name)
+            .map_err(|e| RuntimeError::ExecutionError(format!("Schema not found: {:?}", e)))?;
+
+        // Parse all WHERE conditions (support AND)
+        let conditions = parse_where_conditions(where_clause, context)?;
+
+        // Check if any row matches (excluding the OLD row)
+        let old_row = context.old_row;
+
+        Ok(rows.iter().any(|row| {
+            // Skip if this row matches the OLD row exactly
+            if let Some(old) = old_row {
+                if row == old {
+                    return false;
+                }
+            }
+
+            // Check if this row matches all WHERE conditions
+            conditions.iter().all(|(col, val)| {
+                if let Some(col_idx) = schema
+                    .columns
+                    .iter()
+                    .position(|c| c.name.eq_ignore_ascii_case(col))
+                {
+                    row.get(col_idx)
+                        .map(|v| values_equal(v, val))
+                        .unwrap_or(false)
+                } else {
+                    false
+                }
+            })
+        }))
     }
 
     /// Check if a SELECT query returns any rows
@@ -620,6 +744,46 @@ fn parse_simple_assignment(
     parse_simple_where(clause, context)
 }
 
+/// Parse WHERE clause with multiple AND conditions
+/// Format: col1 = val1 AND col2 = val2 AND ...
+fn parse_where_conditions(
+    clause: &str,
+    context: &TriggerContext,
+) -> Result<Vec<(String, Value)>, RuntimeError> {
+    let clause = clause.trim();
+    let upper = clause.to_uppercase();
+
+    // Split by AND (case-insensitive)
+    let mut conditions = Vec::new();
+    let mut start = 0;
+
+    loop {
+        // Find next AND
+        let and_pos = upper[start..].find(" AND ");
+
+        let end = if let Some(pos) = and_pos {
+            start + pos
+        } else {
+            clause.len()
+        };
+
+        // Parse this condition
+        let condition = clause[start..end].trim();
+        if !condition.is_empty() {
+            let (col, val) = parse_simple_where(condition, context)?;
+            conditions.push((col, val));
+        }
+
+        if and_pos.is_none() {
+            break;
+        }
+
+        start = end + 5; // Skip " AND "
+    }
+
+    Ok(conditions)
+}
+
 /// Check if two values are equal
 fn values_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
@@ -696,6 +860,8 @@ mod tests {
             old_row: None,
             new_row: Some(&new_row),
             column_names: &["id".to_string(), "name".to_string()],
+            depth: 1,
+            max_depth: 3,
         };
 
         let result = runtime.execute_trigger_function("return_new", context, &mut storage);
@@ -723,6 +889,8 @@ mod tests {
             old_row: None,
             new_row: Some(&new_row),
             column_names: &["id".to_string(), "name".to_string()],
+            depth: 1,
+            max_depth: 3,
         };
 
         let result = runtime.execute_trigger_function("skip_row", context, &mut storage);
@@ -750,6 +918,8 @@ mod tests {
             old_row: None,
             new_row: Some(&new_row),
             column_names: &["id".to_string(), "name".to_string()],
+            depth: 1,
+            max_depth: 3,
         };
 
         let result = runtime.execute_trigger_function("abort_func", context, &mut storage);
@@ -777,6 +947,8 @@ mod tests {
             old_row: None,
             new_row: Some(&new_row),
             column_names: &["id".to_string(), "name".to_string()],
+            depth: 1,
+            max_depth: 3,
         };
 
         let result = runtime.execute_trigger_function("uppercase_name", context, &mut storage);
@@ -801,6 +973,8 @@ mod tests {
             old_row: None,
             new_row: Some(&new_row),
             column_names: &["id".to_string(), "name".to_string()],
+            depth: 1,
+            max_depth: 3,
         };
 
         let result = runtime.execute_trigger_function("nonexistent", context, &mut storage);
@@ -831,6 +1005,8 @@ mod tests {
             old_row: None,
             new_row: Some(&new_row),
             column_names: &["id".to_string(), "name".to_string()],
+            depth: 1,
+            max_depth: 3,
         };
 
         let result = runtime.execute_trigger_function("set_id", context, &mut storage);

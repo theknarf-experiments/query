@@ -3,7 +3,9 @@
 //! This module provides wrapper functions for insert, update, and delete operations
 //! that automatically fire triggers before and after the operation.
 
-use crate::runtime::{Runtime, RuntimeError, TriggerContext, TriggerResult};
+use crate::runtime::{
+    Runtime, RuntimeError, TriggerContext, TriggerResult, DEFAULT_MAX_TRIGGER_DEPTH,
+};
 use storage::{Row, StorageEngine, StorageError, TriggerEvent, TriggerTiming};
 
 /// Error type for triggered operations
@@ -15,6 +17,8 @@ pub enum OperationError {
     Runtime(RuntimeError),
     /// Trigger aborted the operation
     TriggerAbort(String),
+    /// Trigger depth exceeded (infinite recursion prevention)
+    TriggerDepthExceeded { depth: u32, max_depth: u32 },
 }
 
 impl From<StorageError> for OperationError {
@@ -35,6 +39,13 @@ impl std::fmt::Display for OperationError {
             OperationError::Storage(e) => write!(f, "Storage error: {:?}", e),
             OperationError::Runtime(e) => write!(f, "Runtime error: {}", e),
             OperationError::TriggerAbort(msg) => write!(f, "Trigger aborted: {}", msg),
+            OperationError::TriggerDepthExceeded { depth, max_depth } => {
+                write!(
+                    f,
+                    "Trigger depth exceeded: {} > {} (possible infinite recursion)",
+                    depth, max_depth
+                )
+            }
         }
     }
 }
@@ -42,21 +53,46 @@ impl std::fmt::Display for OperationError {
 /// Result type for triggered operations
 pub type OperationResult<T> = Result<T, OperationError>;
 
-/// Insert a row with trigger support
-///
-/// Executes BEFORE INSERT triggers, performs the insert, then executes AFTER INSERT triggers.
-/// BEFORE triggers can modify the row or abort the operation.
-///
-/// # Returns
-/// * `Ok(true)` - Row was inserted
-/// * `Ok(false)` - Row was skipped (BEFORE trigger returned Skip)
-/// * `Err(...)` - Error occurred
+/// Insert a row with trigger support (convenience wrapper with default depth)
 pub fn insert<S: StorageEngine, R: Runtime<S>>(
     storage: &mut S,
     runtime: &R,
     table: &str,
     row: Row,
 ) -> OperationResult<bool> {
+    insert_with_depth(storage, runtime, table, row, 1, DEFAULT_MAX_TRIGGER_DEPTH)
+}
+
+/// Insert a row with trigger support and explicit depth tracking
+///
+/// Executes BEFORE INSERT triggers, performs the insert, then executes AFTER INSERT triggers.
+/// BEFORE triggers can modify the row or abort the operation.
+///
+/// # Arguments
+/// * `storage` - The storage engine
+/// * `runtime` - The trigger runtime
+/// * `table` - Table name to insert into
+/// * `row` - The row to insert
+/// * `depth` - Current trigger depth (starts at 1)
+/// * `max_depth` - Maximum trigger depth (use DEFAULT_MAX_TRIGGER_DEPTH)
+///
+/// # Returns
+/// * `Ok(true)` - Row was inserted
+/// * `Ok(false)` - Row was skipped (BEFORE trigger returned Skip)
+/// * `Err(...)` - Error occurred
+pub fn insert_with_depth<S: StorageEngine, R: Runtime<S>>(
+    storage: &mut S,
+    runtime: &R,
+    table: &str,
+    row: Row,
+    depth: u32,
+    max_depth: u32,
+) -> OperationResult<bool> {
+    // Check depth limit
+    if depth > max_depth {
+        return Err(OperationError::TriggerDepthExceeded { depth, max_depth });
+    }
+
     // Get column names for the trigger context
     let schema = storage.get_schema(table)?;
     let column_names: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
@@ -79,6 +115,8 @@ pub fn insert<S: StorageEngine, R: Runtime<S>>(
             old_row: None,
             new_row: Some(&current_row),
             column_names: &column_names,
+            depth,
+            max_depth,
         };
 
         match runtime.execute_trigger_function(function_name, context, storage)? {
@@ -116,6 +154,8 @@ pub fn insert<S: StorageEngine, R: Runtime<S>>(
             old_row: None,
             new_row: Some(&current_row),
             column_names: &column_names,
+            depth,
+            max_depth,
         };
 
         match runtime.execute_trigger_function(function_name, context, storage)? {
@@ -131,13 +171,7 @@ pub fn insert<S: StorageEngine, R: Runtime<S>>(
     Ok(true)
 }
 
-/// Delete rows with trigger support
-///
-/// Executes BEFORE DELETE triggers for each matching row, performs the delete,
-/// then executes AFTER DELETE triggers.
-///
-/// # Returns
-/// Number of rows deleted (excludes rows skipped by BEFORE triggers)
+/// Delete rows with trigger support (convenience wrapper with default depth)
 pub fn delete<S, R, F>(
     storage: &mut S,
     runtime: &R,
@@ -149,6 +183,41 @@ where
     R: Runtime<S>,
     F: Fn(&Row) -> bool,
 {
+    delete_with_depth(
+        storage,
+        runtime,
+        table,
+        predicate,
+        1,
+        DEFAULT_MAX_TRIGGER_DEPTH,
+    )
+}
+
+/// Delete rows with trigger support and explicit depth tracking
+///
+/// Executes BEFORE DELETE triggers for each matching row, performs the delete,
+/// then executes AFTER DELETE triggers.
+///
+/// # Returns
+/// Number of rows deleted (excludes rows skipped by BEFORE triggers)
+pub fn delete_with_depth<S, R, F>(
+    storage: &mut S,
+    runtime: &R,
+    table: &str,
+    predicate: F,
+    depth: u32,
+    max_depth: u32,
+) -> OperationResult<usize>
+where
+    S: StorageEngine,
+    R: Runtime<S>,
+    F: Fn(&Row) -> bool,
+{
+    // Check depth limit
+    if depth > max_depth {
+        return Err(OperationError::TriggerDepthExceeded { depth, max_depth });
+    }
+
     // Get column names for the trigger context
     let schema = storage.get_schema(table)?;
     let column_names: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
@@ -184,6 +253,8 @@ where
                 old_row: Some(row),
                 new_row: None,
                 column_names: &column_names,
+                depth,
+                max_depth,
             };
 
             match runtime.execute_trigger_function(function_name, context, storage)? {
@@ -227,6 +298,8 @@ where
                 old_row: Some(row),
                 new_row: None,
                 column_names: &column_names,
+                depth,
+                max_depth,
             };
 
             match runtime.execute_trigger_function(function_name, context, storage)? {
@@ -244,13 +317,7 @@ where
     Ok(rows_to_delete.len())
 }
 
-/// Update rows with trigger support
-///
-/// Executes BEFORE UPDATE triggers for each matching row, performs the update,
-/// then executes AFTER UPDATE triggers.
-///
-/// # Returns
-/// Number of rows updated (excludes rows skipped by BEFORE triggers)
+/// Update rows with trigger support (convenience wrapper with default depth)
 pub fn update<S, R, F, U>(
     storage: &mut S,
     runtime: &R,
@@ -264,6 +331,44 @@ where
     F: Fn(&Row) -> bool,
     U: Fn(&mut Row),
 {
+    update_with_depth(
+        storage,
+        runtime,
+        table,
+        predicate,
+        updater,
+        1,
+        DEFAULT_MAX_TRIGGER_DEPTH,
+    )
+}
+
+/// Update rows with trigger support and explicit depth tracking
+///
+/// Executes BEFORE UPDATE triggers for each matching row, performs the update,
+/// then executes AFTER UPDATE triggers.
+///
+/// # Returns
+/// Number of rows updated (excludes rows skipped by BEFORE triggers)
+pub fn update_with_depth<S, R, F, U>(
+    storage: &mut S,
+    runtime: &R,
+    table: &str,
+    predicate: F,
+    updater: U,
+    depth: u32,
+    max_depth: u32,
+) -> OperationResult<usize>
+where
+    S: StorageEngine,
+    R: Runtime<S>,
+    F: Fn(&Row) -> bool,
+    U: Fn(&mut Row),
+{
+    // Check depth limit
+    if depth > max_depth {
+        return Err(OperationError::TriggerDepthExceeded { depth, max_depth });
+    }
+
     // Get column names for the trigger context
     let schema = storage.get_schema(table)?;
     let column_names: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
@@ -303,6 +408,8 @@ where
                 old_row: Some(old_row),
                 new_row: Some(&current_new_row),
                 column_names: &column_names,
+                depth,
+                max_depth,
             };
 
             match runtime.execute_trigger_function(function_name, context, storage)? {
@@ -357,6 +464,8 @@ where
                 old_row: Some(old_row),
                 new_row: Some(new_row),
                 column_names: &column_names,
+                depth,
+                max_depth,
             };
 
             match runtime.execute_trigger_function(function_name, context, storage)? {
@@ -481,6 +590,29 @@ mod tests {
         let rows = storage.scan("users").unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0][1], Value::Text("Alicia".to_string()));
+    }
+
+    #[test]
+    fn test_depth_exceeded() {
+        let mut storage = MemoryEngine::new();
+        create_test_table(&mut storage);
+        let runtime = NoOpRuntime;
+
+        let row = vec![Value::Int(1), Value::Text("Alice".to_string())];
+        // Try with depth already at max
+        let result = insert_with_depth(&mut storage, &runtime, "users", row, 5, 3);
+
+        assert_eq!(
+            result,
+            Err(OperationError::TriggerDepthExceeded {
+                depth: 5,
+                max_depth: 3
+            })
+        );
+
+        // No rows should be inserted
+        let rows = storage.scan("users").unwrap();
+        assert_eq!(rows.len(), 0);
     }
 
     // Test with a custom runtime that modifies rows

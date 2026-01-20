@@ -6,6 +6,9 @@
 
 use storage::{Row, TriggerEvent, TriggerTiming};
 
+/// Default maximum trigger depth to prevent infinite recursion
+pub const DEFAULT_MAX_TRIGGER_DEPTH: u32 = 3;
+
 /// Context passed to trigger functions
 #[derive(Debug, Clone)]
 pub struct TriggerContext<'a> {
@@ -21,6 +24,10 @@ pub struct TriggerContext<'a> {
     pub new_row: Option<&'a Row>,
     /// Column names for the table
     pub column_names: &'a [String],
+    /// Current trigger depth (starts at 1, incremented for each nested trigger)
+    pub depth: u32,
+    /// Maximum allowed trigger depth
+    pub max_depth: u32,
 }
 
 /// Result of executing a trigger function
@@ -122,6 +129,8 @@ mod tests {
             old_row: None,
             new_row: None,
             column_names: &[],
+            depth: 1,
+            max_depth: DEFAULT_MAX_TRIGGER_DEPTH,
         };
 
         let result = runtime.execute_trigger_function("any_function", context, &mut storage);

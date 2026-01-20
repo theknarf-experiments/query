@@ -39,87 +39,6 @@ impl MemoryEngine {
     pub fn new() -> Self {
         Self::default()
     }
-
-    /// Check UNIQUE constraints using O(1) index lookups
-    ///
-    /// For inserts, `exclude_row_idx` should be `None`.
-    /// For updates, `exclude_row_idx` should be `Some(idx)` to allow updating a row to its own value.
-    fn check_unique_constraints_indexed(
-        &self,
-        table: &str,
-        schema: &TableSchema,
-        new_row: &Row,
-        exclude_row_idx: Option<usize>,
-    ) -> StorageResult<()> {
-        use crate::engine::TableConstraint;
-
-        // Check per-column unique constraints via index lookup
-        for (col_idx, col) in schema.columns.iter().enumerate() {
-            if col.unique || col.primary_key {
-                if let Some(new_val) = new_row.get(col_idx) {
-                    // NULL values don't violate unique constraints
-                    if *new_val == Value::Null {
-                        continue;
-                    }
-
-                    // Use O(1) index lookup instead of O(n) scan
-                    if let Some(indices) = self.index_lookup(table, &col.name, new_val) {
-                        // Check if any returned index is NOT the excluded row
-                        for &idx in &indices {
-                            if Some(idx) != exclude_row_idx {
-                                return Err(StorageError::ConstraintViolation(format!(
-                                    "UNIQUE constraint violated on column '{}'",
-                                    col.name
-                                )));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Check table-level UNIQUE constraints (multi-column) via composite index lookup
-        for constraint in &schema.constraints {
-            if let TableConstraint::Unique { columns } | TableConstraint::PrimaryKey { columns } =
-                constraint
-            {
-                // Get column indices for the constraint
-                let col_indices: Vec<usize> = columns
-                    .iter()
-                    .filter_map(|col_name| schema.columns.iter().position(|c| &c.name == col_name))
-                    .collect();
-
-                if col_indices.len() != columns.len() {
-                    continue;
-                }
-
-                // Get new row values for the constrained columns
-                let new_values: Vec<Value> = col_indices
-                    .iter()
-                    .filter_map(|&i| new_row.get(i).cloned())
-                    .collect();
-
-                // If any value is NULL, skip (NULLs don't violate UNIQUE)
-                if new_values.contains(&Value::Null) {
-                    continue;
-                }
-
-                // Use O(1) composite index lookup
-                if let Some(indices) = self.composite_index_lookup(table, columns, &new_values) {
-                    for &idx in &indices {
-                        if Some(idx) != exclude_row_idx {
-                            return Err(StorageError::ConstraintViolation(format!(
-                                "UNIQUE constraint violated on columns ({})",
-                                columns.join(", ")
-                            )));
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
 }
 
 impl StorageEngine for MemoryEngine {
@@ -192,12 +111,35 @@ impl StorageEngine for MemoryEngine {
     }
 
     fn insert(&mut self, table: &str, row: Row) -> StorageResult<()> {
-        // First check UNIQUE constraints using O(1) index lookups
-        // We need to get the schema first while we can still borrow self immutably
-        let schema = self.get_schema(table)?.clone();
-        self.check_unique_constraints_indexed(table, &schema, &row, None)?;
+        // Check unique constraints via composite indexes
+        // (Single-column unique constraints are enforced via BEFORE INSERT triggers,
+        // but composite unique constraints like those used by Datalog are checked here)
+        for index in self.indexes.values() {
+            if index.table == table && index.unique {
+                let values: Vec<&Value> = index
+                    .column_indices
+                    .iter()
+                    .filter_map(|&idx| row.get(idx))
+                    .collect();
 
-        // Now we can get mutable access to insert
+                if values.len() == index.column_indices.len() {
+                    // SQL standard: NULL values don't violate unique constraints
+                    // (NULL is never equal to anything, including another NULL)
+                    let has_null = values.iter().any(|v| matches!(v, Value::Null));
+                    if !has_null {
+                        let hash = composite_hash(&values);
+                        if index.entries.contains_key(&hash) {
+                            return Err(StorageError::ConstraintViolation(format!(
+                                "Duplicate value for unique index {} on table {}",
+                                index.columns.join(", "),
+                                table
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+
         let table_data = self
             .tables
             .get_mut(table)
@@ -280,9 +222,6 @@ impl StorageEngine for MemoryEngine {
         F: Fn(&Row) -> bool,
         U: Fn(&mut Row),
     {
-        // Get schema first for constraint checking
-        let schema = self.get_schema(table)?.clone();
-
         let table_data = self
             .tables
             .get_mut(table)
@@ -297,16 +236,44 @@ impl StorageEngine for MemoryEngine {
                 updates.push((idx, new_row));
             }
         }
-        // NLL releases the mutable borrow after last use of table_data above
 
-        // Check UNIQUE constraints using O(1) index lookups
-        for (update_idx, new_row) in &updates {
-            // Use indexed check against existing rows (excludes the row being updated)
-            self.check_unique_constraints_indexed(table, &schema, new_row, Some(*update_idx))?;
+        // Check unique constraints for the new values
+        // Each new value must not conflict with rows not being updated
+        let updating_indices: std::collections::HashSet<usize> =
+            updates.iter().map(|(idx, _)| *idx).collect();
 
-            // Also check against other pending updates (O(m) where m = number of updates)
-            // This handles the case where multiple rows are updated to the same value
-            check_unique_among_pending(&schema, &updates, *update_idx, new_row)?;
+        for index in self.indexes.values() {
+            if index.table == table && index.unique {
+                for (update_idx, new_row) in &updates {
+                    let values: Vec<&Value> = index
+                        .column_indices
+                        .iter()
+                        .filter_map(|&idx| new_row.get(idx))
+                        .collect();
+
+                    if values.len() == index.column_indices.len() {
+                        // SQL standard: NULL values don't violate unique constraints
+                        let has_null = values.iter().any(|v| matches!(v, Value::Null));
+                        if !has_null {
+                            let hash = composite_hash(&values);
+                            if let Some(existing_indices) = index.entries.get(&hash) {
+                                // Check if any existing row with this value is NOT being updated
+                                for existing_idx in existing_indices {
+                                    if !updating_indices.contains(existing_idx)
+                                        && existing_idx != update_idx
+                                    {
+                                        return Err(StorageError::ConstraintViolation(format!(
+                                            "Duplicate value for unique index {} on table {}",
+                                            index.columns.join(", "),
+                                            table
+                                        )));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Re-acquire mutable borrow to apply updates
@@ -618,83 +585,6 @@ impl StorageEngine for MemoryEngine {
     fn list_triggers(&self) -> Vec<&TriggerDef> {
         self.triggers.values().collect()
     }
-}
-
-/// Check UNIQUE constraints among pending updates only
-/// This is used during UPDATE to detect when multiple rows are being updated to the same value
-fn check_unique_among_pending(
-    schema: &TableSchema,
-    updates: &[(usize, Row)],
-    current_idx: usize,
-    new_row: &Row,
-) -> StorageResult<()> {
-    use crate::engine::TableConstraint;
-
-    // Check per-column unique constraints against other pending updates
-    for (col_idx, col) in schema.columns.iter().enumerate() {
-        if col.unique || col.primary_key {
-            if let Some(new_val) = new_row.get(col_idx) {
-                if *new_val == Value::Null {
-                    continue;
-                }
-                for (other_idx, other_row) in updates {
-                    if *other_idx == current_idx {
-                        continue;
-                    }
-                    if let Some(other_val) = other_row.get(col_idx) {
-                        if other_val == new_val {
-                            return Err(StorageError::ConstraintViolation(format!(
-                                "UNIQUE constraint violated on column '{}'",
-                                col.name
-                            )));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Check table-level UNIQUE constraints against other pending updates
-    for constraint in &schema.constraints {
-        if let TableConstraint::Unique { columns } | TableConstraint::PrimaryKey { columns } =
-            constraint
-        {
-            let col_indices: Vec<usize> = columns
-                .iter()
-                .filter_map(|col_name| schema.columns.iter().position(|c| &c.name == col_name))
-                .collect();
-
-            if col_indices.len() != columns.len() {
-                continue;
-            }
-
-            let new_values: Vec<&Value> =
-                col_indices.iter().filter_map(|&i| new_row.get(i)).collect();
-
-            if new_values.iter().any(|v| **v == Value::Null) {
-                continue;
-            }
-
-            for (other_idx, other_row) in updates {
-                if *other_idx == current_idx {
-                    continue;
-                }
-                let other_values: Vec<&Value> = col_indices
-                    .iter()
-                    .filter_map(|&i| other_row.get(i))
-                    .collect();
-
-                if new_values == other_values {
-                    return Err(StorageError::ConstraintViolation(format!(
-                        "UNIQUE constraint violated on columns ({})",
-                        columns.join(", ")
-                    )));
-                }
-            }
-        }
-    }
-
-    Ok(())
 }
 
 /// Hash multiple values for composite index lookup

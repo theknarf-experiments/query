@@ -18,7 +18,7 @@
 //! During grounding, built-ins are evaluated to filter or compute values.
 
 use crate::Substitution;
-use datalog_parser::{Atom, Term, Value};
+use datalog_planner::{Atom, Term, Value};
 
 /// Comparison operators
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -293,7 +293,7 @@ pub fn parse_builtin(atom: &Atom) -> Option<BuiltIn> {
 #[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
-    use datalog_parser::Symbol;
+    use datalog_planner::Symbol;
 
     fn sym(s: &str) -> Symbol {
         Symbol::new(s.to_string())

@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-datalog-parser = { path = "../datalog-parser" }
 datalog-planner = { path = "../datalog-planner" }
 logical = { path = "../logical" }
 

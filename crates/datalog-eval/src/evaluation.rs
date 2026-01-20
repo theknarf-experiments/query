@@ -13,8 +13,9 @@
 //! ```
 
 use crate::{ground_rule, ground_rule_semi_naive_with_delta, satisfy_body, DeltaTracker};
-use datalog_parser::{Constraint, Rule};
-use datalog_planner::{check_program_safety, stratify, SafetyError, StratificationError};
+use datalog_planner::{
+    check_program_safety, stratify, Constraint, Rule, SafetyError, StratificationError,
+};
 use logical::{DatalogContext, InsertError, Runtime, StorageEngine, StorageError};
 
 /// Errors that can occur during evaluation
@@ -426,7 +427,7 @@ pub fn evaluate_with_storage<S: StorageEngine, R: Runtime<S>>(
 #[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
-    use datalog_parser::{Atom, Literal, Symbol, Term, Value};
+    use datalog_planner::{Atom, Literal, Symbol, Term, Value};
     use logical::{MemoryEngine, NoOpRuntime};
 
     fn sym(s: &str) -> Symbol {

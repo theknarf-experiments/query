@@ -21,7 +21,7 @@
 
 use crate::builtins;
 use crate::{unify_atoms, Substitution};
-use datalog_parser::{Atom, Literal, Rule, Term};
+use datalog_planner::{Atom, Literal, Rule, Term};
 use logical::{sql_value_to_term, DatalogContext, Row, StorageEngine};
 
 #[cfg(test)]
@@ -269,8 +269,8 @@ where
 }
 
 /// Convert AST comparison op to builtins comparison op
-fn comp_op_to_builtin(op: &datalog_parser::ComparisonOp) -> builtins::CompOp {
-    use datalog_parser::ComparisonOp;
+fn comp_op_to_builtin(op: &datalog_planner::ComparisonOp) -> builtins::CompOp {
+    use datalog_planner::ComparisonOp;
     match op {
         ComparisonOp::Equal => builtins::CompOp::Eq,
         ComparisonOp::NotEqual => builtins::CompOp::Neq,
@@ -598,7 +598,7 @@ pub fn ground_rule_semi_naive_with_storage<S: StorageEngine>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datalog_parser::{Atom, Rule, Symbol, Value};
+    use datalog_planner::{Atom, Rule, Symbol, Value};
     use logical::{MemoryEngine, NoOpRuntime};
 
     fn sym(s: &str) -> Symbol {

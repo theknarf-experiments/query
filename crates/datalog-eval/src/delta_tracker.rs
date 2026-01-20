@@ -28,7 +28,7 @@
 //! ```
 
 use crate::{unify_atoms, Substitution};
-use datalog_parser::{Atom, Symbol, Term};
+use datalog_planner::{Atom, Symbol, Term};
 use std::collections::HashMap;
 
 /// Index key: (predicate, optional first argument for indexed lookup)
@@ -190,7 +190,7 @@ impl DeltaTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datalog_parser::{Term, Value};
+    use datalog_planner::{Term, Value};
 
     fn sym(s: &str) -> Symbol {
         Symbol::new(s.to_string())

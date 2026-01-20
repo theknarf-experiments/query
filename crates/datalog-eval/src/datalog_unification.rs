@@ -16,7 +16,7 @@
 //! let sub = unify_atoms(&pattern1, &pattern2);
 //! ```
 
-use datalog_parser::{Atom, Symbol, Term};
+use datalog_planner::{Atom, Symbol, Term};
 use std::collections::HashMap;
 
 /// A substitution maps variables to terms
@@ -173,7 +173,7 @@ pub fn unify_atoms(atom1: &Atom, atom2: &Atom, subst: &mut Substitution) -> bool
 #[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
-    use datalog_parser::Value;
+    use datalog_planner::Value;
     use internment::Intern;
 
     // Helper functions for creating terms in tests

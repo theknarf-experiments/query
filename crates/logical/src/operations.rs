@@ -61,12 +61,17 @@ pub fn insert<S: StorageEngine, R: Runtime<S>>(
     let schema = storage.get_schema(table)?;
     let column_names: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
 
+    // Get trigger function names upfront (clone to avoid borrow issues)
+    let before_trigger_funcs: Vec<String> = storage
+        .get_triggers_for_table(table, TriggerEvent::Insert, TriggerTiming::Before)
+        .iter()
+        .map(|t| t.function_name.clone())
+        .collect();
+
     // Execute BEFORE INSERT triggers
     let mut current_row = row;
-    let before_triggers =
-        storage.get_triggers_for_table(table, TriggerEvent::Insert, TriggerTiming::Before);
 
-    for trigger in before_triggers {
+    for function_name in &before_trigger_funcs {
         let context = TriggerContext {
             event: TriggerEvent::Insert,
             timing: TriggerTiming::Before,
@@ -76,7 +81,7 @@ pub fn insert<S: StorageEngine, R: Runtime<S>>(
             column_names: &column_names,
         };
 
-        match runtime.execute_trigger_function(&trigger.function_name, context, storage)? {
+        match runtime.execute_trigger_function(function_name, context, storage)? {
             TriggerResult::Proceed(Some(modified_row)) => {
                 current_row = modified_row;
             }
@@ -95,11 +100,15 @@ pub fn insert<S: StorageEngine, R: Runtime<S>>(
     // Perform the actual insert
     storage.insert(table, current_row.clone())?;
 
-    // Execute AFTER INSERT triggers
-    let after_triggers =
-        storage.get_triggers_for_table(table, TriggerEvent::Insert, TriggerTiming::After);
+    // Get AFTER trigger function names
+    let after_trigger_funcs: Vec<String> = storage
+        .get_triggers_for_table(table, TriggerEvent::Insert, TriggerTiming::After)
+        .iter()
+        .map(|t| t.function_name.clone())
+        .collect();
 
-    for trigger in after_triggers {
+    // Execute AFTER INSERT triggers
+    for function_name in &after_trigger_funcs {
         let context = TriggerContext {
             event: TriggerEvent::Insert,
             timing: TriggerTiming::After,
@@ -109,7 +118,7 @@ pub fn insert<S: StorageEngine, R: Runtime<S>>(
             column_names: &column_names,
         };
 
-        match runtime.execute_trigger_function(&trigger.function_name, context, storage)? {
+        match runtime.execute_trigger_function(function_name, context, storage)? {
             TriggerResult::Abort(msg) => {
                 return Err(OperationError::TriggerAbort(msg));
             }
@@ -152,18 +161,22 @@ where
         .filter(|(_, row)| predicate(row))
         .collect();
 
+    // Get trigger function names upfront (clone to avoid borrow issues)
+    let before_trigger_funcs: Vec<String> = storage
+        .get_triggers_for_table(table, TriggerEvent::Delete, TriggerTiming::Before)
+        .iter()
+        .map(|t| t.function_name.clone())
+        .collect();
+
     // Track which rows to actually delete (after BEFORE triggers)
     let mut rows_to_delete: Vec<usize> = Vec::new();
     let mut deleted_rows: Vec<Row> = Vec::new();
 
     // Execute BEFORE DELETE triggers for each matching row
-    let before_triggers =
-        storage.get_triggers_for_table(table, TriggerEvent::Delete, TriggerTiming::Before);
-
     for (idx, row) in &matching_rows {
         let mut should_delete = true;
 
-        for trigger in &before_triggers {
+        for function_name in &before_trigger_funcs {
             let context = TriggerContext {
                 event: TriggerEvent::Delete,
                 timing: TriggerTiming::Before,
@@ -173,7 +186,7 @@ where
                 column_names: &column_names,
             };
 
-            match runtime.execute_trigger_function(&trigger.function_name, context, storage)? {
+            match runtime.execute_trigger_function(function_name, context, storage)? {
                 TriggerResult::Skip => {
                     should_delete = false;
                     break;
@@ -197,12 +210,16 @@ where
     // We delete rows that are in deleted_rows
     storage.delete(table, |row| deleted_rows.iter().any(|r| r == row))?;
 
-    // Execute AFTER DELETE triggers for each deleted row
-    let after_triggers =
-        storage.get_triggers_for_table(table, TriggerEvent::Delete, TriggerTiming::After);
+    // Get AFTER trigger function names
+    let after_trigger_funcs: Vec<String> = storage
+        .get_triggers_for_table(table, TriggerEvent::Delete, TriggerTiming::After)
+        .iter()
+        .map(|t| t.function_name.clone())
+        .collect();
 
+    // Execute AFTER DELETE triggers for each deleted row
     for row in &deleted_rows {
-        for trigger in &after_triggers {
+        for function_name in &after_trigger_funcs {
             let context = TriggerContext {
                 event: TriggerEvent::Delete,
                 timing: TriggerTiming::After,
@@ -212,7 +229,7 @@ where
                 column_names: &column_names,
             };
 
-            match runtime.execute_trigger_function(&trigger.function_name, context, storage)? {
+            match runtime.execute_trigger_function(function_name, context, storage)? {
                 TriggerResult::Abort(msg) => {
                     return Err(OperationError::TriggerAbort(msg));
                 }
@@ -259,13 +276,17 @@ where
         .filter(|(_, row)| predicate(row))
         .collect();
 
+    // Get trigger function names upfront (clone to avoid borrow issues)
+    let before_trigger_funcs: Vec<String> = storage
+        .get_triggers_for_table(table, TriggerEvent::Update, TriggerTiming::Before)
+        .iter()
+        .map(|t| t.function_name.clone())
+        .collect();
+
     // Track updates to apply: (index, old_row, new_row)
     let mut updates: Vec<(usize, Row, Row)> = Vec::new();
 
     // Execute BEFORE UPDATE triggers for each matching row
-    let before_triggers =
-        storage.get_triggers_for_table(table, TriggerEvent::Update, TriggerTiming::Before);
-
     for (idx, old_row) in &matching_rows {
         // Compute the updated row
         let mut new_row = old_row.clone();
@@ -274,7 +295,7 @@ where
         let mut should_update = true;
         let mut current_new_row = new_row;
 
-        for trigger in &before_triggers {
+        for function_name in &before_trigger_funcs {
             let context = TriggerContext {
                 event: TriggerEvent::Update,
                 timing: TriggerTiming::Before,
@@ -284,7 +305,7 @@ where
                 column_names: &column_names,
             };
 
-            match runtime.execute_trigger_function(&trigger.function_name, context, storage)? {
+            match runtime.execute_trigger_function(function_name, context, storage)? {
                 TriggerResult::Proceed(Some(modified_row)) => {
                     current_new_row = modified_row;
                 }
@@ -319,12 +340,16 @@ where
         },
     )?;
 
-    // Execute AFTER UPDATE triggers for each updated row
-    let after_triggers =
-        storage.get_triggers_for_table(table, TriggerEvent::Update, TriggerTiming::After);
+    // Get AFTER trigger function names
+    let after_trigger_funcs: Vec<String> = storage
+        .get_triggers_for_table(table, TriggerEvent::Update, TriggerTiming::After)
+        .iter()
+        .map(|t| t.function_name.clone())
+        .collect();
 
+    // Execute AFTER UPDATE triggers for each updated row
     for (_, old_row, new_row) in &updates {
-        for trigger in &after_triggers {
+        for function_name in &after_trigger_funcs {
             let context = TriggerContext {
                 event: TriggerEvent::Update,
                 timing: TriggerTiming::After,
@@ -334,7 +359,7 @@ where
                 column_names: &column_names,
             };
 
-            match runtime.execute_trigger_function(&trigger.function_name, context, storage)? {
+            match runtime.execute_trigger_function(function_name, context, storage)? {
                 TriggerResult::Abort(msg) => {
                     return Err(OperationError::TriggerAbort(msg));
                 }
@@ -466,7 +491,7 @@ mod tests {
             &self,
             _function_name: &str,
             context: TriggerContext,
-            _storage: &S,
+            _storage: &mut S,
         ) -> Result<TriggerResult, RuntimeError> {
             // For BEFORE INSERT, modify the name to uppercase
             if context.event == TriggerEvent::Insert && context.timing == TriggerTiming::Before {
@@ -521,7 +546,7 @@ mod tests {
             &self,
             _function_name: &str,
             context: TriggerContext,
-            _storage: &S,
+            _storage: &mut S,
         ) -> Result<TriggerResult, RuntimeError> {
             // Skip rows with id > 5
             if context.timing == TriggerTiming::Before {
@@ -579,7 +604,7 @@ mod tests {
             &self,
             _function_name: &str,
             _context: TriggerContext,
-            _storage: &S,
+            _storage: &mut S,
         ) -> Result<TriggerResult, RuntimeError> {
             Ok(TriggerResult::Abort("Operation not allowed".to_string()))
         }

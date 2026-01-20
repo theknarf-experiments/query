@@ -2,6 +2,14 @@
 //!
 //! This module provides the SqlRuntime which can execute trigger functions
 //! written in SQL. Functions have access to OLD and NEW pseudo-tables.
+//!
+//! Supported statements in trigger functions:
+//! - `RETURN NEW` - Return the NEW row unchanged
+//! - `RETURN NULL` - Skip the row (BEFORE triggers only)
+//! - `RETURN OLD` - Return the OLD row
+//! - `SET NEW.<column> = <value>` - Modify column in NEW row
+//! - `RAISE ERROR '<message>'` - Abort with error
+//! - `INSERT INTO <table> VALUES (...)` - Insert into another table
 
 use logical::{Runtime, RuntimeError, StorageEngine, TriggerContext, TriggerResult, Value};
 
@@ -19,22 +27,22 @@ impl SqlRuntime {
 
     /// Execute a function body with the given context
     ///
-    /// Function body format (simple DSL for now):
+    /// Function body format:
     /// - `RETURN NEW` - Return the NEW row unchanged (for BEFORE INSERT/UPDATE)
     /// - `RETURN NULL` - Skip the row (for BEFORE triggers)
     /// - `RETURN OLD` - Return the OLD row (for BEFORE UPDATE)
     /// - `SET NEW.<column> = <value>; RETURN NEW` - Modify and return NEW
     /// - `RAISE ERROR '<message>'` - Abort with error
-    ///
-    /// More complex SQL execution can be added later.
-    fn execute_function_body(
+    /// - `INSERT INTO <table> VALUES (...)` - Insert into another table
+    fn execute_function_body<S: StorageEngine>(
         &self,
         body: &str,
         context: &TriggerContext,
+        storage: &mut S,
     ) -> Result<TriggerResult, RuntimeError> {
         let body = body.trim();
 
-        // Handle RAISE ERROR
+        // Handle RAISE ERROR first (highest priority)
         if body.to_uppercase().starts_with("RAISE ERROR") {
             let msg = extract_string_literal(body, "RAISE ERROR")
                 .unwrap_or_else(|| "Trigger error".to_string());
@@ -56,27 +64,10 @@ impl SqlRuntime {
             return Ok(TriggerResult::Proceed(context.old_row.cloned()));
         }
 
-        // Handle SET NEW.<column> = <value>; RETURN NEW
-        if body.to_uppercase().contains("SET NEW.") {
-            return self.execute_set_statements(body, context);
-        }
+        // Handle multi-statement bodies (separated by semicolons)
+        // Execute each statement in order
+        let mut current_row = context.new_row.cloned();
 
-        // Default: proceed without modification
-        Ok(TriggerResult::Proceed(None))
-    }
-
-    /// Execute SET statements that modify the NEW row
-    fn execute_set_statements(
-        &self,
-        body: &str,
-        context: &TriggerContext,
-    ) -> Result<TriggerResult, RuntimeError> {
-        let mut new_row = context
-            .new_row
-            .cloned()
-            .ok_or_else(|| RuntimeError::ExecutionError("No NEW row available".to_string()))?;
-
-        // Split by semicolons and process each statement
         for stmt in body.split(';') {
             let stmt = stmt.trim();
             if stmt.is_empty() {
@@ -87,37 +78,100 @@ impl SqlRuntime {
 
             if upper.starts_with("SET NEW.") {
                 // Parse: SET NEW.<column> = <value>
-                let rest = &stmt[8..]; // Skip "SET NEW."
-                if let Some(eq_pos) = rest.find('=') {
-                    let column = rest[..eq_pos].trim();
-                    let value_str = rest[eq_pos + 1..].trim();
-
-                    // Find column index
-                    let col_idx = context
-                        .column_names
-                        .iter()
-                        .position(|c| c.eq_ignore_ascii_case(column))
-                        .ok_or_else(|| {
-                            RuntimeError::ExecutionError(format!("Column not found: {}", column))
-                        })?;
-
-                    // Parse value
-                    let value = parse_literal_value(value_str, context)?;
-                    new_row[col_idx] = value;
+                if let Some(row) = &mut current_row {
+                    self.execute_single_set(stmt, context, row)?;
                 }
+            } else if upper.starts_with("INSERT INTO") {
+                // Execute INSERT INTO statement
+                self.execute_insert_into(stmt, context, storage)?;
             } else if upper == "RETURN NEW" {
-                return Ok(TriggerResult::Proceed(Some(new_row)));
+                return Ok(TriggerResult::Proceed(current_row));
             } else if upper == "RETURN NULL" {
                 return Ok(TriggerResult::Skip);
+            } else if upper == "RETURN OLD" {
+                return Ok(TriggerResult::Proceed(context.old_row.cloned()));
             } else if upper.starts_with("RAISE ERROR") {
                 let msg = extract_string_literal(stmt, "RAISE ERROR")
                     .unwrap_or_else(|| "Trigger error".to_string());
                 return Ok(TriggerResult::Abort(msg));
             }
+            // Ignore unknown statements for now
         }
 
-        // If we processed SET statements but no explicit RETURN, return the modified row
-        Ok(TriggerResult::Proceed(Some(new_row)))
+        // If we processed statements but no explicit RETURN, return the (possibly modified) row
+        Ok(TriggerResult::Proceed(current_row))
+    }
+
+    /// Execute a single SET NEW.<column> = <value> statement
+    fn execute_single_set(
+        &self,
+        stmt: &str,
+        context: &TriggerContext,
+        row: &mut Vec<Value>,
+    ) -> Result<(), RuntimeError> {
+        // Parse: SET NEW.<column> = <value>
+        let rest = &stmt[8..]; // Skip "SET NEW."
+        if let Some(eq_pos) = rest.find('=') {
+            let column = rest[..eq_pos].trim();
+            let value_str = rest[eq_pos + 1..].trim();
+
+            // Find column index
+            let col_idx = context
+                .column_names
+                .iter()
+                .position(|c| c.eq_ignore_ascii_case(column))
+                .ok_or_else(|| {
+                    RuntimeError::ExecutionError(format!("Column not found: {}", column))
+                })?;
+
+            // Parse value
+            let value = parse_literal_value(value_str, context)?;
+            row[col_idx] = value;
+        }
+        Ok(())
+    }
+
+    /// Execute an INSERT INTO statement
+    fn execute_insert_into<S: StorageEngine>(
+        &self,
+        stmt: &str,
+        context: &TriggerContext,
+        storage: &mut S,
+    ) -> Result<(), RuntimeError> {
+        // Parse: INSERT INTO <table> VALUES (...)
+        // Simple parser for: INSERT INTO table_name VALUES (val1, val2, ...)
+        let upper = stmt.to_uppercase();
+
+        // Find table name
+        let after_into = if let Some(pos) = upper.find("INSERT INTO") {
+            &stmt[pos + 12..].trim_start()
+        } else {
+            return Err(RuntimeError::ExecutionError(
+                "Invalid INSERT INTO syntax".to_string(),
+            ));
+        };
+
+        // Find where VALUES starts
+        let values_pos = after_into.to_uppercase().find("VALUES");
+        let table_name = if let Some(pos) = values_pos {
+            after_into[..pos].trim()
+        } else {
+            return Err(RuntimeError::ExecutionError(
+                "Missing VALUES in INSERT INTO".to_string(),
+            ));
+        };
+
+        // Extract values between parentheses
+        let values_part = &after_into[values_pos.unwrap_or(0) + 6..].trim_start();
+        let values = parse_values_list(values_part, context)?;
+
+        // Insert into storage (without triggering recursive triggers to avoid infinite loops)
+        // For now, we do a direct insert to avoid recursion
+        storage
+            .insert(table_name, values)
+            .map_err(|e| RuntimeError::ExecutionError(format!("Insert failed: {:?}", e)))?;
+
+        Ok(())
     }
 }
 
@@ -132,15 +186,16 @@ impl<S: StorageEngine> Runtime<S> for SqlRuntime {
         &self,
         function_name: &str,
         context: TriggerContext,
-        storage: &S,
+        storage: &mut S,
     ) -> Result<TriggerResult, RuntimeError> {
-        // Look up the function in storage
-        let func = storage
+        // Look up the function in storage and clone the body to release the borrow
+        let func_body = storage
             .get_function(function_name)
+            .map(|f| f.body.clone())
             .ok_or_else(|| RuntimeError::FunctionNotFound(function_name.to_string()))?;
 
         // Execute the function body
-        self.execute_function_body(&func.body, &context)
+        self.execute_function_body(&func_body, &context, storage)
     }
 }
 
@@ -227,6 +282,53 @@ fn parse_literal_value(s: &str, context: &TriggerContext) -> Result<Value, Runti
     Ok(Value::Text(s.to_string()))
 }
 
+/// Parse a VALUES list like (val1, val2, ...) into a vector of Values
+fn parse_values_list(s: &str, context: &TriggerContext) -> Result<Vec<Value>, RuntimeError> {
+    let s = s.trim();
+
+    // Find the opening and closing parentheses
+    let start = s.find('(').ok_or_else(|| {
+        RuntimeError::ExecutionError("Missing opening parenthesis in VALUES".to_string())
+    })?;
+    let end = s.rfind(')').ok_or_else(|| {
+        RuntimeError::ExecutionError("Missing closing parenthesis in VALUES".to_string())
+    })?;
+
+    if end <= start {
+        return Err(RuntimeError::ExecutionError(
+            "Invalid VALUES syntax".to_string(),
+        ));
+    }
+
+    let inner = &s[start + 1..end];
+
+    // Split by commas, but be careful of commas inside strings
+    let mut values = Vec::new();
+    let mut current = String::new();
+    let mut in_string = false;
+
+    for ch in inner.chars() {
+        if ch == '\'' {
+            in_string = !in_string;
+            current.push(ch);
+        } else if ch == ',' && !in_string {
+            let val = parse_literal_value(current.trim(), context)?;
+            values.push(val);
+            current.clear();
+        } else {
+            current.push(ch);
+        }
+    }
+
+    // Don't forget the last value
+    if !current.trim().is_empty() {
+        let val = parse_literal_value(current.trim(), context)?;
+        values.push(val);
+    }
+
+    Ok(values)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,7 +392,7 @@ mod tests {
             column_names: &["id".to_string(), "name".to_string()],
         };
 
-        let result = runtime.execute_trigger_function("return_new", context, &storage);
+        let result = runtime.execute_trigger_function("return_new", context, &mut storage);
         assert_eq!(result, Ok(TriggerResult::Proceed(Some(new_row))));
     }
 
@@ -317,7 +419,7 @@ mod tests {
             column_names: &["id".to_string(), "name".to_string()],
         };
 
-        let result = runtime.execute_trigger_function("skip_row", context, &storage);
+        let result = runtime.execute_trigger_function("skip_row", context, &mut storage);
         assert_eq!(result, Ok(TriggerResult::Skip));
     }
 
@@ -344,7 +446,7 @@ mod tests {
             column_names: &["id".to_string(), "name".to_string()],
         };
 
-        let result = runtime.execute_trigger_function("abort_func", context, &storage);
+        let result = runtime.execute_trigger_function("abort_func", context, &mut storage);
         assert_eq!(result, Ok(TriggerResult::Abort("Not allowed".to_string())));
     }
 
@@ -371,7 +473,7 @@ mod tests {
             column_names: &["id".to_string(), "name".to_string()],
         };
 
-        let result = runtime.execute_trigger_function("uppercase_name", context, &storage);
+        let result = runtime.execute_trigger_function("uppercase_name", context, &mut storage);
         assert_eq!(
             result,
             Ok(TriggerResult::Proceed(Some(vec![
@@ -383,7 +485,7 @@ mod tests {
 
     #[test]
     fn test_function_not_found() {
-        let storage = create_test_storage();
+        let mut storage = create_test_storage();
         let runtime = SqlRuntime::new();
         let new_row = vec![Value::Int(1), Value::Text("Alice".to_string())];
         let context = TriggerContext {
@@ -395,7 +497,7 @@ mod tests {
             column_names: &["id".to_string(), "name".to_string()],
         };
 
-        let result = runtime.execute_trigger_function("nonexistent", context, &storage);
+        let result = runtime.execute_trigger_function("nonexistent", context, &mut storage);
         assert_eq!(
             result,
             Err(RuntimeError::FunctionNotFound("nonexistent".to_string()))
@@ -425,7 +527,7 @@ mod tests {
             column_names: &["id".to_string(), "name".to_string()],
         };
 
-        let result = runtime.execute_trigger_function("set_id", context, &storage);
+        let result = runtime.execute_trigger_function("set_id", context, &mut storage);
         assert_eq!(
             result,
             Ok(TriggerResult::Proceed(Some(vec![

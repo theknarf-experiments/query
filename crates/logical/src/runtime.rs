@@ -76,7 +76,7 @@ pub trait Runtime<S: storage::StorageEngine> {
     /// # Arguments
     /// * `function_name` - Name of the function to execute
     /// * `context` - Trigger context with OLD/NEW rows and metadata
-    /// * `storage` - Storage engine for looking up function definitions
+    /// * `storage` - Storage engine for looking up function definitions and executing SQL
     ///
     /// # Returns
     /// * `Ok(TriggerResult)` - The result of the trigger execution
@@ -85,7 +85,7 @@ pub trait Runtime<S: storage::StorageEngine> {
         &self,
         function_name: &str,
         context: TriggerContext,
-        storage: &S,
+        storage: &mut S,
     ) -> Result<TriggerResult, RuntimeError>;
 }
 
@@ -100,7 +100,7 @@ impl<S: storage::StorageEngine> Runtime<S> for NoOpRuntime {
         &self,
         _function_name: &str,
         _context: TriggerContext,
-        _storage: &S,
+        _storage: &mut S,
     ) -> Result<TriggerResult, RuntimeError> {
         // Always proceed without modification
         Ok(TriggerResult::Proceed(None))
@@ -114,7 +114,7 @@ mod tests {
     #[test]
     fn test_noop_runtime_always_proceeds() {
         let runtime = NoOpRuntime;
-        let storage = storage::MemoryEngine::new();
+        let mut storage = storage::MemoryEngine::new();
         let context = TriggerContext {
             event: TriggerEvent::Insert,
             timing: TriggerTiming::Before,
@@ -124,7 +124,7 @@ mod tests {
             column_names: &[],
         };
 
-        let result = runtime.execute_trigger_function("any_function", context, &storage);
+        let result = runtime.execute_trigger_function("any_function", context, &mut storage);
         assert_eq!(result, Ok(TriggerResult::Proceed(None)));
     }
 

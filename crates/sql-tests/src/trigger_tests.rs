@@ -149,7 +149,7 @@ impl<S: StorageEngine> Runtime<S> for TrackingRuntime {
         &self,
         function_name: &str,
         context: TriggerContext,
-        _storage: &S,
+        _storage: &mut S,
     ) -> Result<TriggerResult, RuntimeError> {
         self.invocations.borrow_mut().push((
             function_name.to_string(),
@@ -354,7 +354,7 @@ fn test_before_trigger_can_skip_update() {
             &self,
             _function_name: &str,
             context: TriggerContext,
-            _storage: &S,
+            _storage: &mut S,
         ) -> Result<TriggerResult, RuntimeError> {
             if context.timing == TriggerTiming::Before {
                 if let Some(old_row) = context.old_row {
@@ -531,4 +531,232 @@ fn test_after_trigger_with_datalog() {
         }
         _ => panic!("Expected Select result"),
     }
+}
+
+// ============================================================================
+// Full SQL Trigger Function Tests (INSERT INTO from triggers)
+// ============================================================================
+
+/// Test that an AFTER trigger can insert into another table using INSERT INTO
+#[test]
+fn test_trigger_with_insert_into_another_table() {
+    use logical::{ColumnSchema, DataType, FunctionDef, TableSchema, TriggerDef};
+
+    let mut storage = MemoryEngine::new();
+
+    // Create main table
+    storage
+        .create_table(TableSchema {
+            name: "orders".to_string(),
+            columns: vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    data_type: DataType::Int,
+                    nullable: false,
+                    primary_key: true,
+                    unique: true,
+                    default: None,
+                    references: None,
+                },
+                ColumnSchema {
+                    name: "amount".to_string(),
+                    data_type: DataType::Int,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+            ],
+            constraints: vec![],
+        })
+        .unwrap();
+
+    // Create audit log table
+    storage
+        .create_table(TableSchema {
+            name: "audit_log".to_string(),
+            columns: vec![
+                ColumnSchema {
+                    name: "order_id".to_string(),
+                    data_type: DataType::Int,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+                ColumnSchema {
+                    name: "action".to_string(),
+                    data_type: DataType::Text,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+            ],
+            constraints: vec![],
+        })
+        .unwrap();
+
+    // Create function that inserts into audit_log
+    storage
+        .create_function(FunctionDef {
+            name: "log_order_insert".to_string(),
+            params: "[]".to_string(),
+            body: "INSERT INTO audit_log VALUES (NEW.id, 'INSERT'); RETURN NEW".to_string(),
+            language: "sql".to_string(),
+        })
+        .unwrap();
+
+    // Create trigger
+    storage
+        .create_trigger(TriggerDef {
+            name: "order_audit_trigger".to_string(),
+            table_name: "orders".to_string(),
+            timing: TriggerTiming::After,
+            events: vec![TriggerEvent::Insert],
+            function_name: "log_order_insert".to_string(),
+        })
+        .unwrap();
+
+    // Insert an order using SqlRuntime
+    let runtime = SqlRuntime::new();
+    let row = vec![Value::Int(100), Value::Int(500)];
+    let result = insert(&mut storage, &runtime, "orders", row);
+    assert!(result.is_ok());
+
+    // Verify order was inserted
+    let orders = storage.scan("orders").unwrap();
+    assert_eq!(orders.len(), 1);
+    assert_eq!(orders[0][0], Value::Int(100));
+    assert_eq!(orders[0][1], Value::Int(500));
+
+    // Verify audit log was populated by the trigger
+    let audit = storage.scan("audit_log").unwrap();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0][0], Value::Int(100));
+    assert_eq!(audit[0][1], Value::Text("INSERT".to_string()));
+}
+
+/// Test INSERT INTO with NEW.column references
+#[test]
+fn test_trigger_insert_with_new_references() {
+    use logical::{ColumnSchema, DataType, FunctionDef, TableSchema, TriggerDef};
+
+    let mut storage = MemoryEngine::new();
+
+    // Create products table
+    storage
+        .create_table(TableSchema {
+            name: "products".to_string(),
+            columns: vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    data_type: DataType::Int,
+                    nullable: false,
+                    primary_key: true,
+                    unique: true,
+                    default: None,
+                    references: None,
+                },
+                ColumnSchema {
+                    name: "name".to_string(),
+                    data_type: DataType::Text,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+                ColumnSchema {
+                    name: "price".to_string(),
+                    data_type: DataType::Int,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+            ],
+            constraints: vec![],
+        })
+        .unwrap();
+
+    // Create history table
+    storage
+        .create_table(TableSchema {
+            name: "product_history".to_string(),
+            columns: vec![
+                ColumnSchema {
+                    name: "product_id".to_string(),
+                    data_type: DataType::Int,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+                ColumnSchema {
+                    name: "product_name".to_string(),
+                    data_type: DataType::Text,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+                ColumnSchema {
+                    name: "old_price".to_string(),
+                    data_type: DataType::Int,
+                    nullable: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    references: None,
+                },
+            ],
+            constraints: vec![],
+        })
+        .unwrap();
+
+    // Create function that inserts NEW values into history
+    storage
+        .create_function(FunctionDef {
+            name: "record_product".to_string(),
+            params: "[]".to_string(),
+            body: "INSERT INTO product_history VALUES (NEW.id, NEW.name, NEW.price); RETURN NEW"
+                .to_string(),
+            language: "sql".to_string(),
+        })
+        .unwrap();
+
+    // Create trigger
+    storage
+        .create_trigger(TriggerDef {
+            name: "product_history_trigger".to_string(),
+            table_name: "products".to_string(),
+            timing: TriggerTiming::After,
+            events: vec![TriggerEvent::Insert],
+            function_name: "record_product".to_string(),
+        })
+        .unwrap();
+
+    // Insert a product
+    let runtime = SqlRuntime::new();
+    let row = vec![
+        Value::Int(1),
+        Value::Text("Widget".to_string()),
+        Value::Int(99),
+    ];
+    let result = insert(&mut storage, &runtime, "products", row);
+    assert!(result.is_ok());
+
+    // Verify history was populated with NEW values
+    let history = storage.scan("product_history").unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0][0], Value::Int(1));
+    assert_eq!(history[0][1], Value::Text("Widget".to_string()));
+    assert_eq!(history[0][2], Value::Int(99));
 }

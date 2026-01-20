@@ -7,7 +7,6 @@ members = [
     "crates/sql-parser",
     "crates/sql-planner",
     "crates/sql-storage",
-    "crates/sql-wal",
     "crates/sql-engine",
     "crates/sql-tests",
     # Datalog frontend
@@ -35,7 +34,6 @@ json-value = { path = "crates/json-value" }
 sql-parser = { path = "crates/sql-parser" }
 sql-planner = { path = "crates/sql-planner" }
 sql-storage = { path = "crates/sql-storage" }
-sql-wal = { path = "crates/sql-wal" }
 sql-engine = { path = "crates/sql-engine" }
 
 # Datalog crates

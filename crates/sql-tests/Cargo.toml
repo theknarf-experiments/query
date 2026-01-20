@@ -9,7 +9,6 @@ license.workspace = true
 sql-engine = { workspace = true }
 sql-parser = { workspace = true }
 sql-storage = { workspace = true }
-sql-wal = { workspace = true }
 
 [dev-dependencies]
 proptest.workspace = true

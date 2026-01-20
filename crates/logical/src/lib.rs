@@ -5,7 +5,6 @@
 //! as well as the Runtime trait for trigger function execution.
 
 // Datalog adapter modules
-pub mod datalog_constants;
 pub mod datalog_context;
 pub mod datalog_unification;
 pub mod delta_tracker;
@@ -20,7 +19,6 @@ pub mod operations;
 pub use storage::*;
 
 // Re-export Datalog types
-pub use datalog_constants::ConstantEnv;
 pub use datalog_context::{
     atom_to_row, create_derived_schema, ensure_derived_table, row_to_atom, DatalogContext,
     InsertError, InsertOutcome, PredicateSchema,

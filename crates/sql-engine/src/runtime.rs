@@ -123,7 +123,7 @@ impl SqlRuntime {
         &self,
         stmt: &str,
         context: &TriggerContext,
-        row: &mut Vec<Value>,
+        row: &mut [Value],
     ) -> Result<(), RuntimeError> {
         // Parse: SET NEW.<column> = <value>
         let rest = &stmt[8..]; // Skip "SET NEW."
@@ -470,9 +470,9 @@ fn extract_string_literal(text: &str, keyword: &str) -> Option<String> {
     if let Some(pos) = upper.find(&keyword_upper) {
         let rest = &text[pos + keyword.len()..].trim();
         // Look for quoted string
-        if rest.starts_with('\'') {
-            if let Some(end) = rest[1..].find('\'') {
-                return Some(rest[1..end + 1].to_string());
+        if let Some(stripped) = rest.strip_prefix('\'') {
+            if let Some(end) = stripped.find('\'') {
+                return Some(stripped[..end].to_string());
             }
         }
     }

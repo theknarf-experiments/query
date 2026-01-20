@@ -27,7 +27,7 @@ impl SimRng {
     }
 
     fn next_bool(&mut self) -> bool {
-        self.next() % 2 == 0
+        self.next().is_multiple_of(2)
     }
 }
 
@@ -771,7 +771,7 @@ fn test_failure_mode_deterministic_recovery_pattern() {
             engine.execute("BEGIN").unwrap();
 
             let num_ops = rng.next_range(5) + 1;
-            for j in 0..num_ops {
+            for _j in 0..num_ops {
                 let id = rng.next_range(1000) as i64;
                 let _ = engine.execute(&format!("INSERT INTO recovery_test VALUES ({})", id));
             }

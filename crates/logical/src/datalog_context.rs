@@ -1069,7 +1069,7 @@ mod tests {
 
         let mut storage = MemoryEngine::new();
 
-        let runtime = NoOpRuntime;
+        let _runtime = NoOpRuntime;
 
         // Create a table in storage
         let schema = TableSchema {
@@ -1146,7 +1146,7 @@ mod tests {
 
         let mut storage = MemoryEngine::new();
 
-        let runtime = NoOpRuntime;
+        let _runtime = NoOpRuntime;
 
         // Create a table
         let schema = TableSchema {
@@ -1225,7 +1225,7 @@ mod tests {
 
         let mut storage = MemoryEngine::new();
 
-        let runtime = NoOpRuntime;
+        let _runtime = NoOpRuntime;
 
         // Create a table without any indexes
         let schema = TableSchema {

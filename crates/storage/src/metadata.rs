@@ -46,7 +46,7 @@ impl TriggerTiming {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_uppercase().as_str() {
             "BEFORE" => Some(TriggerTiming::Before),
             "AFTER" => Some(TriggerTiming::After),
@@ -72,7 +72,7 @@ impl TriggerEvent {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_uppercase().as_str() {
             "INSERT" => Some(TriggerEvent::Insert),
             "UPDATE" => Some(TriggerEvent::Update),
@@ -108,7 +108,7 @@ pub fn events_from_json(json: &str) -> Vec<TriggerEvent> {
         .split(',')
         .filter_map(|s| {
             let s = s.trim().trim_matches('"');
-            TriggerEvent::from_str(s)
+            TriggerEvent::parse(s)
         })
         .collect()
 }
@@ -120,36 +120,33 @@ mod tests {
     #[test]
     fn test_trigger_timing_roundtrip() {
         assert_eq!(
-            TriggerTiming::from_str(TriggerTiming::Before.as_str()),
+            TriggerTiming::parse(TriggerTiming::Before.as_str()),
             Some(TriggerTiming::Before)
         );
         assert_eq!(
-            TriggerTiming::from_str(TriggerTiming::After.as_str()),
+            TriggerTiming::parse(TriggerTiming::After.as_str()),
             Some(TriggerTiming::After)
         );
-        assert_eq!(
-            TriggerTiming::from_str("before"),
-            Some(TriggerTiming::Before)
-        );
-        assert_eq!(TriggerTiming::from_str("invalid"), None);
+        assert_eq!(TriggerTiming::parse("before"), Some(TriggerTiming::Before));
+        assert_eq!(TriggerTiming::parse("invalid"), None);
     }
 
     #[test]
     fn test_trigger_event_roundtrip() {
         assert_eq!(
-            TriggerEvent::from_str(TriggerEvent::Insert.as_str()),
+            TriggerEvent::parse(TriggerEvent::Insert.as_str()),
             Some(TriggerEvent::Insert)
         );
         assert_eq!(
-            TriggerEvent::from_str(TriggerEvent::Update.as_str()),
+            TriggerEvent::parse(TriggerEvent::Update.as_str()),
             Some(TriggerEvent::Update)
         );
         assert_eq!(
-            TriggerEvent::from_str(TriggerEvent::Delete.as_str()),
+            TriggerEvent::parse(TriggerEvent::Delete.as_str()),
             Some(TriggerEvent::Delete)
         );
-        assert_eq!(TriggerEvent::from_str("insert"), Some(TriggerEvent::Insert));
-        assert_eq!(TriggerEvent::from_str("invalid"), None);
+        assert_eq!(TriggerEvent::parse("insert"), Some(TriggerEvent::Insert));
+        assert_eq!(TriggerEvent::parse("invalid"), None);
     }
 
     #[test]

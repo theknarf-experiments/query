@@ -153,8 +153,8 @@ impl<S: StorageEngine> Runtime<S> for TrackingRuntime {
     ) -> Result<TriggerResult, RuntimeError> {
         self.invocations.borrow_mut().push((
             function_name.to_string(),
-            context.event.clone(),
-            context.timing.clone(),
+            context.event,
+            context.timing,
         ));
         Ok(TriggerResult::Proceed(None))
     }

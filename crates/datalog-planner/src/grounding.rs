@@ -24,6 +24,7 @@ use datalog_parser::{Atom, Literal, Rule, Term};
 use logical::{DatalogContext, StorageEngine, Substitution};
 
 #[cfg(test)]
+#[allow(unused_imports)]
 use logical::NoOpRuntime;
 
 #[cfg(test)]
@@ -35,10 +36,12 @@ mod allocation_tracker {
 
     static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 
+    #[allow(dead_code)]
     pub fn reset() {
         ALLOCATIONS.store(0, Ordering::SeqCst);
     }
 
+    #[allow(dead_code)]
     pub fn allocations() -> usize {
         ALLOCATIONS.load(Ordering::SeqCst)
     }

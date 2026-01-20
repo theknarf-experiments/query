@@ -153,6 +153,7 @@ fn int_value_strategy() -> impl Strategy<Value = i64> {
 }
 
 /// Generate a random text value (simple alphanumeric)
+#[allow(dead_code)]
 fn text_value_strategy() -> impl Strategy<Value = String> {
     prop::string::string_regex("[a-zA-Z0-9 ]{1,20}").unwrap()
 }

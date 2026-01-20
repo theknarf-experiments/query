@@ -457,7 +457,6 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
         let runtime = NoOpRuntime;
-        let runtime = NoOpRuntime;
         db.insert(
             make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
             &mut storage,

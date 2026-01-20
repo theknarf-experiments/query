@@ -1992,7 +1992,7 @@ mod tests {
         // Query for path(a, d) which can be derived two ways
         // (a->b->d and a->c->d) should still return result
         if let QueryResult::Select { columns, rows } = result {
-            assert!(columns.is_empty() || rows.len() >= 1);
+            assert!(columns.is_empty() || !rows.is_empty());
         } else {
             panic!("Expected Select result");
         }

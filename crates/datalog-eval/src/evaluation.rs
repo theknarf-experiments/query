@@ -1875,7 +1875,10 @@ mod tests {
         let result = evaluate(&rules, &[], db, &mut storage).unwrap();
 
         // Verify compound term matching worked
-        assert!(result.contains(&make_atom("has_weapon", vec![atom_term("player")]), &storage));
+        assert!(result.contains(
+            &make_atom("has_weapon", vec![atom_term("player")]),
+            &storage
+        ));
 
         // Query with integer
         let health_query = make_atom("health", vec![var_term("Who"), int_term(100)]);
@@ -1894,12 +1897,18 @@ mod tests {
         let mut storage = MemoryEngine::new();
 
         db.insert(
-            make_atom("player", vec![atom_term("alice"), int_term(100), bool_term(true)]),
+            make_atom(
+                "player",
+                vec![atom_term("alice"), int_term(100), bool_term(true)],
+            ),
             &mut storage,
         )
         .unwrap();
         db.insert(
-            make_atom("player", vec![atom_term("bob"), int_term(0), bool_term(false)]),
+            make_atom(
+                "player",
+                vec![atom_term("bob"), int_term(0), bool_term(false)],
+            ),
             &mut storage,
         )
         .unwrap();
@@ -1916,7 +1925,10 @@ mod tests {
         let result = evaluate(&rules, &[], db, &mut storage).unwrap();
 
         // Only alice should be alive
-        assert!(result.contains(&make_atom("alive_player", vec![atom_term("alice")]), &storage));
+        assert!(result.contains(
+            &make_atom("alive_player", vec![atom_term("alice")]),
+            &storage
+        ));
 
         let query = make_atom("alive_player", vec![var_term("X")]);
         let results = result.query(&query, &storage);
@@ -1965,7 +1977,10 @@ mod tests {
         let result = evaluate(&[], &constraints, db, &mut storage);
         assert!(result.is_err());
 
-        if let Err(EvaluationError::ConstraintViolation { violation_count, .. }) = result {
+        if let Err(EvaluationError::ConstraintViolation {
+            violation_count, ..
+        }) = result
+        {
             assert_eq!(violation_count, 3);
         } else {
             panic!("Expected ConstraintViolation error");
@@ -1983,8 +1998,11 @@ mod tests {
             .unwrap();
         db.insert(make_atom("dead", vec![atom_term("alice")]), &mut storage)
             .unwrap();
-        db.insert(make_atom("has_weapon", vec![atom_term("alice")]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("has_weapon", vec![atom_term("alice")]),
+            &mut storage,
+        )
+        .unwrap();
 
         // Constraint: :- dead(X), has_weapon(X).
         // (Dead players shouldn't have weapons)
@@ -2008,8 +2026,11 @@ mod tests {
             .unwrap();
         db.insert(make_atom("player", vec![atom_term("bob")]), &mut storage)
             .unwrap();
-        db.insert(make_atom("has_health", vec![atom_term("alice")]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("has_health", vec![atom_term("alice")]),
+            &mut storage,
+        )
+        .unwrap();
         // bob has no health
 
         // Constraint: :- player(X), not has_health(X).
@@ -2024,7 +2045,10 @@ mod tests {
         let result = evaluate(&[], &constraints, db, &mut storage);
         assert!(result.is_err());
 
-        if let Err(EvaluationError::ConstraintViolation { violation_count, .. }) = result {
+        if let Err(EvaluationError::ConstraintViolation {
+            violation_count, ..
+        }) = result
+        {
             assert_eq!(violation_count, 1); // bob violates
         }
     }
@@ -2126,8 +2150,14 @@ mod tests {
             let next_predicate = format!("level{}", i + 1);
 
             rules.push(Rule {
-                head: make_atom(&next_predicate, vec![compound_term("wrap", vec![var_term("X")])]),
-                body: vec![Literal::Positive(make_atom(&predicate, vec![var_term("X")]))],
+                head: make_atom(
+                    &next_predicate,
+                    vec![compound_term("wrap", vec![var_term("X")])],
+                ),
+                body: vec![Literal::Positive(make_atom(
+                    &predicate,
+                    vec![var_term("X")],
+                ))],
             });
         }
 
@@ -2156,7 +2186,10 @@ mod tests {
         db.insert(
             make_atom(
                 "dangerous",
-                vec![compound_term("property", vec![atom_term("sword"), atom_term("sharp")])],
+                vec![compound_term(
+                    "property",
+                    vec![atom_term("sword"), atom_term("sharp")],
+                )],
             ),
             &mut storage,
         )
@@ -2169,7 +2202,10 @@ mod tests {
                 Literal::Positive(make_atom("item", vec![var_term("X")])),
                 Literal::Negative(make_atom(
                     "dangerous",
-                    vec![compound_term("property", vec![var_term("X"), atom_term("sharp")])],
+                    vec![compound_term(
+                        "property",
+                        vec![var_term("X"), atom_term("sharp")],
+                    )],
                 )),
             ],
         }];

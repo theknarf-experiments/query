@@ -260,7 +260,12 @@ mod tests {
 
         let expected = make_atom(
             "config",
-            vec![int_term(100), float_term(1.5), bool_term(true), atom_term("sword")],
+            vec![
+                int_term(100),
+                float_term(1.5),
+                bool_term(true),
+                atom_term("sword"),
+            ],
         );
 
         assert_eq!(result, expected);
@@ -319,8 +324,8 @@ mod tests {
             vec![
                 atom_term("default_host"),
                 atom_term("default_port"),
-                bool_term(true),             // Regular value, not a constant
-                atom_term("http"),           // Regular atom
+                bool_term(true),   // Regular value, not a constant
+                atom_term("http"), // Regular atom
             ],
         );
 
@@ -371,7 +376,10 @@ mod tests {
         let term = Term::Compound(Intern::new("empty".to_string()), vec![]);
         let result = env.substitute_term(&term);
 
-        assert_eq!(result, Term::Compound(Intern::new("empty".to_string()), vec![]));
+        assert_eq!(
+            result,
+            Term::Compound(Intern::new("empty".to_string()), vec![])
+        );
     }
 
     #[test]

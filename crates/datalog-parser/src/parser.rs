@@ -402,12 +402,10 @@ mod tests {
         assert!(result.is_ok());
         let program = result.unwrap();
         match &program.statements[0] {
-            Statement::Fact(f) => {
-                match &f.atom.terms[1] {
-                    Term::Constant(Value::Integer(n)) => assert_eq!(*n, 30),
-                    _ => panic!("Expected integer"),
-                }
-            }
+            Statement::Fact(f) => match &f.atom.terms[1] {
+                Term::Constant(Value::Integer(n)) => assert_eq!(*n, 30),
+                _ => panic!("Expected integer"),
+            },
             _ => panic!("Expected fact"),
         }
     }
@@ -418,12 +416,10 @@ mod tests {
         assert!(result.is_ok());
         let program = result.unwrap();
         match &program.statements[0] {
-            Statement::Fact(f) => {
-                match &f.atom.terms[1] {
-                    Term::Constant(Value::Integer(n)) => assert_eq!(*n, -10),
-                    _ => panic!("Expected negative integer"),
-                }
-            }
+            Statement::Fact(f) => match &f.atom.terms[1] {
+                Term::Constant(Value::Integer(n)) => assert_eq!(*n, -10),
+                _ => panic!("Expected negative integer"),
+            },
             _ => panic!("Expected fact"),
         }
     }
@@ -434,12 +430,10 @@ mod tests {
         assert!(result.is_ok());
         let program = result.unwrap();
         match &program.statements[0] {
-            Statement::Fact(f) => {
-                match &f.atom.terms[1] {
-                    Term::Constant(Value::Float(n)) => assert!((*n - 3.14).abs() < 0.001),
-                    _ => panic!("Expected float"),
-                }
-            }
+            Statement::Fact(f) => match &f.atom.terms[1] {
+                Term::Constant(Value::Float(n)) => assert!((*n - 3.14).abs() < 0.001),
+                _ => panic!("Expected float"),
+            },
             _ => panic!("Expected fact"),
         }
     }
@@ -450,12 +444,10 @@ mod tests {
         assert!(result.is_ok());
         let program = result.unwrap();
         match &program.statements[0] {
-            Statement::Fact(f) => {
-                match &f.atom.terms[1] {
-                    Term::Constant(Value::String(s)) => assert_eq!(s.as_ref(), "John Doe"),
-                    _ => panic!("Expected string"),
-                }
-            }
+            Statement::Fact(f) => match &f.atom.terms[1] {
+                Term::Constant(Value::String(s)) => assert_eq!(s.as_ref(), "John Doe"),
+                _ => panic!("Expected string"),
+            },
             _ => panic!("Expected fact"),
         }
     }
@@ -466,12 +458,10 @@ mod tests {
         assert!(result.is_ok());
         let program = result.unwrap();
         match &program.statements[0] {
-            Statement::Fact(f) => {
-                match &f.atom.terms[1] {
-                    Term::Constant(Value::Boolean(b)) => assert!(*b),
-                    _ => panic!("Expected boolean true"),
-                }
-            }
+            Statement::Fact(f) => match &f.atom.terms[1] {
+                Term::Constant(Value::Boolean(b)) => assert!(*b),
+                _ => panic!("Expected boolean true"),
+            },
             _ => panic!("Expected fact"),
         }
     }
@@ -482,12 +472,10 @@ mod tests {
         assert!(result.is_ok());
         let program = result.unwrap();
         match &program.statements[0] {
-            Statement::Fact(f) => {
-                match &f.atom.terms[1] {
-                    Term::Constant(Value::Boolean(b)) => assert!(!*b),
-                    _ => panic!("Expected boolean false"),
-                }
-            }
+            Statement::Fact(f) => match &f.atom.terms[1] {
+                Term::Constant(Value::Boolean(b)) => assert!(!*b),
+                _ => panic!("Expected boolean false"),
+            },
             _ => panic!("Expected fact"),
         }
     }
@@ -547,17 +535,13 @@ mod tests {
         assert!(result.is_ok());
         let program = result.unwrap();
         match &program.statements[0] {
-            Statement::Rule(r) => {
-                match &r.body[0] {
-                    Literal::Positive(atom) => {
-                        match &atom.terms[1] {
-                            Term::Variable(v) => assert!(v.as_ref().starts_with('_')),
-                            _ => panic!("Expected variable"),
-                        }
-                    }
-                    _ => panic!("Expected positive literal"),
-                }
-            }
+            Statement::Rule(r) => match &r.body[0] {
+                Literal::Positive(atom) => match &atom.terms[1] {
+                    Term::Variable(v) => assert!(v.as_ref().starts_with('_')),
+                    _ => panic!("Expected variable"),
+                },
+                _ => panic!("Expected positive literal"),
+            },
             _ => panic!("Expected rule"),
         }
     }
@@ -706,15 +690,13 @@ mod tests {
         assert!(result.is_ok());
         let program = result.unwrap();
         match &program.statements[0] {
-            Statement::Fact(f) => {
-                match &f.atom.terms[1] {
-                    Term::Compound(functor, args) => {
-                        assert_eq!(functor.as_ref(), "item");
-                        assert_eq!(args.len(), 2);
-                    }
-                    _ => panic!("Expected compound term"),
+            Statement::Fact(f) => match &f.atom.terms[1] {
+                Term::Compound(functor, args) => {
+                    assert_eq!(functor.as_ref(), "item");
+                    assert_eq!(args.len(), 2);
                 }
-            }
+                _ => panic!("Expected compound term"),
+            },
             _ => panic!("Expected fact"),
         }
     }
@@ -725,27 +707,28 @@ mod tests {
         assert!(result.is_ok());
         let program = result.unwrap();
         match &program.statements[0] {
-            Statement::Fact(f) => {
-                match &f.atom.terms[0] {
-                    Term::Compound(functor, args) => {
-                        assert_eq!(functor.as_ref(), "wrapper");
-                        match &args[0] {
-                            Term::Compound(inner_functor, _) => {
-                                assert_eq!(inner_functor.as_ref(), "inner");
-                            }
-                            _ => panic!("Expected nested compound"),
+            Statement::Fact(f) => match &f.atom.terms[0] {
+                Term::Compound(functor, args) => {
+                    assert_eq!(functor.as_ref(), "wrapper");
+                    match &args[0] {
+                        Term::Compound(inner_functor, _) => {
+                            assert_eq!(inner_functor.as_ref(), "inner");
                         }
+                        _ => panic!("Expected nested compound"),
                     }
-                    _ => panic!("Expected compound term"),
                 }
-            }
+                _ => panic!("Expected compound term"),
+            },
             _ => panic!("Expected fact"),
         }
     }
 
     #[test]
     fn test_parse_compound_with_variable() {
-        let result = parse_program("match(item(X, Y)) :- inventory(item(X, Y)).", SrcId::empty());
+        let result = parse_program(
+            "match(item(X, Y)) :- inventory(item(X, Y)).",
+            SrcId::empty(),
+        );
         assert!(result.is_ok());
     }
 
@@ -777,7 +760,10 @@ mod tests {
 
     #[test]
     fn test_parse_arithmetic_complex() {
-        let result = parse_program("calc(X, Y, Z, X + Y * Z) :- num(X), num(Y), num(Z).", SrcId::empty());
+        let result = parse_program(
+            "calc(X, Y, Z, X + Y * Z) :- num(X), num(Y), num(Z).",
+            SrcId::empty(),
+        );
         assert!(result.is_ok());
     }
 
@@ -853,6 +839,530 @@ mod tests {
     #[test]
     fn test_parse_numbers_in_names() {
         let result = parse_program("item1(value2).", SrcId::empty());
+        assert!(result.is_ok());
+    }
+
+    // ===== String Escape Sequence Tests =====
+
+    #[test]
+    fn test_lex_string_escape_newline() {
+        let result = lex("\"line\\nnext\"");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_lex_string_escape_tab() {
+        let result = lex("\"col1\\tcol2\"");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_lex_string_escape_quote() {
+        let result = lex("\"say \\\"hello\\\"\"");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_lex_string_escape_backslash() {
+        let result = lex("\"path\\\\file\"");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_empty_string() {
+        let result = parse_program("empty(\"\").", SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Fact(f) => match &f.atom.terms[0] {
+                Term::Constant(Value::String(s)) => assert_eq!(s.as_ref(), ""),
+                _ => panic!("Expected empty string"),
+            },
+            _ => panic!("Expected fact"),
+        }
+    }
+
+    // ===== Term Parsing Tests =====
+
+    #[test]
+    fn test_parse_zero_integer() {
+        let result = parse_program("value(0).", SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Fact(f) => match &f.atom.terms[0] {
+                Term::Constant(Value::Integer(n)) => assert_eq!(*n, 0),
+                _ => panic!("Expected zero integer"),
+            },
+            _ => panic!("Expected fact"),
+        }
+    }
+
+    #[test]
+    fn test_parse_large_integer() {
+        let result = parse_program("value(999999999).", SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Fact(f) => match &f.atom.terms[0] {
+                Term::Constant(Value::Integer(n)) => assert_eq!(*n, 999999999),
+                _ => panic!("Expected large integer"),
+            },
+            _ => panic!("Expected fact"),
+        }
+    }
+
+    #[test]
+    fn test_parse_negative_float() {
+        let result = parse_program("temp(room, -2.5).", SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Fact(f) => match &f.atom.terms[1] {
+                Term::Constant(Value::Float(n)) => assert!((*n + 2.5).abs() < 0.001),
+                _ => panic!("Expected negative float"),
+            },
+            _ => panic!("Expected fact"),
+        }
+    }
+
+    #[test]
+    fn test_parse_float_with_zero_decimal() {
+        let result = parse_program("value(10.0).", SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Fact(f) => match &f.atom.terms[0] {
+                Term::Constant(Value::Float(n)) => assert!((*n - 10.0).abs() < 0.001),
+                _ => panic!("Expected float with zero decimal"),
+            },
+            _ => panic!("Expected fact"),
+        }
+    }
+
+    #[test]
+    fn test_parse_uppercase_variable() {
+        // Variables are only valid in rules, not facts
+        let result = parse_program("foo(X) :- base(X).", SrcId::empty());
+        assert!(result.is_ok(), "Parse error: {:?}", result.err());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Rule(r) => match &r.head.terms[0] {
+                Term::Variable(v) => assert_eq!(v.as_ref(), "X"),
+                _ => panic!("Expected variable"),
+            },
+            _ => panic!("Expected rule"),
+        }
+    }
+
+    #[test]
+    fn test_parse_multichar_variable() {
+        // Variables are only valid in rules, not facts
+        let result = parse_program("foo(Player) :- player(Player).", SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Rule(r) => match &r.head.terms[0] {
+                Term::Variable(v) => assert_eq!(v.as_ref(), "Player"),
+                _ => panic!("Expected variable"),
+            },
+            _ => panic!("Expected rule"),
+        }
+    }
+
+    #[test]
+    fn test_parse_underscore_variable() {
+        // Variables are only valid in rules, not facts
+        let result = parse_program("foo(_tmp) :- base(_tmp).", SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Rule(r) => match &r.head.terms[0] {
+                Term::Variable(v) => assert!(v.as_ref().starts_with('_')),
+                _ => panic!("Expected underscore variable"),
+            },
+            _ => panic!("Expected rule"),
+        }
+    }
+
+    // ===== Atom Parsing Tests =====
+
+    #[test]
+    fn test_parse_atom_no_args() {
+        let result = parse_program("done.", SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Fact(f) => {
+                assert_eq!(f.atom.predicate.as_ref(), "done");
+                assert_eq!(f.atom.terms.len(), 0);
+            }
+            _ => panic!("Expected fact"),
+        }
+    }
+
+    #[test]
+    fn test_parse_atom_with_mixed_args() {
+        let result = parse_program("mixed(john, 42, X).", SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Fact(f) => {
+                assert_eq!(f.atom.terms.len(), 3);
+                match &f.atom.terms[0] {
+                    Term::Constant(Value::Atom(_)) => {}
+                    _ => panic!("Expected atom"),
+                }
+                match &f.atom.terms[1] {
+                    Term::Constant(Value::Integer(42)) => {}
+                    _ => panic!("Expected integer"),
+                }
+                match &f.atom.terms[2] {
+                    Term::Variable(_) => {}
+                    _ => panic!("Expected variable"),
+                }
+            }
+            _ => panic!("Expected fact"),
+        }
+    }
+
+    // ===== Literal Parsing Tests =====
+
+    #[test]
+    fn test_parse_positive_literal() {
+        let result = parse_program("result :- parent(X, Y).", SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Rule(r) => {
+                assert!(r.body[0].is_positive());
+            }
+            _ => panic!("Expected rule"),
+        }
+    }
+
+    #[test]
+    fn test_parse_negative_literal() {
+        let result = parse_program("result :- not parent(X, Y).", SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Rule(r) => {
+                assert!(r.body[0].is_negative());
+            }
+            _ => panic!("Expected rule"),
+        }
+    }
+
+    // ===== Comment Parsing Tests =====
+
+    #[test]
+    fn test_parse_line_comment() {
+        let input = r#"
+            % This is a comment
+            parent(john, mary).
+        "#;
+        let result = parse_program(input, SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        assert_eq!(program.statements.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_inline_comment() {
+        let input = "parent(john, mary). % This is an inline comment";
+        let result = parse_program(input, SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        assert_eq!(program.statements.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_multiple_line_comments() {
+        let input = r#"
+            % Comment 1
+            parent(john, mary).
+            % Comment 2
+            parent(mary, alice).
+            % Comment 3
+        "#;
+        let result = parse_program(input, SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        assert_eq!(program.statements.len(), 2);
+    }
+
+    // ===== Multiline Program Tests =====
+
+    #[test]
+    fn test_parse_multiline_rule() {
+        let input = r#"
+            ancestor(X, Z) :-
+                parent(X, Y),
+                ancestor(Y, Z).
+        "#;
+        let result = parse_program(input, SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0] {
+            Statement::Rule(r) => {
+                assert_eq!(r.body.len(), 2);
+            }
+            _ => panic!("Expected rule"),
+        }
+    }
+
+    #[test]
+    fn test_parse_comprehensive_multiline_program() {
+        let input = r#"
+            % Family relationships
+            parent(john, mary).
+            parent(mary, alice).
+            parent(mary, bob).
+
+            % Ancestor rules
+            ancestor(X, Y) :- parent(X, Y).
+            ancestor(X, Z) :-
+                parent(X, Y),
+                ancestor(Y, Z).
+
+            % Safety constraint
+            :- ancestor(X, X).
+
+            % Query
+            ?- ancestor(john, Who).
+        "#;
+        let result = parse_program(input, SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        assert_eq!(program.statements.len(), 7);
+    }
+
+    #[test]
+    fn test_parse_all_datatypes_in_program() {
+        let input = r#"
+            data(42).
+            data(-10).
+            data(3.14).
+            data(-2.5).
+            data(true).
+            data(false).
+            data("hello").
+            data(atom).
+            process(X, Y, _tmp).
+            mixed(42, 3.14, true, "hi", atom, X).
+        "#;
+        let result = parse_program(input, SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        assert_eq!(program.statements.len(), 10);
+    }
+
+    // ===== Error Handling Tests =====
+
+    #[test]
+    fn test_parse_unclosed_parenthesis() {
+        let result = parse_program("parent(john, mary.", SrcId::empty());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_extra_closing_paren() {
+        let result = parse_program("parent(john, mary)).", SrcId::empty());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_missing_comma() {
+        let result = parse_program("parent(john mary).", SrcId::empty());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_double_dot() {
+        let result = parse_program("parent(john, mary)..", SrcId::empty());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_empty_body_after_if() {
+        let result = parse_program("result :- .", SrcId::empty());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_double_negation() {
+        let result = parse_program("result :- not not parent(X, Y).", SrcId::empty());
+        assert!(result.is_err());
+    }
+
+    // ===== Query Parsing Tests =====
+
+    #[test]
+    fn test_parse_query_ground_direct() {
+        let result = parse_query("?- parent(john, mary).", SrcId::empty());
+        assert!(result.is_ok());
+        let query = result.unwrap();
+        assert_eq!(query.body.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_query_with_variable() {
+        let result = parse_query("?- parent(X, mary).", SrcId::empty());
+        assert!(result.is_ok());
+        let query = result.unwrap();
+        assert_eq!(query.body.len(), 1);
+        match &query.body[0] {
+            Literal::Positive(atom) => match &atom.terms[0] {
+                Term::Variable(v) => assert_eq!(v.as_ref(), "X"),
+                _ => panic!("Expected variable"),
+            },
+            _ => panic!("Expected positive literal"),
+        }
+    }
+
+    #[test]
+    fn test_parse_query_multiple_literals_direct() {
+        let result = parse_query("?- parent(X, Y), parent(Y, Z).", SrcId::empty());
+        assert!(result.is_ok());
+        let query = result.unwrap();
+        assert_eq!(query.body.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_query_with_negation() {
+        let result = parse_query("?- parent(X, Y), not dead(X).", SrcId::empty());
+        assert!(result.is_ok());
+        let query = result.unwrap();
+        assert_eq!(query.body.len(), 2);
+        assert!(query.body[0].is_positive());
+        assert!(query.body[1].is_negative());
+    }
+
+    #[test]
+    fn test_parse_query_complex() {
+        let result = parse_query(
+            "?- ancestor(X, Z), parent(X, Y), parent(Y, Z), not dead(Z).",
+            SrcId::empty(),
+        );
+        assert!(result.is_ok());
+        let query = result.unwrap();
+        assert_eq!(query.body.len(), 4);
+    }
+
+    #[test]
+    fn test_parse_query_zero_arity() {
+        let result = parse_query("?- running.", SrcId::empty());
+        assert!(result.is_ok());
+        let query = result.unwrap();
+        assert_eq!(query.body.len(), 1);
+    }
+
+    // ===== Deeply Nested Compound Terms =====
+
+    #[test]
+    fn test_parse_deeply_nested_compound() {
+        let result = parse_program("data(a(b(c(d(e))))).", SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Fact(f) => match &f.atom.terms[0] {
+                Term::Compound(functor, args) => {
+                    assert_eq!(functor.as_ref(), "a");
+                    assert_eq!(args.len(), 1);
+                }
+                _ => panic!("Expected compound term"),
+            },
+            _ => panic!("Expected fact"),
+        }
+    }
+
+    #[test]
+    fn test_parse_compound_with_multiple_args() {
+        let result = parse_program("data(pair(1, 2), triple(a, b, c)).", SrcId::empty());
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Statement::Fact(f) => {
+                assert_eq!(f.atom.terms.len(), 2);
+                match &f.atom.terms[0] {
+                    Term::Compound(functor, args) => {
+                        assert_eq!(functor.as_ref(), "pair");
+                        assert_eq!(args.len(), 2);
+                    }
+                    _ => panic!("Expected compound term"),
+                }
+                match &f.atom.terms[1] {
+                    Term::Compound(functor, args) => {
+                        assert_eq!(functor.as_ref(), "triple");
+                        assert_eq!(args.len(), 3);
+                    }
+                    _ => panic!("Expected compound term"),
+                }
+            }
+            _ => panic!("Expected fact"),
+        }
+    }
+
+    // ===== Arithmetic Precedence Tests =====
+
+    #[test]
+    fn test_parse_arithmetic_precedence() {
+        // X + Y * 2 should parse - arithmetic in rule body
+        let result = parse_program("foo(Z) :- num(X), num(Y), Z = X + Y * 2.", SrcId::empty());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_parenthesized_arithmetic() {
+        // (X + Y) * 2 with explicit parentheses in rule
+        let result = parse_program("foo(Z) :- num(X), num(Y), Z = (X + Y) * 2.", SrcId::empty());
+        assert!(result.is_ok());
+    }
+
+    // ===== Whitespace Handling Tests =====
+
+    #[test]
+    fn test_parse_extra_whitespace() {
+        let result = parse_program("  parent  (  john  ,  mary  )  .  ", SrcId::empty());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_no_whitespace() {
+        let result = parse_program("parent(john,mary).", SrcId::empty());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_tabs_and_newlines() {
+        let result = parse_program("parent(\tjohn,\n\tmary\n).", SrcId::empty());
+        assert!(result.is_ok());
+    }
+
+    // ===== Special Predicate Names =====
+
+    #[test]
+    fn test_parse_predicate_starting_with_underscore() {
+        let result = parse_program("_internal(x).", SrcId::empty());
+        // Predicates starting with underscore may or may not be allowed
+        // depending on the grammar - we just ensure it doesn't crash
+        let _ = result;
+    }
+
+    #[test]
+    fn test_parse_single_char_predicate() {
+        let result = parse_program("p(x).", SrcId::empty());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_long_predicate_name() {
+        let result = parse_program(
+            "this_is_a_very_long_predicate_name_that_should_still_work(x).",
+            SrcId::empty(),
+        );
         assert!(result.is_ok());
     }
 }

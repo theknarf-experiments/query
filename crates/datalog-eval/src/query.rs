@@ -123,8 +123,11 @@ mod tests {
     fn test_query_ground_true() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("parent", vec![atom_term("john"), atom_term("mary")]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
+            &mut storage,
+        )
+        .unwrap();
 
         // Query: ?- parent(john, mary).
         let query = Query {
@@ -142,8 +145,11 @@ mod tests {
     fn test_query_ground_false() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("parent", vec![atom_term("john"), atom_term("mary")]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
+            &mut storage,
+        )
+        .unwrap();
 
         // Query: ?- parent(alice, bob). (not in database)
         let query = Query {
@@ -163,12 +169,21 @@ mod tests {
     fn test_query_with_one_variable() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("parent", vec![atom_term("john"), atom_term("mary")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("parent", vec![atom_term("alice"), atom_term("mary")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("parent", vec![atom_term("bob"), atom_term("sue")]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("alice"), atom_term("mary")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("bob"), atom_term("sue")]),
+            &mut storage,
+        )
+        .unwrap();
 
         // Query: ?- parent(X, mary).
         let query = Query {
@@ -200,10 +215,16 @@ mod tests {
     fn test_query_with_multiple_variables() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("parent", vec![atom_term("john"), atom_term("mary")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("parent", vec![atom_term("alice"), atom_term("bob")]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("alice"), atom_term("bob")]),
+            &mut storage,
+        )
+        .unwrap();
 
         // Query: ?- parent(X, Y).
         let query = Query {
@@ -223,10 +244,16 @@ mod tests {
     fn test_query_with_join() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("parent", vec![atom_term("john"), atom_term("mary")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("parent", vec![atom_term("mary"), atom_term("sue")]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("mary"), atom_term("sue")]),
+            &mut storage,
+        )
+        .unwrap();
 
         // Query: ?- parent(X, Y), parent(Y, Z).
         // Should find: X=john, Y=mary, Z=sue
@@ -245,10 +272,16 @@ mod tests {
     fn test_query_join_no_match() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("parent", vec![atom_term("john"), atom_term("mary")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("parent", vec![atom_term("bob"), atom_term("sue")]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("bob"), atom_term("sue")]),
+            &mut storage,
+        )
+        .unwrap();
 
         // Query: ?- parent(X, Y), parent(Y, Z).
         // No chains exist
@@ -344,8 +377,11 @@ mod tests {
     fn test_extract_bindings() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("parent", vec![atom_term("john"), atom_term("mary")]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
+            &mut storage,
+        )
+        .unwrap();
 
         let query = Query {
             body: vec![Literal::Positive(make_atom(
@@ -385,10 +421,16 @@ mod tests {
     fn test_query_with_integers() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("age", vec![atom_term("john"), int_term(30)]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("age", vec![atom_term("mary"), int_term(25)]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("age", vec![atom_term("john"), int_term(30)]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("age", vec![atom_term("mary"), int_term(25)]),
+            &mut storage,
+        )
+        .unwrap();
 
         // Query: ?- age(X, 30).
         let query = Query {

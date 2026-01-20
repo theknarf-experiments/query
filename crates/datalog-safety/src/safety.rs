@@ -188,7 +188,10 @@ mod tests {
         // ancestor(X, Y) :- parent(X, Y).
         let rule = make_rule(
             make_atom("ancestor", vec![var("X"), var("Y")]),
-            vec![Literal::Positive(make_atom("parent", vec![var("X"), var("Y")]))],
+            vec![Literal::Positive(make_atom(
+                "parent",
+                vec![var("X"), var("Y")],
+            ))],
         );
         assert!(check_rule_safety(&rule).is_ok());
     }
@@ -338,7 +341,10 @@ mod tests {
                 Literal::Positive(make_atom("q", vec![var("X")])),
                 Literal::Negative(make_atom(
                     "r",
-                    vec![Term::Compound(Intern::new("item".to_string()), vec![var("Y")])],
+                    vec![Term::Compound(
+                        Intern::new("item".to_string()),
+                        vec![var("Y")],
+                    )],
                 )),
             ],
         );

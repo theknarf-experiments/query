@@ -275,7 +275,10 @@ mod tests {
         let original = make_atom("parent", vec![var("X"), var("Y")]);
         let result = subst.apply_atom(&original);
 
-        assert_eq!(result, make_atom("parent", vec![atom("john"), atom("mary")]));
+        assert_eq!(
+            result,
+            make_atom("parent", vec![atom("john"), atom("mary")])
+        );
     }
 
     // ===== Unification Tests - Constants =====
@@ -432,7 +435,10 @@ mod tests {
     fn test_unify_deeply_nested_compound() {
         let mut subst = Substitution::new();
         // f(g(h(X))) with f(g(h(42)))
-        let t1 = compound("f", vec![compound("g", vec![compound("h", vec![var("X")])])]);
+        let t1 = compound(
+            "f",
+            vec![compound("g", vec![compound("h", vec![var("X")])])],
+        );
         let t2 = compound("f", vec![compound("g", vec![compound("h", vec![int(42)])])]);
 
         assert!(unify(&t1, &t2, &mut subst));
@@ -460,7 +466,11 @@ mod tests {
     fn test_occurs_check_simple() {
         let mut subst = Substitution::new();
         // X = f(X) should fail (infinite structure)
-        assert!(!unify(&var("X"), &compound("f", vec![var("X")]), &mut subst));
+        assert!(!unify(
+            &var("X"),
+            &compound("f", vec![var("X")]),
+            &mut subst
+        ));
     }
 
     #[test]
@@ -540,10 +550,16 @@ mod tests {
     #[test]
     fn test_unify_atoms_with_compound_terms() {
         let mut subst = Substitution::new();
-        let atom1 = make_atom("has", vec![atom("john"), compound("item", vec![var("X"), int(5)])]);
+        let atom1 = make_atom(
+            "has",
+            vec![atom("john"), compound("item", vec![var("X"), int(5)])],
+        );
         let atom2 = make_atom(
             "has",
-            vec![atom("john"), compound("item", vec![atom("sword"), var("Y")])],
+            vec![
+                atom("john"),
+                compound("item", vec![atom("sword"), var("Y")]),
+            ],
         );
 
         assert!(unify_atoms(&atom1, &atom2, &mut subst));

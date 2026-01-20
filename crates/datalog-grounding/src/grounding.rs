@@ -761,12 +761,21 @@ mod tests {
     fn test_ground_rule_multiple_chains() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("parent", vec![atom_term("a"), atom_term("b")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("parent", vec![atom_term("b"), atom_term("c")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("parent", vec![atom_term("b"), atom_term("d")]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("a"), atom_term("b")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("b"), atom_term("c")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("b"), atom_term("d")]),
+            &mut storage,
+        )
+        .unwrap();
 
         // Rule: grandparent(X, Z) :- parent(X, Y), parent(Y, Z).
         let rule = make_rule(
@@ -816,12 +825,21 @@ mod tests {
     fn test_ground_rule_three_literals() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("edge", vec![atom_term("a"), atom_term("b")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("edge", vec![atom_term("b"), atom_term("c")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("edge", vec![atom_term("c"), atom_term("d")]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("edge", vec![atom_term("a"), atom_term("b")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("edge", vec![atom_term("b"), atom_term("c")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("edge", vec![atom_term("c"), atom_term("d")]),
+            &mut storage,
+        )
+        .unwrap();
 
         // Rule: path3(X, W) :- edge(X, Y), edge(Y, Z), edge(Z, W).
         let rule = make_rule(
@@ -946,7 +964,10 @@ mod tests {
         // Rule: not_bird_polly :- not bird(polly).
         let rule = make_rule(
             make_atom("not_bird_polly", vec![]),
-            vec![Literal::Negative(make_atom("bird", vec![atom_term("polly")]))],
+            vec![Literal::Negative(make_atom(
+                "bird",
+                vec![atom_term("polly")],
+            ))],
         );
 
         let results = ground_rule(&rule, &db, &storage);
@@ -959,9 +980,12 @@ mod tests {
     fn test_ground_rule_multiple_negations() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("a", vec![atom_term("x")]), &mut storage).unwrap();
-        db.insert(make_atom("b", vec![atom_term("y")]), &mut storage).unwrap();
-        db.insert(make_atom("c", vec![atom_term("z")]), &mut storage).unwrap();
+        db.insert(make_atom("a", vec![atom_term("x")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("b", vec![atom_term("y")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("c", vec![atom_term("z")]), &mut storage)
+            .unwrap();
 
         // Rule: result :- not a(y), not b(x), not c(w).
         let rule = make_rule(
@@ -988,7 +1012,10 @@ mod tests {
         db.insert(
             make_atom(
                 "has",
-                vec![atom_term("john"), compound_term("item", vec![atom_term("sword"), int_term(10)])],
+                vec![
+                    atom_term("john"),
+                    compound_term("item", vec![atom_term("sword"), int_term(10)]),
+                ],
             ),
             &mut storage,
         )
@@ -996,7 +1023,10 @@ mod tests {
         db.insert(
             make_atom(
                 "has",
-                vec![atom_term("mary"), compound_term("item", vec![atom_term("shield"), int_term(5)])],
+                vec![
+                    atom_term("mary"),
+                    compound_term("item", vec![atom_term("shield"), int_term(5)]),
+                ],
             ),
             &mut storage,
         )
@@ -1007,7 +1037,10 @@ mod tests {
             make_atom("armed", vec![var_term("P")]),
             vec![Literal::Positive(make_atom(
                 "has",
-                vec![var_term("P"), compound_term("item", vec![atom_term("sword"), var_term("_W")])],
+                vec![
+                    var_term("P"),
+                    compound_term("item", vec![atom_term("sword"), var_term("_W")]),
+                ],
             ))],
         );
 
@@ -1023,7 +1056,10 @@ mod tests {
         db.insert(
             make_atom(
                 "item",
-                vec![compound_term("weapon", vec![atom_term("sword"), int_term(10)])],
+                vec![compound_term(
+                    "weapon",
+                    vec![atom_term("sword"), int_term(10)],
+                )],
             ),
             &mut storage,
         )
@@ -1050,19 +1086,31 @@ mod tests {
         let mut full_db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
         full_db
-            .insert(make_atom("edge", vec![atom_term("a"), atom_term("b")]), &mut storage)
+            .insert(
+                make_atom("edge", vec![atom_term("a"), atom_term("b")]),
+                &mut storage,
+            )
             .unwrap();
         full_db
-            .insert(make_atom("edge", vec![atom_term("b"), atom_term("c")]), &mut storage)
+            .insert(
+                make_atom("edge", vec![atom_term("b"), atom_term("c")]),
+                &mut storage,
+            )
             .unwrap();
         full_db
-            .insert(make_atom("path", vec![atom_term("a"), atom_term("b")]), &mut storage)
+            .insert(
+                make_atom("path", vec![atom_term("a"), atom_term("b")]),
+                &mut storage,
+            )
             .unwrap();
 
         // Delta: only the new path fact
         let mut delta = DatalogContext::new();
         delta
-            .insert(make_atom("path", vec![atom_term("a"), atom_term("b")]), &mut storage)
+            .insert(
+                make_atom("path", vec![atom_term("a"), atom_term("b")]),
+                &mut storage,
+            )
             .unwrap();
 
         // Rule: path(X, Z) :- path(X, Y), edge(Y, Z).
@@ -1086,8 +1134,10 @@ mod tests {
     fn test_satisfy_body_single_literal() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("fact", vec![atom_term("a")]), &mut storage).unwrap();
-        db.insert(make_atom("fact", vec![atom_term("b")]), &mut storage).unwrap();
+        db.insert(make_atom("fact", vec![atom_term("a")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("fact", vec![atom_term("b")]), &mut storage)
+            .unwrap();
 
         let body = vec![Literal::Positive(make_atom("fact", vec![var_term("X")]))];
         let results = satisfy_body(&body, &db, &storage);
@@ -1099,12 +1149,21 @@ mod tests {
     fn test_satisfy_body_join() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("r", vec![atom_term("a"), atom_term("b")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("s", vec![atom_term("b"), atom_term("c")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("s", vec![atom_term("x"), atom_term("y")]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("r", vec![atom_term("a"), atom_term("b")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("s", vec![atom_term("b"), atom_term("c")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("s", vec![atom_term("x"), atom_term("y")]),
+            &mut storage,
+        )
+        .unwrap();
 
         // r(X, Y), s(Y, Z) - should only match where r.Y = s.Y
         let body = vec![
@@ -1139,12 +1198,21 @@ mod tests {
         let mut storage = MemoryEngine::new();
 
         // Facts
-        db.insert(make_atom("parent", vec![atom_term("john"), atom_term("mary")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("parent", vec![atom_term("mary"), atom_term("alice")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("parent", vec![atom_term("bob"), atom_term("charlie")]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("mary"), atom_term("alice")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("bob"), atom_term("charlie")]),
+            &mut storage,
+        )
+        .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("charlie"), atom_term("dave")]),
             &mut storage,
@@ -1231,17 +1299,29 @@ mod tests {
     fn test_ground_rule_same_variable_multiple_positions() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("edge", vec![atom_term("a"), atom_term("a")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("edge", vec![atom_term("a"), atom_term("b")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("edge", vec![atom_term("b"), atom_term("b")]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("edge", vec![atom_term("a"), atom_term("a")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("edge", vec![atom_term("a"), atom_term("b")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("edge", vec![atom_term("b"), atom_term("b")]),
+            &mut storage,
+        )
+        .unwrap();
 
         // Rule: self_loop(X) :- edge(X, X).
         let rule = make_rule(
             make_atom("self_loop", vec![var_term("X")]),
-            vec![Literal::Positive(make_atom("edge", vec![var_term("X"), var_term("X")]))],
+            vec![Literal::Positive(make_atom(
+                "edge",
+                vec![var_term("X"), var_term("X")],
+            ))],
         );
 
         let results = ground_rule(&rule, &db, &storage);
@@ -1275,12 +1355,21 @@ mod tests {
     fn test_ground_rule_join_same_predicate() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("knows", vec![atom_term("a"), atom_term("b")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("knows", vec![atom_term("b"), atom_term("c")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("knows", vec![atom_term("a"), atom_term("c")]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("knows", vec![atom_term("a"), atom_term("b")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("knows", vec![atom_term("b"), atom_term("c")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("knows", vec![atom_term("a"), atom_term("c")]),
+            &mut storage,
+        )
+        .unwrap();
 
         // Rule: friend_of_friend(X, Z) :- knows(X, Y), knows(Y, Z).
         let rule = make_rule(
@@ -1304,12 +1393,18 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
         db.insert(
-            make_atom("triple", vec![atom_term("a"), atom_term("a"), atom_term("a")]),
+            make_atom(
+                "triple",
+                vec![atom_term("a"), atom_term("a"), atom_term("a")],
+            ),
             &mut storage,
         )
         .unwrap();
         db.insert(
-            make_atom("triple", vec![atom_term("a"), atom_term("b"), atom_term("c")]),
+            make_atom(
+                "triple",
+                vec![atom_term("a"), atom_term("b"), atom_term("c")],
+            ),
             &mut storage,
         )
         .unwrap();
@@ -1334,14 +1429,26 @@ mod tests {
     fn test_ground_rule_four_literals() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("step", vec![int_term(0), int_term(1)]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("step", vec![int_term(1), int_term(2)]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("step", vec![int_term(2), int_term(3)]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("step", vec![int_term(3), int_term(4)]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("step", vec![int_term(0), int_term(1)]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("step", vec![int_term(1), int_term(2)]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("step", vec![int_term(2), int_term(3)]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("step", vec![int_term(3), int_term(4)]),
+            &mut storage,
+        )
+        .unwrap();
 
         // Rule: path4(A, E) :- step(A, B), step(B, C), step(C, D), step(D, E).
         let rule = make_rule(
@@ -1396,10 +1503,16 @@ mod tests {
         let mut storage = MemoryEngine::new();
         db.insert(make_atom("person", vec![atom_term("john")]), &mut storage)
             .unwrap();
-        db.insert(make_atom("age", vec![atom_term("john"), int_term(30)]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("city", vec![atom_term("john"), atom_term("nyc")]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("age", vec![atom_term("john"), int_term(30)]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("city", vec![atom_term("john"), atom_term("nyc")]),
+            &mut storage,
+        )
+        .unwrap();
 
         // Body: person(X), age(X, A), city(X, C).
         let body = vec![
@@ -1417,10 +1530,14 @@ mod tests {
     fn test_ground_rule_cartesian_product() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("a", vec![atom_term("x")]), &mut storage).unwrap();
-        db.insert(make_atom("a", vec![atom_term("y")]), &mut storage).unwrap();
-        db.insert(make_atom("b", vec![atom_term("1")]), &mut storage).unwrap();
-        db.insert(make_atom("b", vec![atom_term("2")]), &mut storage).unwrap();
+        db.insert(make_atom("a", vec![atom_term("x")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("a", vec![atom_term("y")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("b", vec![atom_term("1")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("b", vec![atom_term("2")]), &mut storage)
+            .unwrap();
 
         // Rule: pair(X, Y) :- a(X), b(Y).
         // No shared variables - cartesian product

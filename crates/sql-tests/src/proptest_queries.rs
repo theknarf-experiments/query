@@ -7,66 +7,143 @@ use db::Engine;
 use logical::Value;
 use proptest::prelude::*;
 
+/// SQL reserved words that cannot be used as identifiers
+const SQL_RESERVED_WORDS: &[&str] = &[
+    // DML
+    "SELECT",
+    "FROM",
+    "WHERE",
+    "INSERT",
+    "INTO",
+    "VALUES",
+    "UPDATE",
+    "SET",
+    "DELETE",
+    // DDL
+    "CREATE",
+    "DROP",
+    "ALTER",
+    "TABLE",
+    "INDEX",
+    "VIEW",
+    "TRIGGER",
+    "FUNCTION",
+    "PROCEDURE",
+    // Data types
+    "INT",
+    "INTEGER",
+    "TEXT",
+    "VARCHAR",
+    "BOOL",
+    "BOOLEAN",
+    "FLOAT",
+    "DOUBLE",
+    "DATE",
+    "TIMESTAMP",
+    "TIME",
+    "NULL",
+    // Constraints
+    "PRIMARY",
+    "KEY",
+    "FOREIGN",
+    "REFERENCES",
+    "UNIQUE",
+    "NOT",
+    "DEFAULT",
+    "CONSTRAINT",
+    "CHECK",
+    "CASCADE",
+    "RESTRICT",
+    "ACTION",
+    "NO",
+    // Logical operators
+    "AND",
+    "OR",
+    "IS",
+    "IN",
+    "LIKE",
+    "BETWEEN",
+    "EXISTS",
+    // Joins
+    "JOIN",
+    "INNER",
+    "LEFT",
+    "RIGHT",
+    "OUTER",
+    "FULL",
+    "CROSS",
+    "ON",
+    // Ordering and limits
+    "ORDER",
+    "BY",
+    "ASC",
+    "DESC",
+    "LIMIT",
+    "OFFSET",
+    "GROUP",
+    "HAVING",
+    // Aggregates
+    "COUNT",
+    "SUM",
+    "AVG",
+    "MIN",
+    "MAX",
+    // Boolean literals
+    "TRUE",
+    "FALSE",
+    // Case expressions
+    "CASE",
+    "WHEN",
+    "THEN",
+    "ELSE",
+    "END",
+    // Set operations
+    "UNION",
+    "INTERSECT",
+    "EXCEPT",
+    "ALL",
+    // Transaction control
+    "BEGIN",
+    "COMMIT",
+    "ROLLBACK",
+    "TRANSACTION",
+    "SAVEPOINT",
+    "RELEASE",
+    "TO",
+    // Misc
+    "AS",
+    "WITH",
+    "RECURSIVE",
+    "FOR",
+    "EACH",
+    "ROW",
+    "BEFORE",
+    "AFTER",
+    "RAISE",
+    "ERROR",
+    "ADD",
+    "COLUMN",
+    "RENAME",
+    "OVER",
+    "PARTITION",
+    "RANK",
+    "CALL",
+    "DECLARE",
+    "EXEC",
+    "EXECUTE",
+    "RETURNS",
+    "RETURN",
+    "LANGUAGE",
+    "DISTINCT",
+];
+
 /// Generate a valid identifier (table or column name)
 fn identifier_strategy() -> impl Strategy<Value = String> {
     prop::string::string_regex("[a-z][a-z0-9_]{0,7}")
         .unwrap()
         .prop_filter("must not be reserved word", |s| {
-            !matches!(
-                s.to_uppercase().as_str(),
-                "SELECT"
-                    | "FROM"
-                    | "WHERE"
-                    | "INSERT"
-                    | "INTO"
-                    | "VALUES"
-                    | "CREATE"
-                    | "TABLE"
-                    | "DROP"
-                    | "UPDATE"
-                    | "SET"
-                    | "DELETE"
-                    | "AND"
-                    | "OR"
-                    | "NOT"
-                    | "NULL"
-                    | "INT"
-                    | "TEXT"
-                    | "BOOL"
-                    | "TRUE"
-                    | "FALSE"
-                    | "JOIN"
-                    | "ON"
-                    | "LEFT"
-                    | "RIGHT"
-                    | "INNER"
-                    | "OUTER"
-                    | "FULL"
-                    | "CROSS"
-                    | "AS"
-                    | "ORDER"
-                    | "BY"
-                    | "ASC"
-                    | "DESC"
-                    | "LIMIT"
-                    | "COUNT"
-                    | "SUM"
-                    | "AVG"
-                    | "MIN"
-                    | "MAX"
-                    | "IS"
-                    | "IN"
-                    | "LIKE"
-                    | "BETWEEN"
-                    | "CASE"
-                    | "WHEN"
-                    | "THEN"
-                    | "ELSE"
-                    | "END"
-                    | "EXISTS"
-                    | "GROUP"
-                    | "HAVING"
-            )
+            let upper = s.to_uppercase();
+            !SQL_RESERVED_WORDS.contains(&upper.as_str())
         })
 }
 

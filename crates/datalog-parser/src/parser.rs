@@ -431,6 +431,7 @@ mod tests {
         let program = result.unwrap();
         match &program.statements[0] {
             Statement::Fact(f) => match &f.atom.terms[1] {
+                #[allow(clippy::approx_constant)]
                 Term::Constant(Value::Float(n)) => assert!((*n - 3.14).abs() < 0.001),
                 _ => panic!("Expected float"),
             },

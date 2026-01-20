@@ -203,6 +203,7 @@ fn json_to_value(json: Option<&serde_json::Value>) -> Value {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
 

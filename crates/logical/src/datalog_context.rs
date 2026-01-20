@@ -23,13 +23,13 @@
 //! ```
 
 use crate::datalog_unification::{unify_atoms, Substitution};
-use crate::engine::{ColumnSchema, DataType, Row, StorageEngine, TableSchema};
-use crate::value::JsonValue;
-use crate::Value as SqlValue;
 use datalog_parser::{Atom, Symbol, Term, Value as DatalogValue};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
+use storage::{
+    ColumnSchema, DataType, JsonValue, Row, StorageEngine, TableSchema, Value as SqlValue,
+};
 
 /// Schema for a Datalog predicate (maps to SQL table schema)
 #[derive(Debug, Clone, PartialEq)]
@@ -335,9 +335,7 @@ impl DatalogContext {
         let row = atom_to_row(&atom);
         match storage.insert(predicate_name, row) {
             Ok(()) => Ok(InsertOutcome::Inserted),
-            Err(crate::engine::StorageError::ConstraintViolation(_)) => {
-                Ok(InsertOutcome::Duplicate)
-            }
+            Err(storage::StorageError::ConstraintViolation(_)) => Ok(InsertOutcome::Duplicate),
             Err(e) => Err(InsertError::StorageError(format!("{:?}", e))),
         }
     }
@@ -499,7 +497,7 @@ fn is_ground_term(term: &Term) -> bool {
 // These functions enable storing derived Datalog facts (IDB) in the storage
 // engine alongside SQL tables (EDB), creating a unified storage layer.
 
-use crate::engine::{StorageError, TableConstraint};
+use storage::{StorageError, TableConstraint};
 
 /// Create a schema for a derived predicate based on arity
 ///
@@ -726,11 +724,12 @@ pub fn json_to_term(json: &JsonValue) -> Term {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
-    use crate::MemoryEngine;
     use datalog_parser::Value;
     use internment::Intern;
+    use storage::MemoryEngine;
 
     #[test]
     fn test_insert_ground_fact() {
@@ -793,7 +792,7 @@ mod tests {
 
     #[test]
     fn test_register_and_get_schema() {
-        use crate::engine::{ColumnSchema, DataType};
+        use storage::{ColumnSchema, DataType};
 
         let mut db = DatalogContext::new();
         let predicate = Intern::new("person".to_string());
@@ -833,7 +832,7 @@ mod tests {
 
     #[test]
     fn test_insert_validates_arity_when_schema_exists() {
-        use crate::engine::{ColumnSchema, DataType};
+        use storage::{ColumnSchema, DataType};
 
         let mut db = DatalogContext::new();
         let predicate = Intern::new("person".to_string());
@@ -904,7 +903,7 @@ mod tests {
 
     #[test]
     fn test_insert_valid_arity() {
-        use crate::engine::{ColumnSchema, DataType};
+        use storage::{ColumnSchema, DataType};
 
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
@@ -951,7 +950,7 @@ mod tests {
 
     #[test]
     fn test_predicate_schema_from_table_schema() {
-        use crate::engine::{ColumnSchema, DataType, TableSchema};
+        use storage::{ColumnSchema, DataType, TableSchema};
 
         let table_schema = TableSchema {
             name: "users".to_string(),
@@ -1037,8 +1036,8 @@ mod tests {
 
     #[test]
     fn test_query_storage_backed_predicate() {
-        use crate::engine::{ColumnSchema, DataType, TableSchema};
-        use crate::MemoryEngine;
+        use storage::MemoryEngine;
+        use storage::{ColumnSchema, DataType, TableSchema};
 
         let mut storage = MemoryEngine::new();
 
@@ -1112,8 +1111,8 @@ mod tests {
 
     #[test]
     fn test_query_uses_index_when_available() {
-        use crate::engine::{ColumnSchema, DataType, TableSchema};
-        use crate::MemoryEngine;
+        use storage::MemoryEngine;
+        use storage::{ColumnSchema, DataType, TableSchema};
 
         let mut storage = MemoryEngine::new();
 
@@ -1189,8 +1188,8 @@ mod tests {
 
     #[test]
     fn test_query_falls_back_to_scan_without_index() {
-        use crate::engine::{ColumnSchema, DataType, TableSchema};
-        use crate::MemoryEngine;
+        use storage::MemoryEngine;
+        use storage::{ColumnSchema, DataType, TableSchema};
 
         let mut storage = MemoryEngine::new();
 

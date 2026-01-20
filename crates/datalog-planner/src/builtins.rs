@@ -290,6 +290,7 @@ pub fn parse_builtin(atom: &Atom) -> Option<BuiltIn> {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
     use datalog_parser::Symbol;

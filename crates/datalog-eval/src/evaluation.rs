@@ -417,6 +417,7 @@ pub fn evaluate_with_storage<S: StorageEngine>(
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
     use datalog_parser::{Atom, Literal, Symbol, Term, Value};

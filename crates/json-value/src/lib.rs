@@ -273,7 +273,12 @@ mod tests {
     fn test_parse_number() {
         assert_eq!(JsonValue::parse("42").unwrap(), JsonValue::Number(42.0));
         assert_eq!(JsonValue::parse("-17").unwrap(), JsonValue::Number(-17.0));
-        assert_eq!(JsonValue::parse("3.14").unwrap(), JsonValue::Number(3.14));
+        #[allow(clippy::approx_constant)]
+        let expected = 3.14;
+        assert_eq!(
+            JsonValue::parse("3.14").unwrap(),
+            JsonValue::Number(expected)
+        );
     }
 
     #[test]

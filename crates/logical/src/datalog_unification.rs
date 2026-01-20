@@ -170,6 +170,7 @@ pub fn unify_atoms(atom1: &Atom, atom2: &Atom, subst: &mut Substitution) -> bool
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
     use datalog_parser::Value;

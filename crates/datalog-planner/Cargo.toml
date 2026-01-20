@@ -1,5 +1,5 @@
 [package]
-name = "datalog-builtins"
+name = "datalog-planner"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,4 +8,5 @@ datalog-parser = { path = "../datalog-parser" }
 sql-storage = { path = "../sql-storage" }
 
 [dev-dependencies]
+sql-storage = { path = "../sql-storage", features = ["test-utils"] }
 internment = "0.8"

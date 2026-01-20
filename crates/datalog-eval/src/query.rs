@@ -16,8 +16,8 @@
 //! // Returns: [{X -> john}, {X -> alice}]
 //! ```
 
-use datalog_grounding::satisfy_body;
 use datalog_parser::{Query, Symbol};
+use datalog_planner::satisfy_body;
 use sql_storage::{DatalogContext, StorageEngine, Substitution};
 use std::collections::HashSet;
 

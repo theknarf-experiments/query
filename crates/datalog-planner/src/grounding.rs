@@ -19,7 +19,7 @@
 //! let groundings = ground_rule(&rule, &db, &const_env);
 //! ```
 
-use datalog_builtins as builtins;
+use crate::builtins;
 use datalog_parser::{Atom, Literal, Rule, Term};
 use sql_storage::{DatalogContext, StorageEngine, Substitution};
 

@@ -28,7 +28,7 @@
 
 use crate::LogicalPlan;
 use datalog_parser::{Atom, Literal, Program, Rule, Symbol, Term};
-use datalog_safety::{check_program_safety, stratify, SafetyError, StratificationError};
+use datalog_planner::{check_program_safety, stratify, SafetyError, StratificationError};
 use sql_parser::Expr;
 use std::collections::{HashMap, HashSet};
 

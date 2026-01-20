@@ -5,10 +5,8 @@ edition = "2021"
 
 [dependencies]
 datalog-parser = { path = "../datalog-parser" }
-datalog-builtins = { path = "../datalog-builtins" }
+datalog-planner = { path = "../datalog-planner" }
 sql-storage = { path = "../sql-storage" }
-datalog-grounding = { path = "../datalog-grounding" }
-datalog-safety = { path = "../datalog-safety" }
 
 [dev-dependencies]
 internment = "0.8"

@@ -12,9 +12,11 @@
 //! let result = evaluate(&rules, &constraints, initial_facts)?;
 //! ```
 
-use datalog_grounding::{ground_rule, ground_rule_semi_naive_with_delta, satisfy_body};
 use datalog_parser::{Constraint, Rule};
-use datalog_safety::{check_program_safety, stratify, SafetyError, StratificationError};
+use datalog_planner::{
+    check_program_safety, ground_rule, ground_rule_semi_naive_with_delta, satisfy_body, stratify,
+    SafetyError, StratificationError,
+};
 use sql_storage::{DatalogContext, DeltaTracker, InsertError, StorageEngine, StorageError};
 
 /// Errors that can occur during evaluation

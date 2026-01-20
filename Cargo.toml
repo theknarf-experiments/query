@@ -12,9 +12,7 @@ members = [
     "crates/sql-tests",
     # Datalog frontend
     "crates/datalog-parser",
-    "crates/datalog-builtins",
-    "crates/datalog-safety",
-    "crates/datalog-grounding",
+    "crates/datalog-planner",
     "crates/datalog-eval",
 ]
 
@@ -42,9 +40,7 @@ sql-engine = { path = "crates/sql-engine" }
 
 # Datalog crates
 datalog-parser = { path = "crates/datalog-parser" }
-datalog-builtins = { path = "crates/datalog-builtins" }
-datalog-safety = { path = "crates/datalog-safety" }
-datalog-grounding = { path = "crates/datalog-grounding" }
+datalog-planner = { path = "crates/datalog-planner" }
 datalog-eval = { path = "crates/datalog-eval" }
 
 # Testing

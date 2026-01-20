@@ -20,8 +20,8 @@
 //! ```
 
 use datalog_eval::{evaluate, EvaluationError};
-use datalog_grounding::satisfy_body;
 use datalog_parser::{Constraint, Literal, Query, Rule, SrcId, Symbol, Term, Value as DValue};
+use datalog_planner::satisfy_body;
 use sql_storage::DatalogContext;
 use sql_storage::{PredicateSchema, StorageEngine, Value as SValue};
 

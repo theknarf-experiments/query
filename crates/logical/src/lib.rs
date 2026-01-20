@@ -17,13 +17,10 @@ pub mod operations;
 pub use storage::*;
 
 // Re-export Datalog types
-pub use datalog_context::{
-    atom_to_row, create_derived_schema, ensure_derived_table, row_to_atom, sql_value_to_term,
-    DatalogContext, InsertError, InsertOutcome, PredicateSchema,
-};
+pub use datalog_context::{sql_value_to_term, DatalogContext, InsertError, PredicateSchema};
 
 // Re-export Runtime types
 pub use runtime::{NoOpRuntime, Runtime, RuntimeError, TriggerContext, TriggerResult};
 
-// Re-export trigger-aware operations (these are the primary insert/update/delete APIs)
-pub use operations::{delete, insert, update, OperationError, OperationResult};
+// Re-export trigger-aware operations
+pub use operations::{delete, insert, update, OperationError};

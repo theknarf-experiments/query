@@ -528,7 +528,7 @@ use storage::{StorageError, TableConstraint};
 ///
 /// All columns use Text type to accommodate Datalog atoms.
 /// A UNIQUE constraint on all columns ensures deduplication (set semantics).
-pub fn create_derived_schema(predicate: &str, arity: usize) -> TableSchema {
+fn create_derived_schema(predicate: &str, arity: usize) -> TableSchema {
     TableSchema {
         name: predicate.to_string(),
         columns: (0..arity)
@@ -553,7 +553,7 @@ pub fn create_derived_schema(predicate: &str, arity: usize) -> TableSchema {
 ///
 /// Creates the table if it doesn't exist. Uses the arity to determine schema.
 /// Returns Ok(true) if table was created, Ok(false) if it already existed.
-pub fn ensure_derived_table<S: StorageEngine>(
+fn ensure_derived_table<S: StorageEngine>(
     storage: &mut S,
     predicate: &str,
     arity: usize,
@@ -572,16 +572,8 @@ pub fn ensure_derived_table<S: StorageEngine>(
 ///
 /// Panics if the atom contains variables (must be ground).
 /// Compound terms are encoded as JSON for proper round-tripping.
-pub fn atom_to_row(atom: &Atom) -> Row {
+fn atom_to_row(atom: &Atom) -> Row {
     atom.terms.iter().map(term_to_sql_value).collect()
-}
-
-/// Convert a SQL row to a Datalog fact for a given predicate
-pub fn row_to_atom(predicate: &str, row: &Row) -> Atom {
-    Atom {
-        predicate: Symbol::new(predicate.to_string()),
-        terms: row.iter().map(sql_value_to_term).collect(),
-    }
 }
 
 /// Convert a SQL Value to a Datalog Term

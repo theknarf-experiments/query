@@ -51,7 +51,7 @@ pub type OperationResult<T> = Result<T, OperationError>;
 /// * `Ok(true)` - Row was inserted
 /// * `Ok(false)` - Row was skipped (BEFORE trigger returned Skip)
 /// * `Err(...)` - Error occurred
-pub fn insert_with_triggers<S: StorageEngine, R: Runtime<S>>(
+pub fn insert<S: StorageEngine, R: Runtime<S>>(
     storage: &mut S,
     runtime: &R,
     table: &str,
@@ -129,7 +129,7 @@ pub fn insert_with_triggers<S: StorageEngine, R: Runtime<S>>(
 ///
 /// # Returns
 /// Number of rows deleted (excludes rows skipped by BEFORE triggers)
-pub fn delete_with_triggers<S, R, F>(
+pub fn delete<S, R, F>(
     storage: &mut S,
     runtime: &R,
     table: &str,
@@ -234,7 +234,7 @@ where
 ///
 /// # Returns
 /// Number of rows updated (excludes rows skipped by BEFORE triggers)
-pub fn update_with_triggers<S, R, F, U>(
+pub fn update<S, R, F, U>(
     storage: &mut S,
     runtime: &R,
     table: &str,
@@ -389,7 +389,7 @@ mod tests {
         let runtime = NoOpRuntime;
 
         let row = vec![Value::Int(1), Value::Text("Alice".to_string())];
-        let result = insert_with_triggers(&mut storage, &runtime, "users", row);
+        let result = insert(&mut storage, &runtime, "users", row);
 
         assert_eq!(result, Ok(true));
 
@@ -417,7 +417,7 @@ mod tests {
             .unwrap();
 
         // Delete one row
-        let result = delete_with_triggers(&mut storage, &runtime, "users", |row| {
+        let result = delete(&mut storage, &runtime, "users", |row| {
             row[0] == Value::Int(1)
         });
 
@@ -443,7 +443,7 @@ mod tests {
             .unwrap();
 
         // Update the row
-        let result = update_with_triggers(
+        let result = update(
             &mut storage,
             &runtime,
             "users",
@@ -503,7 +503,7 @@ mod tests {
         let runtime = ModifyingRuntime;
 
         let row = vec![Value::Int(1), Value::Text("alice".to_string())];
-        let result = insert_with_triggers(&mut storage, &runtime, "users", row);
+        let result = insert(&mut storage, &runtime, "users", row);
 
         assert_eq!(result, Ok(true));
 
@@ -558,12 +558,12 @@ mod tests {
 
         // This should be inserted
         let row1 = vec![Value::Int(3), Value::Text("Alice".to_string())];
-        let result1 = insert_with_triggers(&mut storage, &runtime, "users", row1);
+        let result1 = insert(&mut storage, &runtime, "users", row1);
         assert_eq!(result1, Ok(true));
 
         // This should be skipped
         let row2 = vec![Value::Int(10), Value::Text("Bob".to_string())];
-        let result2 = insert_with_triggers(&mut storage, &runtime, "users", row2);
+        let result2 = insert(&mut storage, &runtime, "users", row2);
         assert_eq!(result2, Ok(false));
 
         let rows = storage.scan("users").unwrap();
@@ -605,7 +605,7 @@ mod tests {
         let runtime = AbortingRuntime;
 
         let row = vec![Value::Int(1), Value::Text("Alice".to_string())];
-        let result = insert_with_triggers(&mut storage, &runtime, "users", row);
+        let result = insert(&mut storage, &runtime, "users", row);
 
         assert_eq!(
             result,

@@ -31,8 +31,5 @@ pub use delta_tracker::DeltaTracker;
 // Re-export Runtime types
 pub use runtime::{NoOpRuntime, Runtime, RuntimeError, TriggerContext, TriggerResult};
 
-// Re-export trigger-aware operations
-pub use operations::{
-    delete_with_triggers, insert_with_triggers, update_with_triggers, OperationError,
-    OperationResult,
-};
+// Re-export trigger-aware operations (these are the primary insert/update/delete APIs)
+pub use operations::{delete, insert, update, OperationError, OperationResult};

@@ -25,6 +25,7 @@ use datalog_planner::satisfy_body;
 use logical::DatalogContext;
 use logical::{PredicateSchema, StorageEngine, Value as SValue};
 
+use crate::runtime::SqlRuntime;
 use crate::{ExecError, QueryResult};
 
 /// Errors specific to Datalog execution
@@ -133,6 +134,9 @@ pub fn execute_datalog_program<S: StorageEngine>(
     storage: &mut S,
     program_text: &str,
 ) -> Result<QueryResult, DatalogError> {
+    // Use SqlRuntime for trigger execution
+    let runtime = SqlRuntime::new();
+
     // Parse the Datalog program
     let src = SrcId::repl();
     let program = datalog_parser::parse_program(program_text, src)
@@ -147,7 +151,7 @@ pub fn execute_datalog_program<S: StorageEngine>(
     for stmt in program.statements {
         match stmt {
             datalog_parser::Statement::Fact(fact) => {
-                let _ = db.insert(fact.atom, storage);
+                let _ = db.insert(fact.atom, storage, &runtime);
             }
             datalog_parser::Statement::Rule(rule) => {
                 rules.push(rule);
@@ -172,7 +176,7 @@ pub fn execute_datalog_program<S: StorageEngine>(
     }
 
     // Evaluate the program using storage for indexed lookups
-    let result_db = evaluate(&rules, &constraints, db, storage)?;
+    let result_db = evaluate(&rules, &constraints, db, storage, &runtime)?;
 
     // If there's a query, evaluate it and return results
     if let Some(query) = queries.last() {

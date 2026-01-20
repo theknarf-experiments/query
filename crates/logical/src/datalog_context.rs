@@ -23,6 +23,8 @@
 //! ```
 
 use crate::datalog_unification::{unify_atoms, Substitution};
+use crate::operations::{insert as insert_row, OperationError};
+use crate::runtime::Runtime;
 use datalog_parser::{Atom, Symbol, Term, Value as DatalogValue};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -112,6 +114,8 @@ pub enum InsertError {
     },
     /// Storage operation failed
     StorageError(String),
+    /// Trigger aborted the operation
+    TriggerAbort(String),
 }
 
 impl fmt::Display for InsertError {
@@ -134,6 +138,9 @@ impl fmt::Display for InsertError {
             InsertError::StorageError(msg) => {
                 write!(f, "storage error: {}", msg)
             }
+            InsertError::TriggerAbort(msg) => {
+                write!(f, "trigger aborted: {}", msg)
+            }
         }
     }
 }
@@ -147,6 +154,8 @@ pub enum InsertOutcome {
     Inserted,
     /// The fact already existed (duplicate, no change)
     Duplicate,
+    /// The insert was skipped by a BEFORE trigger
+    Skipped,
 }
 
 impl InsertOutcome {
@@ -295,15 +304,17 @@ impl DatalogContext {
         results
     }
 
-    /// Insert a ground fact into storage
+    /// Insert a ground fact into storage with trigger support
     ///
     /// Returns `Ok(InsertOutcome::Inserted)` if the fact was new,
-    /// `Ok(InsertOutcome::Duplicate)` if it already existed.
+    /// `Ok(InsertOutcome::Duplicate)` if it already existed,
+    /// `Ok(InsertOutcome::Skipped)` if a BEFORE trigger skipped the insert.
     /// Uses UNIQUE constraints for O(1) deduplication.
-    pub fn insert<S: StorageEngine>(
+    pub fn insert<S: StorageEngine, R: Runtime<S>>(
         &mut self,
         atom: Atom,
         storage: &mut S,
+        runtime: &R,
     ) -> Result<InsertOutcome, InsertError> {
         // Check that atom is ground (no variables)
         if !is_ground(&atom) {
@@ -331,12 +342,17 @@ impl DatalogContext {
             self.mark_derived(atom.predicate);
         }
 
-        // Convert atom to row and insert into storage
+        // Convert atom to row and insert into storage using trigger-aware insert
         let row = atom_to_row(&atom);
-        match storage.insert(predicate_name, row) {
-            Ok(()) => Ok(InsertOutcome::Inserted),
-            Err(storage::StorageError::ConstraintViolation(_)) => Ok(InsertOutcome::Duplicate),
-            Err(e) => Err(InsertError::StorageError(format!("{:?}", e))),
+        match insert_row(storage, runtime, predicate_name, row) {
+            Ok(true) => Ok(InsertOutcome::Inserted),
+            Ok(false) => Ok(InsertOutcome::Skipped),
+            Err(OperationError::Storage(storage::StorageError::ConstraintViolation(_))) => {
+                Ok(InsertOutcome::Duplicate)
+            }
+            Err(OperationError::Storage(e)) => Err(InsertError::StorageError(format!("{:?}", e))),
+            Err(OperationError::Runtime(e)) => Err(InsertError::StorageError(format!("{:?}", e))),
+            Err(OperationError::TriggerAbort(msg)) => Err(InsertError::TriggerAbort(msg)),
         }
     }
 
@@ -727,6 +743,7 @@ pub fn json_to_term(json: &JsonValue) -> Term {
 #[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
+    use crate::NoOpRuntime;
     use datalog_parser::Value;
     use internment::Intern;
     use storage::MemoryEngine;
@@ -735,6 +752,7 @@ mod tests {
     fn test_insert_ground_fact() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         let atom = Atom {
             predicate: Intern::new("parent".to_string()),
             terms: vec![
@@ -742,7 +760,7 @@ mod tests {
                 Term::Constant(Value::Atom(Intern::new("mary".to_string()))),
             ],
         };
-        assert!(db.insert(atom, &mut storage).is_ok());
+        assert!(db.insert(atom, &mut storage, &runtime).is_ok());
         assert!(db.is_derived(&Intern::new("parent".to_string())));
     }
 
@@ -750,6 +768,7 @@ mod tests {
     fn test_reject_non_ground_fact() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         let atom = Atom {
             predicate: Intern::new("parent".to_string()),
             terms: vec![
@@ -757,13 +776,14 @@ mod tests {
                 Term::Constant(Value::Atom(Intern::new("mary".to_string()))),
             ],
         };
-        assert!(db.insert(atom, &mut storage).is_err());
+        assert!(db.insert(atom, &mut storage, &runtime).is_err());
     }
 
     #[test]
     fn test_query_with_variable() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             Atom {
                 predicate: Intern::new("parent".to_string()),
@@ -773,6 +793,7 @@ mod tests {
                 ],
             },
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -865,12 +886,13 @@ mod tests {
 
         // Try to insert atom with wrong arity (1 instead of 2)
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         let atom = Atom {
             predicate,
             terms: vec![Term::Constant(Value::Integer(1))],
         };
 
-        let result = db.insert(atom, &mut storage);
+        let result = db.insert(atom, &mut storage, &runtime);
         assert!(matches!(
             result,
             Err(InsertError::ArityMismatch {
@@ -886,6 +908,8 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         // No schema registered for "unknown"
         let atom = Atom {
             predicate: Intern::new("unknown".to_string()),
@@ -897,7 +921,7 @@ mod tests {
         };
 
         // Should succeed - permissive mode allows unregistered predicates
-        assert!(db.insert(atom, &mut storage).is_ok());
+        assert!(db.insert(atom, &mut storage, &runtime).is_ok());
         assert!(db.is_derived(&Intern::new("unknown".to_string())));
     }
 
@@ -907,6 +931,7 @@ mod tests {
 
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         let predicate = Intern::new("person".to_string());
 
         // Register a 2-column schema
@@ -944,7 +969,7 @@ mod tests {
             ],
         };
 
-        assert!(db.insert(atom, &mut storage).is_ok());
+        assert!(db.insert(atom, &mut storage, &runtime).is_ok());
         assert!(db.is_derived(&predicate));
     }
 
@@ -1006,6 +1031,8 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         // Insert a derived fact
         let pred = Intern::new("derived_fact".to_string());
         db.insert(
@@ -1017,6 +1044,7 @@ mod tests {
                 ],
             },
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1040,6 +1068,8 @@ mod tests {
         use storage::{ColumnSchema, DataType, TableSchema};
 
         let mut storage = MemoryEngine::new();
+
+        let runtime = NoOpRuntime;
 
         // Create a table in storage
         let schema = TableSchema {
@@ -1115,6 +1145,8 @@ mod tests {
         use storage::{ColumnSchema, DataType, TableSchema};
 
         let mut storage = MemoryEngine::new();
+
+        let runtime = NoOpRuntime;
 
         // Create a table
         let schema = TableSchema {
@@ -1192,6 +1224,8 @@ mod tests {
         use storage::{ColumnSchema, DataType, TableSchema};
 
         let mut storage = MemoryEngine::new();
+
+        let runtime = NoOpRuntime;
 
         // Create a table without any indexes
         let schema = TableSchema {
@@ -1445,6 +1479,8 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         // Create a compound term: nest(value)
         let compound_term = Term::Compound(
             Intern::new("nest".to_string()),
@@ -1459,7 +1495,7 @@ mod tests {
         };
 
         // Insert the fact
-        db.insert(atom.clone(), &mut storage).unwrap();
+        db.insert(atom.clone(), &mut storage, &runtime).unwrap();
 
         // Query for it
         let pattern = Atom {
@@ -1481,6 +1517,8 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         // Create deeply nested: nest(nest(nest(nest(value))))
         let mut term = Term::Constant(Value::Atom(Intern::new("value".to_string())));
         for _ in 0..4 {
@@ -1492,7 +1530,7 @@ mod tests {
             terms: vec![term.clone()],
         };
 
-        db.insert(atom, &mut storage).unwrap();
+        db.insert(atom, &mut storage, &runtime).unwrap();
 
         let pattern = Atom {
             predicate: Intern::new("deep".to_string()),

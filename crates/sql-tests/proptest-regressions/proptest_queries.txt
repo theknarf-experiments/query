@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc afb7ddb818c6f97068b0b3bff0d99e35f6bbbd7746a69453ffb07c2d5a373894 # shrinks to table_name = "a", columns = [ColumnDef { name: "is", col_type: "INT" }]
+cc dafb84539f022d8dd0f411285422668c1d030050ab7a5dfb308a3e141e1ad44b # shrinks to table_name = "a", columns = [ColumnDef { name: "no", col_type: "INT" }]

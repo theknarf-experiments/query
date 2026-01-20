@@ -92,7 +92,7 @@ pub fn query_variables(query: &Query) -> HashSet<Symbol> {
 mod tests {
     use super::*;
     use datalog_parser::{Atom, Literal, Term, Value};
-    use logical::MemoryEngine;
+    use logical::{MemoryEngine, NoOpRuntime};
 
     fn sym(s: &str) -> Symbol {
         Symbol::new(s.to_string())
@@ -123,9 +123,11 @@ mod tests {
     fn test_query_ground_true() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -145,9 +147,11 @@ mod tests {
     fn test_query_ground_false() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -169,19 +173,23 @@ mod tests {
     fn test_query_with_one_variable() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("alice"), atom_term("mary")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("bob"), atom_term("sue")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -215,14 +223,17 @@ mod tests {
     fn test_query_with_multiple_variables() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("alice"), atom_term("bob")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -244,14 +255,17 @@ mod tests {
     fn test_query_with_join() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("mary"), atom_term("sue")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -272,14 +286,17 @@ mod tests {
     fn test_query_join_no_match() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("bob"), atom_term("sue")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -302,12 +319,25 @@ mod tests {
     fn test_query_with_negation() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("person", vec![atom_term("john")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("person", vec![atom_term("mary")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("dead", vec![atom_term("john")]), &mut storage)
-            .unwrap();
+        let runtime = NoOpRuntime;
+        db.insert(
+            make_atom("person", vec![atom_term("john")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("person", vec![atom_term("mary")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("dead", vec![atom_term("john")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         // Query: ?- person(X), not dead(X).
         // Should find only mary
@@ -377,9 +407,11 @@ mod tests {
     fn test_extract_bindings() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -421,14 +453,17 @@ mod tests {
     fn test_query_with_integers() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("age", vec![atom_term("john"), int_term(30)]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("age", vec![atom_term("mary"), int_term(25)]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 

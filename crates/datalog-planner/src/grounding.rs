@@ -24,6 +24,9 @@ use datalog_parser::{Atom, Literal, Rule, Term};
 use logical::{DatalogContext, StorageEngine, Substitution};
 
 #[cfg(test)]
+use logical::NoOpRuntime;
+
+#[cfg(test)]
 mod allocation_tracker {
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -569,7 +572,7 @@ pub fn ground_rule_semi_naive_with_storage<S: StorageEngine>(
 mod tests {
     use super::*;
     use datalog_parser::{Atom, Rule, Symbol, Value};
-    use logical::MemoryEngine;
+    use logical::{MemoryEngine, NoOpRuntime};
 
     fn sym(s: &str) -> Symbol {
         Symbol::new(s.to_string())
@@ -608,9 +611,11 @@ mod tests {
     fn test_ground_rule_no_variables() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -632,14 +637,17 @@ mod tests {
     fn test_ground_rule_single_variable() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("john"), atom_term("bob")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -665,14 +673,17 @@ mod tests {
     fn test_ground_rule_multiple_variables() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("bob"), atom_term("alice")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -695,14 +706,17 @@ mod tests {
         // ancestor(X, Y) :- parent(X, Y).
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("mary"), atom_term("jane")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -724,19 +738,23 @@ mod tests {
     fn test_ground_rule_join_two_literals() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("mary"), atom_term("alice")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("bob"), atom_term("charlie")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -761,19 +779,23 @@ mod tests {
     fn test_ground_rule_multiple_chains() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("parent", vec![atom_term("a"), atom_term("b")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("b"), atom_term("c")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("b"), atom_term("d")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -797,14 +819,17 @@ mod tests {
         // ancestor(X, Z) :- ancestor(X, Y), parent(Y, Z).
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("ancestor", vec![atom_term("john"), atom_term("mary")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("mary"), atom_term("jane")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -825,19 +850,23 @@ mod tests {
     fn test_ground_rule_three_literals() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("edge", vec![atom_term("a"), atom_term("b")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("edge", vec![atom_term("b"), atom_term("c")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("edge", vec![atom_term("c"), atom_term("d")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -865,9 +894,11 @@ mod tests {
     fn test_ground_rule_no_matches() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -905,12 +936,25 @@ mod tests {
     fn test_ground_rule_simple_negation() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("bird", vec![atom_term("tweety")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("bird", vec![atom_term("polly")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("penguin", vec![atom_term("polly")]), &mut storage)
-            .unwrap();
+        let runtime = NoOpRuntime;
+        db.insert(
+            make_atom("bird", vec![atom_term("tweety")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("bird", vec![atom_term("polly")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("penguin", vec![atom_term("polly")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         // Rule: flies(X) :- bird(X), not penguin(X).
         let rule = make_rule(
@@ -933,13 +977,23 @@ mod tests {
         // not_parent(X) :- person(X), not parent(X, _).
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("person", vec![atom_term("john")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("person", vec![atom_term("mary")]), &mut storage)
-            .unwrap();
+        let runtime = NoOpRuntime;
+        db.insert(
+            make_atom("person", vec![atom_term("john")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("person", vec![atom_term("mary")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("john"), atom_term("jane")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -958,8 +1012,13 @@ mod tests {
     fn test_ground_rule_negation_with_ground_term() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("bird", vec![atom_term("tweety")]), &mut storage)
-            .unwrap();
+        let runtime = NoOpRuntime;
+        db.insert(
+            make_atom("bird", vec![atom_term("tweety")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         // Rule: not_bird_polly :- not bird(polly).
         let rule = make_rule(
@@ -980,11 +1039,12 @@ mod tests {
     fn test_ground_rule_multiple_negations() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("a", vec![atom_term("x")]), &mut storage)
+        let runtime = NoOpRuntime;
+        db.insert(make_atom("a", vec![atom_term("x")]), &mut storage, &runtime)
             .unwrap();
-        db.insert(make_atom("b", vec![atom_term("y")]), &mut storage)
+        db.insert(make_atom("b", vec![atom_term("y")]), &mut storage, &runtime)
             .unwrap();
-        db.insert(make_atom("c", vec![atom_term("z")]), &mut storage)
+        db.insert(make_atom("c", vec![atom_term("z")]), &mut storage, &runtime)
             .unwrap();
 
         // Rule: result :- not a(y), not b(x), not c(w).
@@ -1009,6 +1069,7 @@ mod tests {
     fn test_ground_rule_with_compound_terms() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom(
                 "has",
@@ -1018,6 +1079,7 @@ mod tests {
                 ],
             ),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
@@ -1029,6 +1091,7 @@ mod tests {
                 ],
             ),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1053,6 +1116,7 @@ mod tests {
     fn test_ground_rule_extract_from_compound() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom(
                 "item",
@@ -1062,6 +1126,7 @@ mod tests {
                 )],
             ),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1085,22 +1150,26 @@ mod tests {
     fn test_semi_naive_basic() {
         let mut full_db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         full_db
             .insert(
                 make_atom("edge", vec![atom_term("a"), atom_term("b")]),
                 &mut storage,
+                &runtime,
             )
             .unwrap();
         full_db
             .insert(
                 make_atom("edge", vec![atom_term("b"), atom_term("c")]),
                 &mut storage,
+                &runtime,
             )
             .unwrap();
         full_db
             .insert(
                 make_atom("path", vec![atom_term("a"), atom_term("b")]),
                 &mut storage,
+                &runtime,
             )
             .unwrap();
 
@@ -1110,6 +1179,7 @@ mod tests {
             .insert(
                 make_atom("path", vec![atom_term("a"), atom_term("b")]),
                 &mut storage,
+                &runtime,
             )
             .unwrap();
 
@@ -1134,10 +1204,19 @@ mod tests {
     fn test_satisfy_body_single_literal() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("fact", vec![atom_term("a")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("fact", vec![atom_term("b")]), &mut storage)
-            .unwrap();
+        let runtime = NoOpRuntime;
+        db.insert(
+            make_atom("fact", vec![atom_term("a")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("fact", vec![atom_term("b")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         let body = vec![Literal::Positive(make_atom("fact", vec![var_term("X")]))];
         let results = satisfy_body(&body, &db, &storage);
@@ -1149,19 +1228,23 @@ mod tests {
     fn test_satisfy_body_join() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("r", vec![atom_term("a"), atom_term("b")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("s", vec![atom_term("b"), atom_term("c")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("s", vec![atom_term("x"), atom_term("y")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1197,25 +1280,31 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         // Facts
         db.insert(
             make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("mary"), atom_term("alice")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("bob"), atom_term("charlie")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("charlie"), atom_term("dave")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1257,12 +1346,14 @@ mod tests {
     fn test_large_rule_chain() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         let chain_len = 20;
 
         for i in 0..chain_len {
             db.insert(
                 make_atom("link", vec![int_term(i), int_term(i + 1)]),
                 &mut storage,
+                &runtime,
             )
             .unwrap();
         }
@@ -1299,19 +1390,23 @@ mod tests {
     fn test_ground_rule_same_variable_multiple_positions() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("edge", vec![atom_term("a"), atom_term("a")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("edge", vec![atom_term("a"), atom_term("b")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("edge", vec![atom_term("b"), atom_term("b")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1334,8 +1429,13 @@ mod tests {
     fn test_ground_rule_negation_no_match() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("bird", vec![atom_term("tweety")]), &mut storage)
-            .unwrap();
+        let runtime = NoOpRuntime;
+        db.insert(
+            make_atom("bird", vec![atom_term("tweety")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         // Rule: mammal(X) :- not bird(X).
         // Since only tweety exists and is a bird, no mammals
@@ -1355,19 +1455,23 @@ mod tests {
     fn test_ground_rule_join_same_predicate() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("knows", vec![atom_term("a"), atom_term("b")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("knows", vec![atom_term("b"), atom_term("c")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("knows", vec![atom_term("a"), atom_term("c")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1392,12 +1496,14 @@ mod tests {
     fn test_ground_rule_multiple_same_variable() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom(
                 "triple",
                 vec![atom_term("a"), atom_term("a"), atom_term("a")],
             ),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
@@ -1406,6 +1512,7 @@ mod tests {
                 vec![atom_term("a"), atom_term("b"), atom_term("c")],
             ),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1429,24 +1536,29 @@ mod tests {
     fn test_ground_rule_four_literals() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("step", vec![int_term(0), int_term(1)]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("step", vec![int_term(1), int_term(2)]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("step", vec![int_term(2), int_term(3)]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("step", vec![int_term(3), int_term(4)]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1473,14 +1585,31 @@ mod tests {
     fn test_ground_rule_negation_all_filtered() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("person", vec![atom_term("john")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("person", vec![atom_term("mary")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("blocked", vec![atom_term("john")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("blocked", vec![atom_term("mary")]), &mut storage)
-            .unwrap();
+        let runtime = NoOpRuntime;
+        db.insert(
+            make_atom("person", vec![atom_term("john")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("person", vec![atom_term("mary")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("blocked", vec![atom_term("john")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("blocked", vec![atom_term("mary")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         // Rule: allowed(X) :- person(X), not blocked(X).
         let rule = make_rule(
@@ -1501,16 +1630,23 @@ mod tests {
     fn test_satisfy_body_with_different_predicates() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("person", vec![atom_term("john")]), &mut storage)
-            .unwrap();
+        let runtime = NoOpRuntime;
+        db.insert(
+            make_atom("person", vec![atom_term("john")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
         db.insert(
             make_atom("age", vec![atom_term("john"), int_term(30)]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("city", vec![atom_term("john"), atom_term("nyc")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1530,13 +1666,14 @@ mod tests {
     fn test_ground_rule_cartesian_product() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("a", vec![atom_term("x")]), &mut storage)
+        let runtime = NoOpRuntime;
+        db.insert(make_atom("a", vec![atom_term("x")]), &mut storage, &runtime)
             .unwrap();
-        db.insert(make_atom("a", vec![atom_term("y")]), &mut storage)
+        db.insert(make_atom("a", vec![atom_term("y")]), &mut storage, &runtime)
             .unwrap();
-        db.insert(make_atom("b", vec![atom_term("1")]), &mut storage)
+        db.insert(make_atom("b", vec![atom_term("1")]), &mut storage, &runtime)
             .unwrap();
-        db.insert(make_atom("b", vec![atom_term("2")]), &mut storage)
+        db.insert(make_atom("b", vec![atom_term("2")]), &mut storage, &runtime)
             .unwrap();
 
         // Rule: pair(X, Y) :- a(X), b(Y).
@@ -1559,19 +1696,23 @@ mod tests {
     fn test_ground_rule_mixed_constants_and_variables() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("rel", vec![atom_term("a"), atom_term("b"), atom_term("c")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("rel", vec![atom_term("a"), atom_term("x"), atom_term("y")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("rel", vec![atom_term("d"), atom_term("b"), atom_term("c")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1597,19 +1738,23 @@ mod tests {
     fn test_ground_rule_long_chain_four_hops() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("edge", vec![atom_term("a"), atom_term("b")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("edge", vec![atom_term("b"), atom_term("c")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("edge", vec![atom_term("c"), atom_term("d")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1635,19 +1780,23 @@ mod tests {
     fn test_ground_rule_multiple_chains_branching() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("parent", vec![atom_term("a"), atom_term("b")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("b"), atom_term("c")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("b"), atom_term("d")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1670,12 +1819,25 @@ mod tests {
     fn test_ground_rule_negation_bird_penguin() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("bird", vec![atom_term("tweety")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("bird", vec![atom_term("polly")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("penguin", vec![atom_term("polly")]), &mut storage)
-            .unwrap();
+        let runtime = NoOpRuntime;
+        db.insert(
+            make_atom("bird", vec![atom_term("tweety")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("bird", vec![atom_term("polly")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("penguin", vec![atom_term("polly")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         // Rule: flies(X) :- bird(X), not penguin(X).
         let rule = make_rule(
@@ -1697,8 +1859,13 @@ mod tests {
     fn test_ground_rule_negation_ground_constant() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("bird", vec![atom_term("tweety")]), &mut storage)
-            .unwrap();
+        let runtime = NoOpRuntime;
+        db.insert(
+            make_atom("bird", vec![atom_term("tweety")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         // Rule: not_bird_polly(x) :- bird(x), not bird(polly).
         // Note: we use bird(x) as positive literal to generate domain
@@ -1721,16 +1888,21 @@ mod tests {
     fn test_ground_rule_three_negations() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("a", vec![atom_term("x")]), &mut storage)
+        let runtime = NoOpRuntime;
+        db.insert(make_atom("a", vec![atom_term("x")]), &mut storage, &runtime)
             .unwrap();
-        db.insert(make_atom("b", vec![atom_term("y")]), &mut storage)
+        db.insert(make_atom("b", vec![atom_term("y")]), &mut storage, &runtime)
             .unwrap();
-        db.insert(make_atom("c", vec![atom_term("z")]), &mut storage)
+        db.insert(make_atom("c", vec![atom_term("z")]), &mut storage, &runtime)
             .unwrap();
 
         // Provide domain via positive literal
-        db.insert(make_atom("domain", vec![atom_term("val")]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("domain", vec![atom_term("val")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         // Rule: result(V) :- domain(V), not a(y), not b(x), not c(w).
         let rule = make_rule(
@@ -1753,12 +1925,25 @@ mod tests {
     fn test_ground_rule_with_builtin_comparison() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("number", vec![int_term(7)]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("number", vec![int_term(3)]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("number", vec![int_term(5)]), &mut storage)
-            .unwrap();
+        let runtime = NoOpRuntime;
+        db.insert(
+            make_atom("number", vec![int_term(7)]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("number", vec![int_term(3)]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("number", vec![int_term(5)]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         // Rule: large(X) :- number(X), X > 5.
         let rule = make_rule(
@@ -1783,14 +1968,17 @@ mod tests {
     fn test_ground_rule_with_builtin_equality() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("pair", vec![int_term(2), int_term(3)]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("pair", vec![int_term(4), int_term(2)]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1814,11 +2002,12 @@ mod tests {
     fn test_ground_rule_with_builtin_less_than() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("val", vec![int_term(1)]), &mut storage)
+        let runtime = NoOpRuntime;
+        db.insert(make_atom("val", vec![int_term(1)]), &mut storage, &runtime)
             .unwrap();
-        db.insert(make_atom("val", vec![int_term(5)]), &mut storage)
+        db.insert(make_atom("val", vec![int_term(5)]), &mut storage, &runtime)
             .unwrap();
-        db.insert(make_atom("val", vec![int_term(10)]), &mut storage)
+        db.insert(make_atom("val", vec![int_term(10)]), &mut storage, &runtime)
             .unwrap();
 
         // Rule: small(X) :- val(X), X < 6.
@@ -1843,9 +2032,10 @@ mod tests {
     fn test_ground_rule_with_builtin_equal() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("num", vec![int_term(5)]), &mut storage)
+        let runtime = NoOpRuntime;
+        db.insert(make_atom("num", vec![int_term(5)]), &mut storage, &runtime)
             .unwrap();
-        db.insert(make_atom("num", vec![int_term(10)]), &mut storage)
+        db.insert(make_atom("num", vec![int_term(10)]), &mut storage, &runtime)
             .unwrap();
 
         // Rule: five(X) :- num(X), X = 5.
@@ -1871,14 +2061,17 @@ mod tests {
     fn test_ground_rule_same_variable_twice() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("rel", vec![atom_term("a"), atom_term("a")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("rel", vec![atom_term("b"), atom_term("c")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1902,12 +2095,25 @@ mod tests {
     fn test_ground_rule_self_join() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("r", vec![int_term(1), int_term(2)]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("r", vec![int_term(2), int_term(3)]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("r", vec![int_term(3), int_term(1)]), &mut storage)
-            .unwrap();
+        let runtime = NoOpRuntime;
+        db.insert(
+            make_atom("r", vec![int_term(1), int_term(2)]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("r", vec![int_term(2), int_term(3)]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("r", vec![int_term(3), int_term(1)]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         // Rule: cycle(X) :- r(X, Y), r(Y, Z), r(Z, X).
         let rule = make_rule(
@@ -1929,10 +2135,19 @@ mod tests {
     fn test_ground_rule_with_constant_in_head() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("base", vec![atom_term("a")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("base", vec![atom_term("b")]), &mut storage)
-            .unwrap();
+        let runtime = NoOpRuntime;
+        db.insert(
+            make_atom("base", vec![atom_term("a")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("base", vec![atom_term("b")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         // Rule: tagged(constant_value, X) :- base(X).
         let rule = make_rule(
@@ -1953,11 +2168,12 @@ mod tests {
     fn test_ground_rule_builtin_not_equal() {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("val", vec![int_term(1)]), &mut storage)
+        let runtime = NoOpRuntime;
+        db.insert(make_atom("val", vec![int_term(1)]), &mut storage, &runtime)
             .unwrap();
-        db.insert(make_atom("val", vec![int_term(5)]), &mut storage)
+        db.insert(make_atom("val", vec![int_term(5)]), &mut storage, &runtime)
             .unwrap();
-        db.insert(make_atom("val", vec![int_term(10)]), &mut storage)
+        db.insert(make_atom("val", vec![int_term(10)]), &mut storage, &runtime)
             .unwrap();
 
         // Rule: not_five(X) :- val(X), X != 5.

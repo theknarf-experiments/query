@@ -3,10 +3,9 @@
 use std::collections::HashMap;
 
 use logical::{
-    insert_with_triggers, ColumnSchema, DataType as StorageDataType, ExportData, ForeignKeyRef,
-    ImportData, JsonValue, MemoryEngine, OperationError, ReferentialAction as StorageRefAction,
-    Row, StorageEngine, StorageError, TableConstraint as StorageTableConstraint, TableSchema,
-    Value,
+    insert, ColumnSchema, DataType as StorageDataType, ExportData, ForeignKeyRef, ImportData,
+    JsonValue, MemoryEngine, OperationError, ReferentialAction as StorageRefAction, Row,
+    StorageEngine, StorageError, TableConstraint as StorageTableConstraint, TableSchema, Value,
 };
 
 use crate::runtime::SqlRuntime;
@@ -192,7 +191,7 @@ impl Engine {
 
             // Use trigger-aware insert from logical layer
             let runtime = SqlRuntime::new();
-            match insert_with_triggers(&mut self.storage, &runtime, table, new_row.clone()) {
+            match insert(&mut self.storage, &runtime, table, new_row.clone()) {
                 Ok(true) => {}         // Row inserted
                 Ok(false) => continue, // Row skipped by BEFORE trigger
                 Err(logical::OperationError::TriggerAbort(msg)) => {
@@ -484,7 +483,7 @@ impl Engine {
             let row: Row = value_row.iter().map(eval_literal).collect();
 
             // Use trigger-aware insert
-            match insert_with_triggers(&mut self.storage, &runtime, table, row) {
+            match insert(&mut self.storage, &runtime, table, row) {
                 Ok(true) => count += 1,
                 Ok(false) => {
                     // Row was skipped by BEFORE trigger

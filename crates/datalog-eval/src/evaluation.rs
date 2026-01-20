@@ -17,7 +17,7 @@ use datalog_planner::{
     check_program_safety, ground_rule, ground_rule_semi_naive_with_delta, satisfy_body, stratify,
     SafetyError, StratificationError,
 };
-use logical::{DatalogContext, DeltaTracker, InsertError, StorageEngine, StorageError};
+use logical::{DatalogContext, DeltaTracker, InsertError, Runtime, StorageEngine, StorageError};
 
 /// Errors that can occur during evaluation
 #[derive(Debug, Clone, PartialEq)]
@@ -125,13 +125,14 @@ pub struct EvaluationStats {
 /// // ancestor(X, Y) :- parent(X, Y).
 /// // ancestor(X, Z) :- ancestor(X, Y), parent(Y, Z).
 ///
-/// let result = evaluate(&rules, &[], facts, &mut storage)?;
+/// let result = evaluate(&rules, &[], facts, &mut storage, &runtime)?;
 /// ```
-pub fn evaluate<S: StorageEngine>(
+pub fn evaluate<S: StorageEngine, R: Runtime<S>>(
     rules: &[Rule],
     constraints: &[Constraint],
     initial_facts: DatalogContext,
     storage: &mut S,
+    runtime: &R,
 ) -> Result<DatalogContext, EvaluationError> {
     // Check safety first (variables in negation must appear in positive literals, etc.)
     check_program_safety(rules)?;
@@ -143,7 +144,7 @@ pub fn evaluate<S: StorageEngine>(
 
     // Evaluate each stratum to fixed point before moving to the next
     for stratum_rules in &stratification.rules_by_stratum {
-        db = semi_naive_evaluate(stratum_rules, db, storage)?;
+        db = semi_naive_evaluate(stratum_rules, db, storage, runtime)?;
     }
 
     // Check constraints after evaluation
@@ -165,14 +166,15 @@ pub fn evaluate<S: StorageEngine>(
 /// # Example
 ///
 /// ```ignore
-/// let (result, stats) = evaluate_instrumented(&rules, &[], facts, &mut storage)?;
+/// let (result, stats) = evaluate_instrumented(&rules, &[], facts, &mut storage, &runtime)?;
 /// println!("Iterations: {}, Facts derived: {}", stats.iterations, stats.facts_derived);
 /// ```
-pub fn evaluate_instrumented<S: StorageEngine>(
+pub fn evaluate_instrumented<S: StorageEngine, R: Runtime<S>>(
     rules: &[Rule],
     constraints: &[Constraint],
     initial_facts: DatalogContext,
     storage: &mut S,
+    runtime: &R,
 ) -> Result<(DatalogContext, EvaluationStats), EvaluationError> {
     // Check safety first
     check_program_safety(rules)?;
@@ -185,7 +187,8 @@ pub fn evaluate_instrumented<S: StorageEngine>(
 
     // Evaluate each stratum to fixed point
     for stratum_rules in &stratification.rules_by_stratum {
-        let (new_db, stratum_stats) = semi_naive_evaluate_instrumented(stratum_rules, db, storage)?;
+        let (new_db, stratum_stats) =
+            semi_naive_evaluate_instrumented(stratum_rules, db, storage, runtime)?;
         db = new_db;
 
         // Accumulate stats from each stratum
@@ -227,10 +230,11 @@ pub fn check_constraints<S: StorageEngine>(
 /// Uses semi-naive evaluation: after the first iteration, only considers
 /// derivations that use at least one newly derived fact from the previous iteration.
 /// Storage handles deduplication via UNIQUE constraints on all columns.
-fn semi_naive_evaluate<S: StorageEngine>(
+fn semi_naive_evaluate<S: StorageEngine, R: Runtime<S>>(
     rules: &[Rule],
     initial_facts: DatalogContext,
     storage: &mut S,
+    runtime: &R,
 ) -> Result<DatalogContext, EvaluationError> {
     let mut db = initial_facts;
     let mut delta = DeltaTracker::new();
@@ -250,7 +254,7 @@ fn semi_naive_evaluate<S: StorageEngine>(
 
             for fact in derived {
                 // Try to insert - storage UNIQUE constraint handles deduplication
-                if db.insert(fact.clone(), storage)?.is_new() {
+                if db.insert(fact.clone(), storage, runtime)?.is_new() {
                     // Only truly new facts go into the next iteration's delta
                     new_delta.insert(fact);
                 }
@@ -272,10 +276,11 @@ fn semi_naive_evaluate<S: StorageEngine>(
 }
 
 /// Instrumented version of semi-naive evaluation that tracks statistics.
-fn semi_naive_evaluate_instrumented<S: StorageEngine>(
+fn semi_naive_evaluate_instrumented<S: StorageEngine, R: Runtime<S>>(
     rules: &[Rule],
     initial_facts: DatalogContext,
     storage: &mut S,
+    runtime: &R,
 ) -> Result<(DatalogContext, EvaluationStats), EvaluationError> {
     let mut db = initial_facts;
     let mut delta = DeltaTracker::new();
@@ -296,7 +301,7 @@ fn semi_naive_evaluate_instrumented<S: StorageEngine>(
             };
 
             for fact in derived {
-                if db.insert(fact.clone(), storage)?.is_new() {
+                if db.insert(fact.clone(), storage, runtime)?.is_new() {
                     new_delta.insert(fact);
                     stats.facts_derived += 1;
                 }
@@ -336,10 +341,11 @@ fn semi_naive_evaluate_instrumented<S: StorageEngine>(
 ///
 /// Note: This does NOT do stratification. For programs with negation,
 /// use `evaluate()` or `evaluate_instrumented()` instead.
-pub fn naive_evaluate<S: StorageEngine>(
+pub fn naive_evaluate<S: StorageEngine, R: Runtime<S>>(
     rules: &[Rule],
     initial_facts: DatalogContext,
     storage: &mut S,
+    runtime: &R,
 ) -> Result<DatalogContext, EvaluationError> {
     let mut db = initial_facts;
     let mut changed = true;
@@ -351,7 +357,7 @@ pub fn naive_evaluate<S: StorageEngine>(
         for rule in rules {
             let derived = ground_rule(rule, &db, storage);
             for fact in derived {
-                if db.insert(fact, storage)?.is_new() {
+                if db.insert(fact, storage, runtime)?.is_new() {
                     changed = true;
                 }
             }
@@ -370,15 +376,16 @@ pub fn naive_evaluate<S: StorageEngine>(
 ///
 /// ```ignore
 /// let (result_naive, naive_stats) = naive_evaluate_instrumented(&rules, facts, &mut storage)?;
-/// let (result_semi, semi_stats) = evaluate_instrumented(&rules, &[], facts, &mut storage)?;
+/// let (result_semi, semi_stats) = evaluate_instrumented(&rules, &[], facts, &mut storage, &runtime)?;
 ///
 /// // Semi-naive should have fewer iterations for recursive rules
 /// assert!(semi_stats.iterations <= naive_stats.iterations);
 /// ```
-pub fn naive_evaluate_instrumented<S: StorageEngine>(
+pub fn naive_evaluate_instrumented<S: StorageEngine, R: Runtime<S>>(
     rules: &[Rule],
     initial_facts: DatalogContext,
     storage: &mut S,
+    runtime: &R,
 ) -> Result<(DatalogContext, EvaluationStats), EvaluationError> {
     let mut db = initial_facts;
     let mut changed = true;
@@ -392,7 +399,7 @@ pub fn naive_evaluate_instrumented<S: StorageEngine>(
             stats.rule_applications += 1;
             let derived = ground_rule(rule, &db, storage);
             for fact in derived {
-                if db.insert(fact, storage)?.is_new() {
+                if db.insert(fact, storage, runtime)?.is_new() {
                     changed = true;
                     stats.facts_derived += 1;
                 }
@@ -407,13 +414,14 @@ pub fn naive_evaluate_instrumented<S: StorageEngine>(
 ///
 /// Deprecated: Use `evaluate()` with storage parameter instead.
 #[deprecated(note = "Use evaluate() with storage parameter instead")]
-pub fn evaluate_with_storage<S: StorageEngine>(
+pub fn evaluate_with_storage<S: StorageEngine, R: Runtime<S>>(
     rules: &[Rule],
     constraints: &[Constraint],
     initial_facts: DatalogContext,
     storage: &mut S,
+    runtime: &R,
 ) -> Result<DatalogContext, EvaluationError> {
-    evaluate(rules, constraints, initial_facts, storage)
+    evaluate(rules, constraints, initial_facts, storage, runtime)
 }
 
 #[cfg(test)]
@@ -421,7 +429,7 @@ pub fn evaluate_with_storage<S: StorageEngine>(
 mod tests {
     use super::*;
     use datalog_parser::{Atom, Literal, Symbol, Term, Value};
-    use logical::MemoryEngine;
+    use logical::{MemoryEngine, NoOpRuntime};
 
     fn sym(s: &str) -> Symbol {
         Symbol::new(s.to_string())
@@ -448,14 +456,18 @@ mod tests {
         // ancestor(X, Y) :- parent(X, Y).
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("mary"), atom_term("jane")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -467,7 +479,7 @@ mod tests {
             ))],
         }];
 
-        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should have derived 2 ancestor facts
         // predicate_count() returns count of distinct predicates, not total facts
@@ -480,19 +492,23 @@ mod tests {
         // ancestor(X, Z) :- ancestor(X, Y), parent(Y, Z).
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("parent", vec![atom_term("a"), atom_term("b")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("b"), atom_term("c")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("c"), atom_term("d")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -513,7 +529,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should have 2 predicates: parent + ancestor
         assert_eq!(result.predicate_count(), 2);
@@ -525,13 +541,23 @@ mod tests {
         // childless(X) :- person(X), not parent(X, _).
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("person", vec![atom_term("alice")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("person", vec![atom_term("bob")]), &mut storage)
-            .unwrap();
+        let runtime = NoOpRuntime;
+        db.insert(
+            make_atom("person", vec![atom_term("alice")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("person", vec![atom_term("bob")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("alice"), atom_term("charlie")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -543,7 +569,7 @@ mod tests {
             ],
         }];
 
-        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should have 3 predicates: person, parent, childless
         assert_eq!(result.predicate_count(), 3);
@@ -554,9 +580,11 @@ mod tests {
         // Constraint: :- dangerous(X).
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("dangerous", vec![atom_term("bomb")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -567,7 +595,7 @@ mod tests {
             ))],
         }];
 
-        let result = evaluate(&[], &constraints, db, &mut storage);
+        let result = evaluate(&[], &constraints, db, &mut storage, &runtime);
 
         assert!(matches!(
             result,
@@ -598,7 +626,8 @@ mod tests {
         ];
 
         let mut storage = MemoryEngine::new();
-        let result = evaluate(&rules, &[], DatalogContext::new(), &mut storage);
+        let runtime = NoOpRuntime;
+        let result = evaluate(&rules, &[], DatalogContext::new(), &mut storage, &runtime);
 
         assert!(matches!(result, Err(EvaluationError::Stratification(_))));
     }
@@ -608,14 +637,17 @@ mod tests {
         // Simple rule: ancestor(X, Y) :- parent(X, Y).
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("mary"), atom_term("jane")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -627,7 +659,8 @@ mod tests {
             ))],
         }];
 
-        let (result, stats) = evaluate_instrumented(&rules, &[], db, &mut storage).unwrap();
+        let (result, stats) =
+            evaluate_instrumented(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         assert_eq!(result.predicate_count(), 2); // parent + ancestor
         assert_eq!(stats.facts_derived, 2); // 2 ancestor facts derived
@@ -643,20 +676,25 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         // Chain: a -> b -> c -> d (3 edges, should derive 6 ancestor facts)
         db.insert(
             make_atom("parent", vec![atom_term("a"), atom_term("b")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("b"), atom_term("c")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("c"), atom_term("d")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -677,7 +715,8 @@ mod tests {
             },
         ];
 
-        let (result, stats) = evaluate_instrumented(&rules, &[], db, &mut storage).unwrap();
+        let (result, stats) =
+            evaluate_instrumented(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         assert_eq!(result.predicate_count(), 2);
         // ancestor facts: (a,b), (b,c), (c,d), (a,c), (b,d), (a,d) = 6
@@ -696,7 +735,9 @@ mod tests {
         let db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
-        let (_, stats) = evaluate_instrumented(&[], &[], db, &mut storage).unwrap();
+        let runtime = NoOpRuntime;
+
+        let (_, stats) = evaluate_instrumented(&[], &[], db, &mut storage, &runtime).unwrap();
 
         assert_eq!(stats.facts_derived, 0);
         assert_eq!(stats.rule_applications, 0);
@@ -713,8 +754,13 @@ mod tests {
         // Stratum 2: r(X) :- base(X), not q(X).
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("base", vec![atom_term("a")]), &mut storage)
-            .unwrap();
+        let runtime = NoOpRuntime;
+        db.insert(
+            make_atom("base", vec![atom_term("a")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         let rules = vec![
             Rule {
@@ -737,7 +783,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // p(a) should be derived in stratum 0
         assert!(result.contains(&make_atom("p", vec![atom_term("a")]), &storage));
@@ -759,14 +805,31 @@ mod tests {
         // definitely(X) :- base(X), not non_included(X).
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("base", vec![atom_term("a")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("base", vec![atom_term("b")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("base", vec![atom_term("c")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("excluded", vec![atom_term("a")]), &mut storage)
-            .unwrap();
+        let runtime = NoOpRuntime;
+        db.insert(
+            make_atom("base", vec![atom_term("a")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("base", vec![atom_term("b")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("base", vec![atom_term("c")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("excluded", vec![atom_term("a")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         let rules = vec![
             Rule {
@@ -792,7 +855,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // b and c are included (not excluded)
         assert!(result.contains(&make_atom("included", vec![atom_term("b")]), &storage));
@@ -822,28 +885,37 @@ mod tests {
         // safe_reachable(X, Y) :- reachable(X, Y), not blocked(Y).
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        let runtime = NoOpRuntime;
         db.insert(
             make_atom("edge", vec![atom_term("a"), atom_term("b")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("edge", vec![atom_term("b"), atom_term("c")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("edge", vec![atom_term("c"), atom_term("d")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("edge", vec![atom_term("a"), atom_term("x")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
-        db.insert(make_atom("blocked", vec![atom_term("x")]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("blocked", vec![atom_term("x")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         let rules = vec![
             Rule {
@@ -869,7 +941,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should reach d from a (via b->c->d)
         assert!(result.contains(
@@ -901,26 +973,35 @@ mod tests {
         // safe(S) :- reachable(S), not forbidden(S).
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
-        db.insert(make_atom("initial", vec![atom_term("start")]), &mut storage)
-            .unwrap();
+        let runtime = NoOpRuntime;
+        db.insert(
+            make_atom("initial", vec![atom_term("start")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
         db.insert(
             make_atom("transition", vec![atom_term("start"), atom_term("s1")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("transition", vec![atom_term("s1"), atom_term("s2")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("transition", vec![atom_term("s1"), atom_term("danger")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("forbidden", vec![atom_term("danger")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -945,7 +1026,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // All states are reachable
         assert!(result.contains(&make_atom("reachable", vec![atom_term("start")]), &storage));
@@ -973,6 +1054,8 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         // Create a long chain: n0->n1->n2->...->n100
         for i in 0..100 {
             let from = format!("n{}", i);
@@ -980,6 +1063,7 @@ mod tests {
             db.insert(
                 make_atom("edge", vec![atom_term(&from), atom_term(&to)]),
                 &mut storage,
+                &runtime,
             )
             .unwrap();
         }
@@ -1003,7 +1087,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should be able to reach from n0 to n100
         assert!(result.contains(
@@ -1027,6 +1111,8 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         // Create a chain of 50 nodes
         for i in 0..50 {
             let from = format!("n{}", i);
@@ -1034,6 +1120,7 @@ mod tests {
             db.insert(
                 make_atom("edge", vec![atom_term(&from), atom_term(&to)]),
                 &mut storage,
+                &runtime,
             )
             .unwrap();
         }
@@ -1055,7 +1142,7 @@ mod tests {
             },
         ];
 
-        let (result, stats) = evaluate_instrumented(&rules, &[], db, &mut storage)
+        let (result, stats) = evaluate_instrumented(&rules, &[], db, &mut storage, &runtime)
             .expect("evaluation should succeed");
 
         // Check that semi-naive is efficient
@@ -1082,6 +1169,8 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         // Create a wide graph: single source to many targets
         // This tests performance with many facts in a single relation
         for i in 0..100 {
@@ -1089,6 +1178,7 @@ mod tests {
             db.insert(
                 make_atom("edge", vec![atom_term("source"), atom_term(&target)]),
                 &mut storage,
+                &runtime,
             )
             .unwrap();
         }
@@ -1102,7 +1192,7 @@ mod tests {
             ))],
         }];
 
-        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // All targets should be reachable
         for i in 0..100 {
@@ -1120,11 +1210,17 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         // Create facts that will derive through multiple predicates
         for i in 0..20 {
             let name = format!("e{}", i);
-            db.insert(make_atom("base", vec![atom_term(&name)]), &mut storage)
-                .unwrap();
+            db.insert(
+                make_atom("base", vec![atom_term(&name)]),
+                &mut storage,
+                &runtime,
+            )
+            .unwrap();
         }
 
         // level1(X) :- base(X).
@@ -1155,7 +1251,7 @@ mod tests {
             },
         ];
 
-        let (result, stats) = evaluate_instrumented(&rules, &[], db, &mut storage)
+        let (result, stats) = evaluate_instrumented(&rules, &[], db, &mut storage, &runtime)
             .expect("evaluation should succeed");
 
         // Each level should have all 20 entities
@@ -1185,9 +1281,12 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         db.insert(
             make_atom("parent", vec![atom_term("alice"), atom_term("bob")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1200,7 +1299,7 @@ mod tests {
             ))],
         }];
 
-        let result = naive_evaluate(&rules, db, &mut storage).unwrap();
+        let result = naive_evaluate(&rules, db, &mut storage, &runtime).unwrap();
 
         assert!(result.contains(
             &make_atom("ancestor", vec![atom_term("alice"), atom_term("bob")]),
@@ -1213,15 +1312,19 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         // a -> b -> c
         db.insert(
             make_atom("edge", vec![atom_term("a"), atom_term("b")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("edge", vec![atom_term("b"), atom_term("c")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1244,7 +1347,7 @@ mod tests {
             },
         ];
 
-        let result = naive_evaluate(&rules, db, &mut storage).unwrap();
+        let result = naive_evaluate(&rules, db, &mut storage, &runtime).unwrap();
 
         // Should derive path(a, c) through transitive closure
         assert!(result.contains(
@@ -1274,24 +1377,28 @@ mod tests {
         ];
 
         // Create initial facts in separate databases for each evaluation
+        let runtime = NoOpRuntime;
         let mut storage_naive = MemoryEngine::new();
         let mut db_naive = DatalogContext::new();
         db_naive
             .insert(
                 make_atom("edge", vec![atom_term("a"), atom_term("b")]),
                 &mut storage_naive,
+                &runtime,
             )
             .unwrap();
         db_naive
             .insert(
                 make_atom("edge", vec![atom_term("b"), atom_term("c")]),
                 &mut storage_naive,
+                &runtime,
             )
             .unwrap();
         db_naive
             .insert(
                 make_atom("edge", vec![atom_term("c"), atom_term("d")]),
                 &mut storage_naive,
+                &runtime,
             )
             .unwrap();
 
@@ -1301,23 +1408,26 @@ mod tests {
             .insert(
                 make_atom("edge", vec![atom_term("a"), atom_term("b")]),
                 &mut storage_semi,
+                &runtime,
             )
             .unwrap();
         db_semi
             .insert(
                 make_atom("edge", vec![atom_term("b"), atom_term("c")]),
                 &mut storage_semi,
+                &runtime,
             )
             .unwrap();
         db_semi
             .insert(
                 make_atom("edge", vec![atom_term("c"), atom_term("d")]),
                 &mut storage_semi,
+                &runtime,
             )
             .unwrap();
 
-        let result_naive = naive_evaluate(&rules, db_naive, &mut storage_naive).unwrap();
-        let result_semi = evaluate(&rules, &[], db_semi, &mut storage_semi).unwrap();
+        let result_naive = naive_evaluate(&rules, db_naive, &mut storage_naive, &runtime).unwrap();
+        let result_semi = evaluate(&rules, &[], db_semi, &mut storage_semi, &runtime).unwrap();
 
         // Both should derive the same paths
         assert_eq!(
@@ -1373,6 +1483,7 @@ mod tests {
         ];
 
         // Build a chain for testing
+        let runtime = NoOpRuntime;
         let mut storage_naive = MemoryEngine::new();
         let mut db_naive = DatalogContext::new();
         let mut storage_semi = MemoryEngine::new();
@@ -1385,20 +1496,22 @@ mod tests {
                 .insert(
                     make_atom("edge", vec![atom_term(&from), atom_term(&to)]),
                     &mut storage_naive,
+                    &runtime,
                 )
                 .unwrap();
             db_semi
                 .insert(
                     make_atom("edge", vec![atom_term(&from), atom_term(&to)]),
                     &mut storage_semi,
+                    &runtime,
                 )
                 .unwrap();
         }
 
         let (_, naive_stats) =
-            naive_evaluate_instrumented(&rules, db_naive, &mut storage_naive).unwrap();
+            naive_evaluate_instrumented(&rules, db_naive, &mut storage_naive, &runtime).unwrap();
         let (_, semi_stats) =
-            evaluate_instrumented(&rules, &[], db_semi, &mut storage_semi).unwrap();
+            evaluate_instrumented(&rules, &[], db_semi, &mut storage_semi, &runtime).unwrap();
 
         println!(
             "Naive: {} iterations, {} rule apps, {} facts",
@@ -1435,16 +1548,22 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         // Insert: data(pair(1, foo))
         let compound = compound_term(
             "pair",
             vec![Term::Constant(Value::Integer(1)), atom_term("foo")],
         );
-        db.insert(make_atom("data", vec![compound.clone()]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("data", vec![compound.clone()]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         // Query should return the compound term
-        let result = evaluate(&[], &[], db, &mut storage).unwrap();
+        let result = evaluate(&[], &[], db, &mut storage, &runtime).unwrap();
         assert!(result.contains(&make_atom("data", vec![compound]), &storage));
     }
 
@@ -1454,9 +1573,15 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         // Base fact: value(foo)
-        db.insert(make_atom("value", vec![atom_term("foo")]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("value", vec![atom_term("foo")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         // Rule: wrapped(wrap(X)) :- value(X).
         let rules = vec![Rule {
@@ -1464,7 +1589,7 @@ mod tests {
             body: vec![Literal::Positive(make_atom("value", vec![var_term("X")]))],
         }];
 
-        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should derive: wrapped(wrap(foo))
         let expected = compound_term("wrap", vec![atom_term("foo")]);
@@ -1477,9 +1602,15 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         // Base fact: base(a)
-        db.insert(make_atom("base", vec![atom_term("a")]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("base", vec![atom_term("a")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         // Rules that progressively wrap:
         // level0(X) :- base(X).
@@ -1505,7 +1636,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should derive:
         // level0(a)
@@ -1531,6 +1662,8 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         // Facts with compound terms
         db.insert(
             make_atom(
@@ -1538,6 +1671,7 @@ mod tests {
                 vec![compound_term("pair", vec![atom_term("a"), atom_term("b")])],
             ),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
@@ -1546,6 +1680,7 @@ mod tests {
                 vec![compound_term("pair", vec![atom_term("c"), atom_term("d")])],
             ),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1559,7 +1694,7 @@ mod tests {
             ))],
         }];
 
-        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should derive first(a) and first(c)
         assert!(result.contains(&make_atom("first", vec![atom_term("a")]), &storage));
@@ -1572,9 +1707,11 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
-        db.insert(make_atom("x", vec![atom_term("a")]), &mut storage)
+        let runtime = NoOpRuntime;
+
+        db.insert(make_atom("x", vec![atom_term("a")]), &mut storage, &runtime)
             .unwrap();
-        db.insert(make_atom("y", vec![atom_term("b")]), &mut storage)
+        db.insert(make_atom("y", vec![atom_term("b")]), &mut storage, &runtime)
             .unwrap();
 
         // Rule: combined(pair(X, Y)) :- x(X), y(Y).
@@ -1589,7 +1726,7 @@ mod tests {
             ],
         }];
 
-        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         let expected = compound_term("pair", vec![atom_term("a"), atom_term("b")]);
         assert!(result.contains(&make_atom("combined", vec![expected]), &storage));
@@ -1602,16 +1739,30 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
-        db.insert(make_atom("fact1", vec![atom_term("a")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("fact2", vec![atom_term("b")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("fact3", vec![atom_term("c")]), &mut storage)
-            .unwrap();
+        let runtime = NoOpRuntime;
+
+        db.insert(
+            make_atom("fact1", vec![atom_term("a")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("fact2", vec![atom_term("b")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("fact3", vec![atom_term("c")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         let rules = vec![]; // No rules!
 
-        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Database should remain unchanged - only original facts
         assert!(result.contains(&make_atom("fact1", vec![atom_term("a")]), &storage));
@@ -1624,19 +1775,24 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         db.insert(
             make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("john"), atom_term("bob")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("mary"), atom_term("alice")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1654,12 +1810,26 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
-        db.insert(make_atom("fact", vec![atom_term("a")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("fact", vec![atom_term("a")]), &mut storage)
-            .unwrap(); // Duplicate!
-        db.insert(make_atom("fact", vec![atom_term("a")]), &mut storage)
-            .unwrap(); // Another duplicate!
+        let runtime = NoOpRuntime;
+
+        db.insert(
+            make_atom("fact", vec![atom_term("a")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("fact", vec![atom_term("a")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap(); // Duplicate!
+        db.insert(
+            make_atom("fact", vec![atom_term("a")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap(); // Another duplicate!
 
         // Query should return only one result (deduplication)
         let query = make_atom("fact", vec![var_term("X")]);
@@ -1672,9 +1842,12 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         db.insert(
             make_atom("edge", vec![atom_term("a"), atom_term("b")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1696,7 +1869,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should work fine, duplicate derivations get deduplicated
         assert!(result.contains(
@@ -1712,8 +1885,10 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         let fact = make_atom("parent", vec![atom_term("john"), atom_term("mary")]);
-        db.insert(fact.clone(), &mut storage).unwrap();
+        db.insert(fact.clone(), &mut storage, &runtime).unwrap();
 
         // Ground query should match
         let results = db.query(&fact, &storage);
@@ -1725,9 +1900,12 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         db.insert(
             make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1742,14 +1920,18 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         db.insert(
             make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("mary"), atom_term("sue")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1762,7 +1944,7 @@ mod tests {
             ],
         }];
 
-        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should find: john is grandparent of sue
         assert!(result.contains(
@@ -1776,19 +1958,24 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         db.insert(
             make_atom("edge", vec![atom_term("a"), atom_term("b")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("edge", vec![atom_term("b"), atom_term("c")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("edge", vec![atom_term("c"), atom_term("d")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1822,10 +2009,13 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         // Integer facts
         db.insert(
             make_atom("health", vec![atom_term("player"), int_term(100)]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1833,6 +2023,7 @@ mod tests {
         db.insert(
             make_atom("position", vec![atom_term("player"), float_term(3.14)]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1840,6 +2031,7 @@ mod tests {
         db.insert(
             make_atom("is_alive", vec![atom_term("player"), bool_term(true)]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1847,6 +2039,7 @@ mod tests {
         db.insert(
             make_atom("name", vec![atom_term("player"), string_term("Alice")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1860,6 +2053,7 @@ mod tests {
                 ],
             ),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1875,7 +2069,7 @@ mod tests {
             ))],
         }];
 
-        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Verify compound term matching worked
         assert!(result.contains(
@@ -1899,12 +2093,15 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         db.insert(
             make_atom(
                 "player",
                 vec![atom_term("alice"), int_term(100), bool_term(true)],
             ),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
@@ -1913,6 +2110,7 @@ mod tests {
                 vec![atom_term("bob"), int_term(0), bool_term(false)],
             ),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -1925,7 +2123,7 @@ mod tests {
             ))],
         }];
 
-        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Only alice should be alive
         assert!(result.contains(
@@ -1945,10 +2143,20 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
-        db.insert(make_atom("safe", vec![atom_term("a")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("safe", vec![atom_term("b")]), &mut storage)
-            .unwrap();
+        let runtime = NoOpRuntime;
+
+        db.insert(
+            make_atom("safe", vec![atom_term("a")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("safe", vec![atom_term("b")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         // Constraint: :- unsafe(X).
         let constraints = vec![Constraint {
@@ -1956,7 +2164,7 @@ mod tests {
         }];
 
         // Should pass - no unsafe facts
-        let result = evaluate(&[], &constraints, db, &mut storage);
+        let result = evaluate(&[], &constraints, db, &mut storage, &runtime);
         assert!(result.is_ok());
     }
 
@@ -1965,19 +2173,33 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
-        db.insert(make_atom("unsafe", vec![atom_term("a")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("unsafe", vec![atom_term("b")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("unsafe", vec![atom_term("c")]), &mut storage)
-            .unwrap();
+        let runtime = NoOpRuntime;
+
+        db.insert(
+            make_atom("unsafe", vec![atom_term("a")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("unsafe", vec![atom_term("b")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("unsafe", vec![atom_term("c")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         // Constraint: :- unsafe(X).
         let constraints = vec![Constraint {
             body: vec![Literal::Positive(make_atom("unsafe", vec![var_term("X")]))],
         }];
 
-        let result = evaluate(&[], &constraints, db, &mut storage);
+        let result = evaluate(&[], &constraints, db, &mut storage, &runtime);
         assert!(result.is_err());
 
         if let Err(EvaluationError::ConstraintViolation {
@@ -1995,15 +2217,30 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
-        db.insert(make_atom("player", vec![atom_term("alice")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("player", vec![atom_term("bob")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("dead", vec![atom_term("alice")]), &mut storage)
-            .unwrap();
+        let runtime = NoOpRuntime;
+
+        db.insert(
+            make_atom("player", vec![atom_term("alice")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("player", vec![atom_term("bob")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("dead", vec![atom_term("alice")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
         db.insert(
             make_atom("has_weapon", vec![atom_term("alice")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -2016,7 +2253,7 @@ mod tests {
             ],
         }];
 
-        let result = evaluate(&[], &constraints, db, &mut storage);
+        let result = evaluate(&[], &constraints, db, &mut storage, &runtime);
         assert!(result.is_err());
     }
 
@@ -2025,13 +2262,24 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
-        db.insert(make_atom("player", vec![atom_term("alice")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("player", vec![atom_term("bob")]), &mut storage)
-            .unwrap();
+        let runtime = NoOpRuntime;
+
+        db.insert(
+            make_atom("player", vec![atom_term("alice")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("player", vec![atom_term("bob")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
         db.insert(
             make_atom("has_health", vec![atom_term("alice")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         // bob has no health
@@ -2045,7 +2293,7 @@ mod tests {
             ],
         }];
 
-        let result = evaluate(&[], &constraints, db, &mut storage);
+        let result = evaluate(&[], &constraints, db, &mut storage, &runtime);
         assert!(result.is_err());
 
         if let Err(EvaluationError::ConstraintViolation {
@@ -2061,18 +2309,26 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         db.insert(
             make_atom("edge", vec![atom_term("a"), atom_term("b")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("edge", vec![atom_term("b"), atom_term("c")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
-        db.insert(make_atom("blocked", vec![atom_term("a")]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("blocked", vec![atom_term("a")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         // path(X, Y) :- edge(X, Y).
         // path(X, Z) :- path(X, Y), edge(Y, Z).
@@ -2103,7 +2359,7 @@ mod tests {
         }];
 
         // Should fail - paths exist from blocked node 'a'
-        let result = evaluate(&rules, &constraints, db, &mut storage);
+        let result = evaluate(&rules, &constraints, db, &mut storage, &runtime);
         assert!(result.is_err());
     }
 
@@ -2114,14 +2370,20 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         // Create deeply nested term: nest(nest(nest(nest(nest(value)))))
         let mut deep_term = atom_term("value");
         for _ in 0..10 {
             deep_term = compound_term("nest", vec![deep_term]);
         }
 
-        db.insert(make_atom("deep", vec![deep_term.clone()]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("deep", vec![deep_term.clone()]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         // Query for it
         let query = make_atom("deep", vec![var_term("X")]);
@@ -2135,8 +2397,14 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
-        db.insert(make_atom("value", vec![atom_term("a")]), &mut storage)
-            .unwrap();
+        let runtime = NoOpRuntime;
+
+        db.insert(
+            make_atom("value", vec![atom_term("a")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         // Create rules that progressively wrap the value
         // level0(X) :- value(X).
@@ -2164,7 +2432,7 @@ mod tests {
             });
         }
 
-        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should derive level5(wrap(wrap(wrap(wrap(wrap(a))))))
         let mut expected = atom_term("a");
@@ -2182,10 +2450,20 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
-        db.insert(make_atom("item", vec![atom_term("sword")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("item", vec![atom_term("shield")]), &mut storage)
-            .unwrap();
+        let runtime = NoOpRuntime;
+
+        db.insert(
+            make_atom("item", vec![atom_term("sword")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("item", vec![atom_term("shield")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
         db.insert(
             make_atom(
                 "dangerous",
@@ -2195,6 +2473,7 @@ mod tests {
                 )],
             ),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -2213,7 +2492,7 @@ mod tests {
             ],
         }];
 
-        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // shield is safe (no dangerous(property(shield, sharp)))
         assert!(result.contains(&make_atom("safe_item", vec![atom_term("shield")]), &storage));
@@ -2226,10 +2505,20 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
-        db.insert(make_atom("player", vec![atom_term("alice")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("player", vec![atom_term("bob")]), &mut storage)
-            .unwrap();
+        let runtime = NoOpRuntime;
+
+        db.insert(
+            make_atom("player", vec![atom_term("alice")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("player", vec![atom_term("bob")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
         db.insert(
             make_atom(
                 "has_item",
@@ -2245,6 +2534,7 @@ mod tests {
                 ],
             ),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -2277,7 +2567,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // bob is unarmed (no weapon)
         assert!(result.contains(&make_atom("unarmed", vec![atom_term("bob")]), &storage));
@@ -2295,14 +2585,25 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         // Facts about students
-        db.insert(make_atom("student", vec![atom_term("alice")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("student", vec![atom_term("bob")]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("student", vec![atom_term("alice")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("student", vec![atom_term("bob")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
         db.insert(
             make_atom("student", vec![atom_term("charlie")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -2310,12 +2611,17 @@ mod tests {
         db.insert(
             make_atom("has_scholarship", vec![atom_term("alice")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
         // Some students have jobs
-        db.insert(make_atom("has_job", vec![atom_term("bob")]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("has_job", vec![atom_term("bob")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         // Rules:
         // needs_financial_aid(X) :- student(X), not has_scholarship(X), not has_job(X).
@@ -2338,7 +2644,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // charlie needs financial aid (no scholarship, no job)
         assert!(result.contains(
@@ -2371,15 +2677,19 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         // A chain: a -> b -> c
         db.insert(
             make_atom("edge", vec![atom_term("a"), atom_term("b")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("edge", vec![atom_term("b"), atom_term("c")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -2387,6 +2697,7 @@ mod tests {
         db.insert(
             make_atom("edge", vec![atom_term("x"), atom_term("y")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -2408,7 +2719,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should derive path(a,c) by combining path(a,b) + edge(b,c)
         assert!(result.contains(
@@ -2426,19 +2737,24 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         db.insert(
             make_atom("parent", vec![atom_term("alice"), atom_term("bob")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("bob"), atom_term("charlie")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("charlie"), atom_term("dave")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -2469,7 +2785,8 @@ mod tests {
             },
         ];
 
-        let (result, stats) = evaluate_instrumented(&rules, &[], db, &mut storage).unwrap();
+        let (result, stats) =
+            evaluate_instrumented(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should derive all ancestor relationships
         let ancestor_count = result.count_facts("ancestor", &storage);
@@ -2491,26 +2808,35 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         // Family tree
         db.insert(
             make_atom("parent", vec![atom_term("grandpa"), atom_term("dad")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("dad"), atom_term("alice")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
             make_atom("parent", vec![atom_term("alice"), atom_term("charlie")]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
         // Estrangement (family dispute)
-        db.insert(make_atom("estranged", vec![atom_term("dad")]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("estranged", vec![atom_term("dad")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         let rules = vec![
             // ancestor(X, Y) :- parent(X, Y).
@@ -2540,7 +2866,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Grandpa -> dad -> alice should exist in ancestor
         assert!(result.contains(
@@ -2572,26 +2898,45 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         // Player stats
-        db.insert(make_atom("player", vec![atom_term("alice")]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("player", vec![atom_term("bob")]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("player", vec![atom_term("alice")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("player", vec![atom_term("bob")]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         // Alice has a shield (with boolean)
         db.insert(
             make_atom("has_shield", vec![atom_term("alice"), bool_term(true)]),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
         // Bob does not have a shield (no fact)
 
         // Damage values
-        db.insert(make_atom("base_damage", vec![int_term(10)]), &mut storage)
-            .unwrap();
-        db.insert(make_atom("base_damage", vec![int_term(20)]), &mut storage)
-            .unwrap();
+        db.insert(
+            make_atom("base_damage", vec![int_term(10)]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("base_damage", vec![int_term(20)]),
+            &mut storage,
+            &runtime,
+        )
+        .unwrap();
 
         let rules = vec![
             // vulnerable(P) :- player(P), not has_shield(P, true).
@@ -2615,7 +2960,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Bob is vulnerable (no shield)
         assert!(result.contains(&make_atom("vulnerable", vec![atom_term("bob")]), &storage));
@@ -2645,6 +2990,8 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
 
+        let runtime = NoOpRuntime;
+
         // Graph with compound term labels
         db.insert(
             make_atom(
@@ -2655,6 +3002,7 @@ mod tests {
                 ],
             ),
             &mut storage,
+            &runtime,
         )
         .unwrap();
         db.insert(
@@ -2666,6 +3014,7 @@ mod tests {
                 ],
             ),
             &mut storage,
+            &runtime,
         )
         .unwrap();
 
@@ -2687,7 +3036,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage).unwrap();
+        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should derive path from node(a,1) to node(c,3)
         assert!(result.contains(

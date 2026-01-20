@@ -3,7 +3,7 @@
 //! These tests simulate various failure scenarios to ensure the database
 //! handles them correctly.
 
-use sql_engine::{Engine, ExecError};
+use db::{Engine, ExecError};
 use sql_storage::Value;
 
 /// A deterministic random number generator for simulation
@@ -323,7 +323,7 @@ fn test_edge_case_empty_table_operations() {
     // Operations on empty table should not crash
     let result = engine.execute("SELECT * FROM empty");
     assert!(result.is_ok());
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert!(rows.is_empty());
     }
 
@@ -338,7 +338,7 @@ fn test_edge_case_empty_table_operations() {
     // Aggregate on empty table
     let result = engine.execute("SELECT COUNT(*) FROM empty");
     assert!(result.is_ok());
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0][0], Value::Int(0));
     }
@@ -366,14 +366,14 @@ fn test_large_row_counts() {
     // Query all
     let result = engine.execute("SELECT * FROM large");
     assert!(result.is_ok());
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows.len(), 1000);
     }
 
     // Query with WHERE
     let result = engine.execute("SELECT * FROM large WHERE c = 5");
     assert!(result.is_ok());
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows.len(), 100); // Every 10th row has c = 5
     }
 
@@ -411,7 +411,7 @@ fn test_failure_mode_transaction_rollback() {
 
     // Verify changes are visible within transaction
     let result = engine.execute("SELECT balance FROM accounts WHERE id = 1");
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows[0][0], Value::Int(800));
     }
 
@@ -420,12 +420,12 @@ fn test_failure_mode_transaction_rollback() {
 
     // Changes should be undone
     let result = engine.execute("SELECT balance FROM accounts WHERE id = 1");
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows[0][0], Value::Int(1000));
     }
 
     let result = engine.execute("SELECT balance FROM accounts WHERE id = 2");
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows[0][0], Value::Int(500));
     }
 }
@@ -450,28 +450,28 @@ fn test_failure_mode_savepoint_rollback() {
 
     // Check all 3 rows exist
     let result = engine.execute("SELECT COUNT(*) FROM log");
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows[0][0], Value::Int(3));
     }
 
     // Rollback to sp2 - should undo step 3
     engine.execute("ROLLBACK TO sp2").unwrap();
     let result = engine.execute("SELECT COUNT(*) FROM log");
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows[0][0], Value::Int(2));
     }
 
     // Rollback to sp1 - should undo step 2 as well
     engine.execute("ROLLBACK TO sp1").unwrap();
     let result = engine.execute("SELECT COUNT(*) FROM log");
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows[0][0], Value::Int(1));
     }
 
     // Full rollback
     engine.execute("ROLLBACK").unwrap();
     let result = engine.execute("SELECT COUNT(*) FROM log");
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows[0][0], Value::Int(0));
     }
 }
@@ -532,7 +532,7 @@ fn test_failure_mode_foreign_key_handling() {
 
     // Verify parent still exists
     let result = engine.execute("SELECT COUNT(*) FROM departments");
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows[0][0], Value::Int(1));
     }
 }
@@ -572,7 +572,7 @@ fn test_failure_mode_transaction_error_recovery() {
 
     // Table should be empty after rollback
     let result = engine.execute("SELECT COUNT(*) FROM data");
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows[0][0], Value::Int(0));
     }
 }
@@ -612,7 +612,7 @@ fn test_failure_mode_stress_mixed_operations() {
                 // Delete by random id (may or may not delete anything)
                 let random_id = rng.next_range(next_id as u64 + 10) as i64;
                 let sql = format!("DELETE FROM mixed_test WHERE id = {}", random_id);
-                if let Ok(sql_engine::QueryResult::RowsAffected(n)) = engine.execute(&sql) {
+                if let Ok(db::QueryResult::RowsAffected(n)) = engine.execute(&sql) {
                     expected_count -= n as i64;
                 }
             }
@@ -626,7 +626,7 @@ fn test_failure_mode_stress_mixed_operations() {
 
     // Verify final count
     let result = engine.execute("SELECT COUNT(*) FROM mixed_test");
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows[0][0], Value::Int(expected_count));
     }
 }
@@ -661,7 +661,7 @@ fn test_failure_mode_sequential_transactions() {
     // Only committed transactions should be visible
     // Committed: i=2,4,6,8,10 => amounts: 200,400,600,800,1000 = 3000
     let result = engine.execute("SELECT amount FROM balance WHERE id = 1");
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows[0][0], Value::Int(3000));
     }
 }
@@ -690,7 +690,7 @@ fn test_failure_mode_trigger_errors() {
 
     // Table should remain empty
     let result = engine.execute("SELECT COUNT(*) FROM guarded");
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows[0][0], Value::Int(0));
     }
 }

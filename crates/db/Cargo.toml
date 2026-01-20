@@ -1,0 +1,16 @@
+[package]
+name = "db"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Re-export all components
+sql-parser = { path = "../sql-parser" }
+sql-planner = { path = "../sql-planner" }
+sql-storage = { path = "../sql-storage" }
+sql-engine = { path = "../sql-engine" }
+
+# I/O
+serde = { workspace = true }
+serde_json = { workspace = true }
+csv = { workspace = true }

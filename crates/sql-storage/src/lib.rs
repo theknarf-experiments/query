@@ -4,6 +4,7 @@
 //! It also provides Datalog fact storage capabilities.
 
 mod engine;
+mod io_types;
 mod memory;
 mod value;
 
@@ -28,3 +29,4 @@ pub use datalog_context::{
 };
 pub use datalog_unification::{unify, unify_atoms, Substitution};
 pub use delta_tracker::DeltaTracker;
+pub use io_types::{ExportData, ImportData};

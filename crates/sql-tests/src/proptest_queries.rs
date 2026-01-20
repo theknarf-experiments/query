@@ -3,8 +3,8 @@
 //! These tests generate random but valid SQL queries and verify
 //! that the database handles them correctly.
 
+use db::Engine;
 use proptest::prelude::*;
-use sql_engine::Engine;
 use sql_storage::Value;
 
 /// Generate a valid identifier (table or column name)
@@ -150,7 +150,7 @@ proptest! {
         let select_result = engine.execute("SELECT * FROM t");
         prop_assert!(select_result.is_ok());
 
-        if let Ok(sql_engine::QueryResult::Select { rows, .. }) = select_result {
+        if let Ok(db::QueryResult::Select { rows, .. }) = select_result {
             prop_assert_eq!(rows.len(), 1);
             for (i, val) in values.iter().enumerate() {
                 prop_assert_eq!(rows[0][i].clone(), Value::Int(*val));
@@ -180,7 +180,7 @@ proptest! {
         let result = engine.execute(&sql);
         prop_assert!(result.is_ok());
 
-        if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+        if let Ok(db::QueryResult::Select { rows, .. }) = result {
             prop_assert_eq!(rows.len(), expected_count,
                 "Expected {} rows where val = {}, got {}", expected_count, target, rows.len());
         }
@@ -212,7 +212,7 @@ proptest! {
         let result = engine.execute(&sql);
         prop_assert!(result.is_ok());
 
-        if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+        if let Ok(db::QueryResult::Select { rows, .. }) = result {
             if !rows.is_empty() {
                 prop_assert_eq!(rows[0][0].clone(), Value::Int(new_value));
             }
@@ -246,7 +246,7 @@ proptest! {
         let result = engine.execute("SELECT * FROM t");
         prop_assert!(result.is_ok());
 
-        if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+        if let Ok(db::QueryResult::Select { rows, .. }) = result {
             prop_assert_eq!(rows.len(), expected_remaining,
                 "After DELETE WHERE val < {}, expected {} rows, got {}",
                 delete_threshold, expected_remaining, rows.len());
@@ -268,7 +268,7 @@ proptest! {
         let result = engine.execute("SELECT COUNT(*) FROM t");
         prop_assert!(result.is_ok());
 
-        if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+        if let Ok(db::QueryResult::Select { rows, .. }) = result {
             prop_assert_eq!(rows.len(), 1);
             prop_assert_eq!(rows[0][0].clone(), Value::Int(num_rows as i64));
         }
@@ -291,7 +291,7 @@ proptest! {
         let result = engine.execute("SELECT SUM(val) FROM t");
         prop_assert!(result.is_ok());
 
-        if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+        if let Ok(db::QueryResult::Select { rows, .. }) = result {
             prop_assert_eq!(rows.len(), 1);
             prop_assert_eq!(rows[0][0].clone(), Value::Int(expected_sum));
         }
@@ -320,7 +320,7 @@ proptest! {
                 "select" => {
                     let result = engine.execute("SELECT * FROM t");
                     prop_assert!(result.is_ok());
-                    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+                    if let Ok(db::QueryResult::Select { rows, .. }) = result {
                         prop_assert_eq!(rows.len(), insert_count);
                     }
                 }
@@ -340,7 +340,7 @@ fn test_empty_table_aggregates() {
     // COUNT on empty table should return 0
     let result = engine.execute("SELECT COUNT(*) FROM empty");
     assert!(result.is_ok());
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0][0], Value::Int(0));
     }
@@ -365,7 +365,7 @@ fn test_boolean_operations() {
 
     let result = engine.execute("SELECT * FROM flags WHERE active = TRUE");
     assert!(result.is_ok());
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows.len(), 2);
     }
 }
@@ -386,7 +386,7 @@ fn test_null_handling() {
 
     let result = engine.execute("SELECT * FROM nullable");
     assert!(result.is_ok());
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0][1], Value::Null);
         assert_eq!(rows[1][1], Value::Int(100));
@@ -409,7 +409,7 @@ fn test_text_values() {
 
     let result = engine.execute("SELECT * FROM texts WHERE name = 'hello'");
     assert!(result.is_ok());
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0][0], Value::Int(1));
     }
@@ -425,19 +425,19 @@ fn test_arithmetic_expressions() {
     // Test various arithmetic operations in WHERE clause
     let result = engine.execute("SELECT * FROM nums WHERE a + b = 13");
     assert!(result.is_ok());
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows.len(), 1);
     }
 
     let result = engine.execute("SELECT * FROM nums WHERE a - b = 7");
     assert!(result.is_ok());
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows.len(), 1);
     }
 
     let result = engine.execute("SELECT * FROM nums WHERE a * b = 30");
     assert!(result.is_ok());
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows.len(), 1);
     }
 }
@@ -456,35 +456,35 @@ fn test_comparison_operators() {
     // Less than
     let result = engine.execute("SELECT * FROM cmp WHERE val < 5");
     assert!(result.is_ok());
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows.len(), 4);
     }
 
     // Greater than
     let result = engine.execute("SELECT * FROM cmp WHERE val > 5");
     assert!(result.is_ok());
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows.len(), 5);
     }
 
     // Less than or equal
     let result = engine.execute("SELECT * FROM cmp WHERE val <= 5");
     assert!(result.is_ok());
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows.len(), 5);
     }
 
     // Greater than or equal
     let result = engine.execute("SELECT * FROM cmp WHERE val >= 5");
     assert!(result.is_ok());
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows.len(), 6);
     }
 
     // Not equal
     let result = engine.execute("SELECT * FROM cmp WHERE val != 5");
     assert!(result.is_ok());
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows.len(), 9);
     }
 }
@@ -502,14 +502,14 @@ fn test_logical_operators() {
     // AND
     let result = engine.execute("SELECT * FROM logic WHERE a > 1 AND b < 40");
     assert!(result.is_ok());
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows.len(), 2); // rows 2 and 3
     }
 
     // OR
     let result = engine.execute("SELECT * FROM logic WHERE a = 1 OR a = 4");
     assert!(result.is_ok());
-    if let Ok(sql_engine::QueryResult::Select { rows, .. }) = result {
+    if let Ok(db::QueryResult::Select { rows, .. }) = result {
         assert_eq!(rows.len(), 2);
     }
 }

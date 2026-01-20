@@ -8,6 +8,8 @@ members = [
     "crates/sql-planner",
     "crates/sql-storage",
     "crates/sql-engine",
+    # Top-level database crate
+    "crates/db",
     "crates/sql-tests",
     # Datalog frontend
     "crates/datalog-parser",
@@ -35,6 +37,9 @@ sql-parser = { path = "crates/sql-parser" }
 sql-planner = { path = "crates/sql-planner" }
 sql-storage = { path = "crates/sql-storage" }
 sql-engine = { path = "crates/sql-engine" }
+
+# Top-level crate
+db = { path = "crates/db" }
 
 # Datalog crates
 datalog-parser = { path = "crates/datalog-parser" }

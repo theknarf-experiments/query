@@ -5,13 +5,13 @@
 //!
 //! Reference: ISO/IEC 9075 (SQL standard)
 
-use sql_engine::Engine;
+use db::Engine;
 use sql_storage::Value;
 
 /// Helper to run a query and get results
 fn query_rows(engine: &mut Engine, sql: &str) -> Vec<Vec<Value>> {
     match engine.execute(sql) {
-        Ok(sql_engine::QueryResult::Select { rows, .. }) => rows,
+        Ok(db::QueryResult::Select { rows, .. }) => rows,
         Ok(_) => vec![],
         Err(e) => panic!("Query failed: {} - Error: {:?}", sql, e),
     }

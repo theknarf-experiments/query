@@ -2,15 +2,8 @@
 
 use csv::{Reader, Writer};
 use serde_json;
-use sql_storage::Value;
+use sql_storage::{ExportData, ImportData, Value};
 use std::io::{Read, Write};
-
-/// Export result containing column names and data
-#[derive(Debug, Clone)]
-pub struct ExportData {
-    pub columns: Vec<String>,
-    pub rows: Vec<Vec<Value>>,
-}
 
 /// Export data to CSV format
 pub fn export_csv<W: Write>(data: &ExportData, writer: W) -> Result<(), ExportError> {
@@ -111,13 +104,6 @@ pub fn import_json<R: Read>(mut reader: R) -> Result<ImportData, ImportError> {
         columns,
         rows: data_rows,
     })
-}
-
-/// Imported data
-#[derive(Debug, Clone)]
-pub struct ImportData {
-    pub columns: Vec<String>,
-    pub rows: Vec<Vec<Value>>,
 }
 
 /// Export error

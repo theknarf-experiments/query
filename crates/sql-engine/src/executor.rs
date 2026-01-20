@@ -11,8 +11,8 @@ use sql_parser::{
 };
 use sql_planner::LogicalPlan;
 use sql_storage::{
-    ColumnSchema, DataType as StorageDataType, ForeignKeyRef, JsonValue, MemoryEngine,
-    ReferentialAction as StorageRefAction, Row, StorageEngine, StorageError,
+    ColumnSchema, DataType as StorageDataType, ExportData, ForeignKeyRef, ImportData, JsonValue,
+    MemoryEngine, ReferentialAction as StorageRefAction, Row, StorageEngine, StorageError,
     TableConstraint as StorageTableConstraint, TableSchema, Value,
 };
 
@@ -161,19 +161,19 @@ impl Engine {
     }
 
     /// Export a table to ExportData format for CSV/JSON export
-    pub fn export_table(&self, table: &str) -> Result<crate::io::ExportData, ExecError> {
+    pub fn export_table(&self, table: &str) -> Result<ExportData, ExecError> {
         let schema = self.storage.get_schema(table)?;
         let columns: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
         let rows = self.storage.scan(table)?;
 
-        Ok(crate::io::ExportData { columns, rows })
+        Ok(ExportData { columns, rows })
     }
 
     /// Import data into a table from ImportData
     pub fn import_into_table(
         &mut self,
         table: &str,
-        data: &crate::io::ImportData,
+        data: &ImportData,
     ) -> Result<usize, ExecError> {
         let schema = self.storage.get_schema(table)?.clone();
         let table_columns: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();

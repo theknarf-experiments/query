@@ -7,9 +7,6 @@ edition.workspace = true
 sql-parser = { workspace = true }
 sql-planner = { workspace = true }
 sql-storage = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-csv = { workspace = true }
 
 # Datalog support
 datalog-parser = { path = "../datalog-parser" }

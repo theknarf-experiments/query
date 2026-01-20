@@ -760,3 +760,280 @@ fn test_trigger_insert_with_new_references() {
     assert_eq!(history[0][1], Value::Text("Widget".to_string()));
     assert_eq!(history[0][2], Value::Int(99));
 }
+
+// ============================================================================
+// FK Constraint as Trigger Tests
+// ============================================================================
+
+/// Test that FK constraints are automatically enforced via triggers on INSERT
+#[test]
+fn test_fk_constraint_insert_validation() {
+    let mut engine = Engine::new();
+
+    // Create parent table
+    engine
+        .execute("CREATE TABLE authors (id INT PRIMARY KEY, name TEXT)")
+        .unwrap();
+
+    // Create child table with FK constraint
+    engine
+        .execute(
+            "CREATE TABLE books (id INT PRIMARY KEY, author_id INT REFERENCES authors(id), title TEXT)",
+        )
+        .unwrap();
+
+    // Insert a valid author
+    engine
+        .execute("INSERT INTO authors VALUES (1, 'Jane Austen')")
+        .unwrap();
+
+    // Insert book with valid author - should succeed
+    engine
+        .execute("INSERT INTO books VALUES (1, 1, 'Pride and Prejudice')")
+        .unwrap();
+
+    // Try to insert book with non-existent author - should fail
+    let result = engine.execute("INSERT INTO books VALUES (2, 999, 'Unknown Book')");
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    match &err {
+        ExecError::InvalidExpression(msg) => {
+            assert!(
+                msg.contains("Foreign key") || msg.contains("constraint"),
+                "Expected FK constraint error, got: {}",
+                msg
+            );
+        }
+        _ => panic!("Expected InvalidExpression error, got: {:?}", err),
+    }
+}
+
+/// Test ON DELETE CASCADE via trigger
+#[test]
+fn test_fk_on_delete_cascade_via_trigger() {
+    let mut engine = Engine::new();
+
+    // Create parent table
+    engine
+        .execute("CREATE TABLE departments (id INT PRIMARY KEY, name TEXT)")
+        .unwrap();
+
+    // Create child table with CASCADE on delete
+    engine
+        .execute(
+            "CREATE TABLE employees (id INT PRIMARY KEY, dept_id INT REFERENCES departments(id) ON DELETE CASCADE, name TEXT)",
+        )
+        .unwrap();
+
+    // Insert department and employees
+    engine
+        .execute("INSERT INTO departments VALUES (1, 'Engineering')")
+        .unwrap();
+    engine
+        .execute("INSERT INTO employees VALUES (1, 1, 'Alice')")
+        .unwrap();
+    engine
+        .execute("INSERT INTO employees VALUES (2, 1, 'Bob')")
+        .unwrap();
+
+    // Delete department - should cascade to employees
+    engine
+        .execute("DELETE FROM departments WHERE id = 1")
+        .unwrap();
+
+    // Verify employees were deleted
+    let result = engine.execute("SELECT COUNT(*) FROM employees").unwrap();
+    match result {
+        QueryResult::Select { rows, .. } => {
+            assert_eq!(
+                rows[0][0],
+                Value::Int(0),
+                "Employees should be cascaded deleted"
+            );
+        }
+        _ => panic!("Expected Select result"),
+    }
+}
+
+/// Test ON DELETE SET NULL via trigger
+#[test]
+fn test_fk_on_delete_set_null_via_trigger() {
+    let mut engine = Engine::new();
+
+    // Create parent table
+    engine
+        .execute("CREATE TABLE managers (id INT PRIMARY KEY, name TEXT)")
+        .unwrap();
+
+    // Create child table with SET NULL on delete
+    engine
+        .execute(
+            "CREATE TABLE projects (id INT PRIMARY KEY, manager_id INT REFERENCES managers(id) ON DELETE SET NULL, name TEXT)",
+        )
+        .unwrap();
+
+    // Insert manager and projects
+    engine
+        .execute("INSERT INTO managers VALUES (1, 'John')")
+        .unwrap();
+    engine
+        .execute("INSERT INTO projects VALUES (1, 1, 'Project A')")
+        .unwrap();
+
+    // Delete manager - should set manager_id to NULL
+    engine.execute("DELETE FROM managers WHERE id = 1").unwrap();
+
+    // Verify project still exists but with NULL manager_id
+    let result = engine.execute("SELECT manager_id FROM projects").unwrap();
+    match result {
+        QueryResult::Select { rows, .. } => {
+            assert_eq!(rows.len(), 1, "Project should still exist");
+            assert_eq!(rows[0][0], Value::Null, "manager_id should be NULL");
+        }
+        _ => panic!("Expected Select result"),
+    }
+}
+
+/// Test ON UPDATE CASCADE via trigger
+#[test]
+fn test_fk_on_update_cascade_via_trigger() {
+    let mut engine = Engine::new();
+
+    // Create parent table
+    engine
+        .execute("CREATE TABLE categories (id INT PRIMARY KEY, name TEXT)")
+        .unwrap();
+
+    // Create child table with CASCADE on update
+    engine
+        .execute(
+            "CREATE TABLE items (id INT PRIMARY KEY, cat_id INT REFERENCES categories(id) ON UPDATE CASCADE, name TEXT)",
+        )
+        .unwrap();
+
+    // Insert category and items
+    engine
+        .execute("INSERT INTO categories VALUES (1, 'Electronics')")
+        .unwrap();
+    engine
+        .execute("INSERT INTO items VALUES (1, 1, 'Phone')")
+        .unwrap();
+    engine
+        .execute("INSERT INTO items VALUES (2, 1, 'Laptop')")
+        .unwrap();
+
+    // Update category id - should cascade to items
+    engine
+        .execute("UPDATE categories SET id = 100 WHERE id = 1")
+        .unwrap();
+
+    // Verify items have updated cat_id
+    let result = engine
+        .execute("SELECT cat_id FROM items ORDER BY id")
+        .unwrap();
+    match result {
+        QueryResult::Select { rows, .. } => {
+            assert_eq!(rows.len(), 2);
+            assert_eq!(
+                rows[0][0],
+                Value::Int(100),
+                "cat_id should be updated to 100"
+            );
+            assert_eq!(
+                rows[1][0],
+                Value::Int(100),
+                "cat_id should be updated to 100"
+            );
+        }
+        _ => panic!("Expected Select result"),
+    }
+}
+
+/// Test that RESTRICT prevents update when references exist
+#[test]
+fn test_fk_on_update_restrict_via_trigger() {
+    let mut engine = Engine::new();
+
+    // Create parent table
+    engine
+        .execute("CREATE TABLE regions (id INT PRIMARY KEY, name TEXT)")
+        .unwrap();
+
+    // Create child table with RESTRICT on update (default)
+    engine
+        .execute(
+            "CREATE TABLE offices (id INT PRIMARY KEY, region_id INT REFERENCES regions(id) ON UPDATE RESTRICT, name TEXT)",
+        )
+        .unwrap();
+
+    // Insert region and office
+    engine
+        .execute("INSERT INTO regions VALUES (1, 'North')")
+        .unwrap();
+    engine
+        .execute("INSERT INTO offices VALUES (1, 1, 'HQ')")
+        .unwrap();
+
+    // Try to update region id - should fail due to RESTRICT
+    let result = engine.execute("UPDATE regions SET id = 2 WHERE id = 1");
+    assert!(result.is_err(), "Update should fail with RESTRICT");
+    let err = result.unwrap_err();
+    match &err {
+        ExecError::InvalidExpression(msg) => {
+            assert!(
+                msg.contains("Cannot update") || msg.contains("referenced by"),
+                "Expected RESTRICT error, got: {}",
+                msg
+            );
+        }
+        _ => panic!("Expected InvalidExpression error, got: {:?}", err),
+    }
+
+    // Verify region is unchanged
+    let result = engine.execute("SELECT id FROM regions").unwrap();
+    match result {
+        QueryResult::Select { rows, .. } => {
+            assert_eq!(rows[0][0], Value::Int(1), "Region id should be unchanged");
+        }
+        _ => panic!("Expected Select result"),
+    }
+}
+
+/// Test that FK validation trigger checks UPDATE of FK column in child table
+#[test]
+fn test_fk_update_validation_via_trigger() {
+    let mut engine = Engine::new();
+
+    // Create tables
+    engine
+        .execute("CREATE TABLE vendors (id INT PRIMARY KEY, name TEXT)")
+        .unwrap();
+    engine
+        .execute(
+            "CREATE TABLE products (id INT PRIMARY KEY, vendor_id INT REFERENCES vendors(id), name TEXT)",
+        )
+        .unwrap();
+
+    // Insert valid data
+    engine
+        .execute("INSERT INTO vendors VALUES (1, 'Vendor A')")
+        .unwrap();
+    engine
+        .execute("INSERT INTO products VALUES (1, 1, 'Product X')")
+        .unwrap();
+
+    // Try to update product to reference non-existent vendor - should fail
+    let result = engine.execute("UPDATE products SET vendor_id = 999 WHERE id = 1");
+    assert!(result.is_err(), "Update to invalid FK should fail");
+    let err = result.unwrap_err();
+    match &err {
+        ExecError::InvalidExpression(msg) => {
+            assert!(
+                msg.contains("Foreign key") || msg.contains("constraint"),
+                "Expected FK constraint error, got: {}",
+                msg
+            );
+        }
+        _ => panic!("Expected InvalidExpression error, got: {:?}", err),
+    }
+}

@@ -94,6 +94,22 @@ impl SqlRuntime {
                 let msg = extract_string_literal(stmt, "RAISE ERROR")
                     .unwrap_or_else(|| "Trigger error".to_string());
                 return Ok(TriggerResult::Abort(msg));
+            } else if upper.starts_with("IF NOT EXISTS") {
+                // Parse: IF NOT EXISTS (SELECT 1 FROM table WHERE col = val) THEN RAISE ERROR '...'
+                if let Some(abort_msg) = self.execute_if_not_exists(stmt, context, storage)? {
+                    return Ok(TriggerResult::Abort(abort_msg));
+                }
+            } else if upper.starts_with("IF EXISTS") {
+                // Parse: IF EXISTS (SELECT 1 FROM table WHERE col = val) THEN RAISE ERROR '...'
+                if let Some(abort_msg) = self.execute_if_exists(stmt, context, storage)? {
+                    return Ok(TriggerResult::Abort(abort_msg));
+                }
+            } else if upper.starts_with("DELETE FROM") {
+                // Execute DELETE FROM statement
+                self.execute_delete_from(stmt, context, storage)?;
+            } else if upper.starts_with("UPDATE ") {
+                // Execute UPDATE statement
+                self.execute_update(stmt, context, storage)?;
             }
             // Ignore unknown statements for now
         }
@@ -170,6 +186,253 @@ impl SqlRuntime {
         storage
             .insert(table_name, values)
             .map_err(|e| RuntimeError::ExecutionError(format!("Insert failed: {:?}", e)))?;
+
+        Ok(())
+    }
+
+    /// Execute an IF NOT EXISTS check for FK validation
+    /// Format: IF NOT EXISTS (SELECT 1 FROM table WHERE col = val) THEN RAISE ERROR 'msg'
+    fn execute_if_not_exists<S: StorageEngine>(
+        &self,
+        stmt: &str,
+        context: &TriggerContext,
+        storage: &mut S,
+    ) -> Result<Option<String>, RuntimeError> {
+        // Parse: IF NOT EXISTS (SELECT ...) THEN RAISE ERROR '...'
+        let upper = stmt.to_uppercase();
+
+        // Find the SELECT part between parentheses
+        let select_start = stmt.find('(').ok_or_else(|| {
+            RuntimeError::ExecutionError("Missing opening parenthesis in IF NOT EXISTS".to_string())
+        })?;
+        let select_end = stmt.find(')').ok_or_else(|| {
+            RuntimeError::ExecutionError("Missing closing parenthesis in IF NOT EXISTS".to_string())
+        })?;
+
+        let select_stmt = &stmt[select_start + 1..select_end];
+        let exists = self.check_exists(select_stmt, context, storage)?;
+
+        if !exists {
+            // Find THEN RAISE ERROR '...'
+            if let Some(then_pos) = upper.find("THEN RAISE ERROR") {
+                let after_then = &stmt[then_pos + 16..];
+                let msg = extract_string_literal(&format!("'{}", after_then), "'")
+                    .unwrap_or_else(|| "Foreign key constraint violation".to_string());
+                return Ok(Some(msg));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Execute an IF EXISTS check for RESTRICT constraint
+    /// Format: IF EXISTS (SELECT 1 FROM table WHERE col = val) THEN RAISE ERROR 'msg'
+    fn execute_if_exists<S: StorageEngine>(
+        &self,
+        stmt: &str,
+        context: &TriggerContext,
+        storage: &mut S,
+    ) -> Result<Option<String>, RuntimeError> {
+        // Parse: IF EXISTS (SELECT ...) THEN RAISE ERROR '...'
+        let upper = stmt.to_uppercase();
+
+        // Find the SELECT part between parentheses
+        let select_start = stmt.find('(').ok_or_else(|| {
+            RuntimeError::ExecutionError("Missing opening parenthesis in IF EXISTS".to_string())
+        })?;
+        let select_end = stmt.find(')').ok_or_else(|| {
+            RuntimeError::ExecutionError("Missing closing parenthesis in IF EXISTS".to_string())
+        })?;
+
+        let select_stmt = &stmt[select_start + 1..select_end];
+        let exists = self.check_exists(select_stmt, context, storage)?;
+
+        if exists {
+            // Find THEN RAISE ERROR '...'
+            if let Some(then_pos) = upper.find("THEN RAISE ERROR") {
+                let after_then = &stmt[then_pos + 16..];
+                let msg = extract_string_literal(&format!("'{}", after_then), "'")
+                    .unwrap_or_else(|| "Constraint violation".to_string());
+                return Ok(Some(msg));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Check if a SELECT query returns any rows
+    /// Format: SELECT 1 FROM table WHERE col = val
+    fn check_exists<S: StorageEngine>(
+        &self,
+        select_stmt: &str,
+        context: &TriggerContext,
+        storage: &mut S,
+    ) -> Result<bool, RuntimeError> {
+        let upper = select_stmt.to_uppercase();
+
+        // Parse: SELECT 1 FROM table WHERE col = val
+        let from_pos = upper
+            .find("FROM")
+            .ok_or_else(|| RuntimeError::ExecutionError("Missing FROM in SELECT".to_string()))?;
+
+        let after_from = &select_stmt[from_pos + 4..].trim_start();
+        let where_pos = after_from.to_uppercase().find("WHERE");
+
+        let table_name = if let Some(pos) = where_pos {
+            after_from[..pos].trim()
+        } else {
+            after_from.trim()
+        };
+
+        // Get rows from table
+        let rows = storage
+            .scan(table_name)
+            .map_err(|e| RuntimeError::ExecutionError(format!("Scan failed: {:?}", e)))?;
+
+        // If no WHERE clause, just check if table has any rows
+        if where_pos.is_none() {
+            return Ok(!rows.is_empty());
+        }
+
+        // Parse WHERE clause
+        let where_clause = &after_from[where_pos.unwrap() + 5..].trim();
+        let (col, val) = parse_simple_where(where_clause, context)?;
+
+        // Get schema for column lookup
+        let schema = storage
+            .get_schema(table_name)
+            .map_err(|e| RuntimeError::ExecutionError(format!("Schema not found: {:?}", e)))?;
+
+        let col_idx = schema
+            .columns
+            .iter()
+            .position(|c| c.name.eq_ignore_ascii_case(&col))
+            .ok_or_else(|| RuntimeError::ExecutionError(format!("Column not found: {}", col)))?;
+
+        // Check if any row matches
+        Ok(rows.iter().any(|row| {
+            row.get(col_idx)
+                .map(|v| values_equal(v, &val))
+                .unwrap_or(false)
+        }))
+    }
+
+    /// Execute a DELETE FROM statement
+    /// Format: DELETE FROM table WHERE col = val
+    fn execute_delete_from<S: StorageEngine>(
+        &self,
+        stmt: &str,
+        context: &TriggerContext,
+        storage: &mut S,
+    ) -> Result<(), RuntimeError> {
+        let upper = stmt.to_uppercase();
+
+        // Parse: DELETE FROM table WHERE col = val
+        let from_pos = upper
+            .find("FROM")
+            .ok_or_else(|| RuntimeError::ExecutionError("Missing FROM in DELETE".to_string()))?;
+
+        let after_from = &stmt[from_pos + 4..].trim_start();
+        let where_pos = after_from
+            .to_uppercase()
+            .find("WHERE")
+            .ok_or_else(|| RuntimeError::ExecutionError("Missing WHERE in DELETE".to_string()))?;
+
+        let table_name = after_from[..where_pos].trim();
+        let where_clause = &after_from[where_pos + 5..].trim();
+        let (col, val) = parse_simple_where(where_clause, context)?;
+
+        // Get schema for column lookup
+        let schema = storage
+            .get_schema(table_name)
+            .map_err(|e| RuntimeError::ExecutionError(format!("Schema not found: {:?}", e)))?;
+
+        let col_idx = schema
+            .columns
+            .iter()
+            .position(|c| c.name.eq_ignore_ascii_case(&col))
+            .ok_or_else(|| RuntimeError::ExecutionError(format!("Column not found: {}", col)))?;
+
+        // Delete matching rows
+        storage
+            .delete(table_name, |row| {
+                row.get(col_idx)
+                    .map(|v| values_equal(v, &val))
+                    .unwrap_or(false)
+            })
+            .map_err(|e| RuntimeError::ExecutionError(format!("Delete failed: {:?}", e)))?;
+
+        Ok(())
+    }
+
+    /// Execute an UPDATE statement
+    /// Format: UPDATE table SET col = val WHERE col2 = val2
+    fn execute_update<S: StorageEngine>(
+        &self,
+        stmt: &str,
+        context: &TriggerContext,
+        storage: &mut S,
+    ) -> Result<(), RuntimeError> {
+        let upper = stmt.to_uppercase();
+
+        // Parse: UPDATE table SET col = val WHERE col2 = val2
+        let set_pos = upper
+            .find("SET")
+            .ok_or_else(|| RuntimeError::ExecutionError("Missing SET in UPDATE".to_string()))?;
+
+        let table_name = stmt[7..set_pos].trim(); // Skip "UPDATE "
+
+        let after_set = &stmt[set_pos + 3..].trim_start();
+        let where_pos = after_set
+            .to_uppercase()
+            .find("WHERE")
+            .ok_or_else(|| RuntimeError::ExecutionError("Missing WHERE in UPDATE".to_string()))?;
+
+        // Parse SET clause: col = val
+        let set_clause = &after_set[..where_pos].trim();
+        let (set_col, set_val) = parse_simple_assignment(set_clause, context)?;
+
+        // Parse WHERE clause: col2 = val2
+        let where_clause = &after_set[where_pos + 5..].trim();
+        let (where_col, where_val) = parse_simple_where(where_clause, context)?;
+
+        // Get schema for column lookup
+        let schema = storage
+            .get_schema(table_name)
+            .map_err(|e| RuntimeError::ExecutionError(format!("Schema not found: {:?}", e)))?;
+
+        let set_col_idx = schema
+            .columns
+            .iter()
+            .position(|c| c.name.eq_ignore_ascii_case(&set_col))
+            .ok_or_else(|| {
+                RuntimeError::ExecutionError(format!("Column not found: {}", set_col))
+            })?;
+
+        let where_col_idx = schema
+            .columns
+            .iter()
+            .position(|c| c.name.eq_ignore_ascii_case(&where_col))
+            .ok_or_else(|| {
+                RuntimeError::ExecutionError(format!("Column not found: {}", where_col))
+            })?;
+
+        // Update matching rows
+        storage
+            .update(
+                table_name,
+                |row| {
+                    row.get(where_col_idx)
+                        .map(|v| values_equal(v, &where_val))
+                        .unwrap_or(false)
+                },
+                |row| {
+                    if let Some(val) = row.get_mut(set_col_idx) {
+                        *val = set_val.clone();
+                    }
+                },
+            )
+            .map_err(|e| RuntimeError::ExecutionError(format!("Update failed: {:?}", e)))?;
 
         Ok(())
     }
@@ -327,6 +590,49 @@ fn parse_values_list(s: &str, context: &TriggerContext) -> Result<Vec<Value>, Ru
     }
 
     Ok(values)
+}
+
+/// Parse a simple WHERE clause: col = val
+fn parse_simple_where(
+    clause: &str,
+    context: &TriggerContext,
+) -> Result<(String, Value), RuntimeError> {
+    let clause = clause.trim();
+
+    // Find the equals sign
+    let eq_pos = clause
+        .find('=')
+        .ok_or_else(|| RuntimeError::ExecutionError("Missing = in WHERE clause".to_string()))?;
+
+    let col = clause[..eq_pos].trim().to_string();
+    let val_str = clause[eq_pos + 1..].trim();
+    let val = parse_literal_value(val_str, context)?;
+
+    Ok((col, val))
+}
+
+/// Parse a simple assignment: col = val
+fn parse_simple_assignment(
+    clause: &str,
+    context: &TriggerContext,
+) -> Result<(String, Value), RuntimeError> {
+    // Same logic as parse_simple_where
+    parse_simple_where(clause, context)
+}
+
+/// Check if two values are equal
+fn values_equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Null, Value::Null) => true,
+        (Value::Int(x), Value::Int(y)) => x == y,
+        (Value::Float(x), Value::Float(y)) => (x - y).abs() < f64::EPSILON,
+        (Value::Text(x), Value::Text(y)) => x == y,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::Date(x), Value::Date(y)) => x == y,
+        (Value::Time(x), Value::Time(y)) => x == y,
+        (Value::Timestamp(x), Value::Timestamp(y)) => x == y,
+        _ => false,
+    }
 }
 
 #[cfg(test)]

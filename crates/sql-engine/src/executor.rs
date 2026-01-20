@@ -3,9 +3,11 @@
 use std::collections::HashMap;
 
 use logical::{
-    insert, ColumnSchema, DataType as StorageDataType, ExportData, ForeignKeyRef, ImportData,
-    JsonValue, MemoryEngine, OperationError, ReferentialAction as StorageRefAction, Row,
-    StorageEngine, StorageError, TableConstraint as StorageTableConstraint, TableSchema, Value,
+    delete, insert, update, ColumnSchema, DataType as StorageDataType, ExportData, ForeignKeyRef,
+    FunctionDef, ImportData, JsonValue, MemoryEngine, OperationError,
+    ReferentialAction as StorageRefAction, Row, StorageEngine, StorageError,
+    TableConstraint as StorageTableConstraint, TableSchema, TriggerDef,
+    TriggerEvent as StorageTriggerEvent, TriggerTiming as StorageTriggerTiming, Value,
 };
 
 use crate::runtime::SqlRuntime;
@@ -123,6 +125,16 @@ struct ViewDefinition {
 struct ProcedureDefinition {
     params: Vec<sql_parser::ProcedureParam>,
     body: Vec<sql_parser::ProcedureStatement>,
+}
+
+/// Foreign key trigger info for creating implicit triggers
+struct FkTriggerInfo {
+    child_table: String,
+    child_column: String,
+    parent_table: String,
+    parent_column: String,
+    on_delete: StorageRefAction,
+    on_update: StorageRefAction,
 }
 
 /// Database engine that executes queries
@@ -465,8 +477,283 @@ impl Engine {
                 .collect(),
             constraints: constraints.iter().map(convert_table_constraint).collect(),
         };
+
+        // Collect FK references before creating table
+        let fk_refs: Vec<_> = columns
+            .iter()
+            .filter_map(|c| {
+                c.references.as_ref().map(|fk| FkTriggerInfo {
+                    child_table: name.to_string(),
+                    child_column: c.name.clone(),
+                    parent_table: fk.table.clone(),
+                    parent_column: fk.column.clone(),
+                    on_delete: convert_ref_action(&fk.on_delete),
+                    on_update: convert_ref_action(&fk.on_update),
+                })
+            })
+            .collect();
+
         self.storage.create_table(schema)?;
+
+        // Create implicit triggers for FK constraints
+        for fk in fk_refs {
+            self.create_fk_triggers(&fk)?;
+        }
+
         Ok(QueryResult::Success)
+    }
+
+    /// Create implicit triggers for a foreign key constraint
+    fn create_fk_triggers(&mut self, fk: &FkTriggerInfo) -> Result<(), ExecError> {
+        // 1. Create BEFORE INSERT trigger on child table to validate parent exists
+        self.create_fk_insert_validation_trigger(fk)?;
+
+        // 2. Create BEFORE UPDATE trigger on child table to validate new parent exists
+        self.create_fk_update_validation_trigger(fk)?;
+
+        // 3. Create AFTER DELETE trigger on parent table based on ON DELETE action
+        self.create_fk_on_delete_trigger(fk)?;
+
+        // 4. Create AFTER UPDATE trigger on parent table based on ON UPDATE action
+        self.create_fk_on_update_trigger(fk)?;
+
+        Ok(())
+    }
+
+    /// Create BEFORE INSERT trigger to validate FK constraint
+    fn create_fk_insert_validation_trigger(&mut self, fk: &FkTriggerInfo) -> Result<(), ExecError> {
+        let func_name = format!(
+            "__fk_validate_insert_{}_{}__",
+            fk.child_table, fk.child_column
+        );
+        let trigger_name = format!("__fk_insert_{}_{}__", fk.child_table, fk.child_column);
+
+        // Function body: IF NOT EXISTS (SELECT 1 FROM parent WHERE id = NEW.fk_col) THEN RAISE ERROR '...'
+        let body = format!(
+            "IF NOT EXISTS (SELECT 1 FROM {} WHERE {} = NEW.{}) THEN RAISE ERROR 'Foreign key constraint violation: {} references {}({})'; RETURN NEW",
+            fk.parent_table,
+            fk.parent_column,
+            fk.child_column,
+            fk.child_column,
+            fk.parent_table,
+            fk.parent_column
+        );
+
+        // Create function
+        self.storage.create_function(FunctionDef {
+            name: func_name.clone(),
+            params: "[]".to_string(),
+            body,
+            language: "sql".to_string(),
+        })?;
+
+        // Create trigger
+        self.storage.create_trigger(TriggerDef {
+            name: trigger_name,
+            table_name: fk.child_table.clone(),
+            timing: StorageTriggerTiming::Before,
+            events: vec![StorageTriggerEvent::Insert],
+            function_name: func_name,
+        })?;
+
+        Ok(())
+    }
+
+    /// Create BEFORE UPDATE trigger to validate FK constraint when FK column changes
+    fn create_fk_update_validation_trigger(&mut self, fk: &FkTriggerInfo) -> Result<(), ExecError> {
+        let func_name = format!(
+            "__fk_validate_update_{}_{}__",
+            fk.child_table, fk.child_column
+        );
+        let trigger_name = format!("__fk_update_{}_{}__", fk.child_table, fk.child_column);
+
+        // Function body: check if new parent exists
+        let body = format!(
+            "IF NOT EXISTS (SELECT 1 FROM {} WHERE {} = NEW.{}) THEN RAISE ERROR 'Foreign key constraint violation: {} references {}({})'; RETURN NEW",
+            fk.parent_table,
+            fk.parent_column,
+            fk.child_column,
+            fk.child_column,
+            fk.parent_table,
+            fk.parent_column
+        );
+
+        // Create function
+        self.storage.create_function(FunctionDef {
+            name: func_name.clone(),
+            params: "[]".to_string(),
+            body,
+            language: "sql".to_string(),
+        })?;
+
+        // Create trigger
+        self.storage.create_trigger(TriggerDef {
+            name: trigger_name,
+            table_name: fk.child_table.clone(),
+            timing: StorageTriggerTiming::Before,
+            events: vec![StorageTriggerEvent::Update],
+            function_name: func_name,
+        })?;
+
+        Ok(())
+    }
+
+    /// Create DELETE trigger on parent table based on ON DELETE action
+    /// - RESTRICT/NoAction: BEFORE DELETE trigger to check references exist (abort if so)
+    /// - CASCADE/SetNull/SetDefault: AFTER DELETE trigger to perform the action
+    fn create_fk_on_delete_trigger(&mut self, fk: &FkTriggerInfo) -> Result<(), ExecError> {
+        let (body, timing) = match fk.on_delete {
+            StorageRefAction::Cascade => {
+                // DELETE FROM child WHERE fk_col = OLD.pk_col
+                (
+                    format!(
+                        "DELETE FROM {} WHERE {} = OLD.{}; RETURN OLD",
+                        fk.child_table, fk.child_column, fk.parent_column
+                    ),
+                    StorageTriggerTiming::After,
+                )
+            }
+            StorageRefAction::SetNull => {
+                // UPDATE child SET fk_col = NULL WHERE fk_col = OLD.pk_col
+                (
+                    format!(
+                        "UPDATE {} SET {} = NULL WHERE {} = OLD.{}; RETURN OLD",
+                        fk.child_table, fk.child_column, fk.child_column, fk.parent_column
+                    ),
+                    StorageTriggerTiming::After,
+                )
+            }
+            StorageRefAction::SetDefault => {
+                // For now, treat SetDefault as SetNull (proper implementation would need default value)
+                (
+                    format!(
+                        "UPDATE {} SET {} = NULL WHERE {} = OLD.{}; RETURN OLD",
+                        fk.child_table, fk.child_column, fk.child_column, fk.parent_column
+                    ),
+                    StorageTriggerTiming::After,
+                )
+            }
+            StorageRefAction::Restrict | StorageRefAction::NoAction => {
+                // BEFORE DELETE: check if references exist and abort if so
+                (
+                    format!(
+                        "IF EXISTS (SELECT 1 FROM {} WHERE {} = OLD.{}) THEN RAISE ERROR 'Cannot delete: referenced by {}({})'; RETURN OLD",
+                        fk.child_table, fk.child_column, fk.parent_column,
+                        fk.child_table, fk.child_column
+                    ),
+                    StorageTriggerTiming::Before,
+                )
+            }
+        };
+
+        let func_name = format!(
+            "__fk_on_delete_{}_{}_{}__",
+            fk.parent_table, fk.child_table, fk.child_column
+        );
+        let trigger_name = format!(
+            "__fk_delete_{}_{}_{}__",
+            fk.parent_table, fk.child_table, fk.child_column
+        );
+
+        // Create function
+        self.storage.create_function(FunctionDef {
+            name: func_name.clone(),
+            params: "[]".to_string(),
+            body,
+            language: "sql".to_string(),
+        })?;
+
+        // Create trigger on PARENT table
+        self.storage.create_trigger(TriggerDef {
+            name: trigger_name,
+            table_name: fk.parent_table.clone(),
+            timing,
+            events: vec![StorageTriggerEvent::Delete],
+            function_name: func_name,
+        })?;
+
+        Ok(())
+    }
+
+    /// Create UPDATE trigger on parent table based on ON UPDATE action
+    /// - RESTRICT/NoAction: BEFORE UPDATE trigger to check references exist (abort if so)
+    /// - CASCADE/SetNull/SetDefault: AFTER UPDATE trigger to perform the action
+    fn create_fk_on_update_trigger(&mut self, fk: &FkTriggerInfo) -> Result<(), ExecError> {
+        let (body, timing) = match fk.on_update {
+            StorageRefAction::Cascade => {
+                // UPDATE child SET fk_col = NEW.pk_col WHERE fk_col = OLD.pk_col
+                (
+                    format!(
+                        "UPDATE {} SET {} = NEW.{} WHERE {} = OLD.{}; RETURN NEW",
+                        fk.child_table,
+                        fk.child_column,
+                        fk.parent_column,
+                        fk.child_column,
+                        fk.parent_column
+                    ),
+                    StorageTriggerTiming::After,
+                )
+            }
+            StorageRefAction::SetNull => {
+                // UPDATE child SET fk_col = NULL WHERE fk_col = OLD.pk_col
+                (
+                    format!(
+                        "UPDATE {} SET {} = NULL WHERE {} = OLD.{}; RETURN NEW",
+                        fk.child_table, fk.child_column, fk.child_column, fk.parent_column
+                    ),
+                    StorageTriggerTiming::After,
+                )
+            }
+            StorageRefAction::SetDefault => {
+                // For now, treat SetDefault as SetNull
+                (
+                    format!(
+                        "UPDATE {} SET {} = NULL WHERE {} = OLD.{}; RETURN NEW",
+                        fk.child_table, fk.child_column, fk.child_column, fk.parent_column
+                    ),
+                    StorageTriggerTiming::After,
+                )
+            }
+            StorageRefAction::Restrict | StorageRefAction::NoAction => {
+                // BEFORE UPDATE: check if references exist and abort if so
+                (
+                    format!(
+                        "IF EXISTS (SELECT 1 FROM {} WHERE {} = OLD.{}) THEN RAISE ERROR 'Cannot update: referenced by {}({})'; RETURN NEW",
+                        fk.child_table, fk.child_column, fk.parent_column,
+                        fk.child_table, fk.child_column
+                    ),
+                    StorageTriggerTiming::Before,
+                )
+            }
+        };
+
+        let func_name = format!(
+            "__fk_on_update_{}_{}_{}__",
+            fk.parent_table, fk.child_table, fk.child_column
+        );
+        let trigger_name = format!(
+            "__fk_update_{}_{}_{}__",
+            fk.parent_table, fk.child_table, fk.child_column
+        );
+
+        // Create function
+        self.storage.create_function(FunctionDef {
+            name: func_name.clone(),
+            params: "[]".to_string(),
+            body,
+            language: "sql".to_string(),
+        })?;
+
+        // Create trigger on PARENT table
+        self.storage.create_trigger(TriggerDef {
+            name: trigger_name,
+            table_name: fk.parent_table.clone(),
+            timing,
+            events: vec![StorageTriggerEvent::Update],
+            function_name: func_name,
+        })?;
+
+        Ok(())
     }
 
     /// Execute an INSERT
@@ -506,7 +793,7 @@ impl Engine {
         Ok(QueryResult::RowsAffected(count))
     }
 
-    /// Execute an UPDATE
+    /// Execute an UPDATE with trigger-based referential integrity support
     fn execute_update(
         &mut self,
         table: &str,
@@ -515,210 +802,83 @@ impl Engine {
     ) -> ExecResult {
         let schema = self.storage.get_schema(table)?;
         let column_names: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
+        let column_names_clone = column_names.clone();
+        let assignments_clone: Vec<_> = assignments
+            .iter()
+            .map(|a| (a.column.clone(), a.value.clone()))
+            .collect();
 
-        // Get all rows
-        let rows = self.storage.scan(table)?;
+        let runtime = SqlRuntime::new();
 
-        // Find rows to update and their new values
-        let mut updates: Vec<(usize, Row)> = Vec::new();
-        for (idx, row) in rows.iter().enumerate() {
-            let should_update = match where_clause {
+        // Use trigger-aware update that handles FK constraints through triggers
+        let result = update(
+            &mut self.storage,
+            &runtime,
+            table,
+            |row| match where_clause {
                 Some(predicate) => eval_predicate(predicate, row, &column_names),
                 None => true,
-            };
-            if should_update {
-                // Apply assignments to create new row
-                let mut new_row = row.clone();
-                for assignment in assignments {
-                    if let Some(col_idx) = column_names.iter().position(|c| c == &assignment.column)
-                    {
-                        new_row[col_idx] = eval_expr(&assignment.value, row, &column_names);
+            },
+            |row| {
+                // Apply assignments to the row
+                for (col_name, value_expr) in &assignments_clone {
+                    if let Some(col_idx) = column_names_clone.iter().position(|c| c == col_name) {
+                        row[col_idx] = eval_expr(value_expr, row, &column_names_clone);
                     }
                 }
-                updates.push((idx, new_row));
+            },
+        );
+
+        match result {
+            Ok(count) => Ok(QueryResult::RowsAffected(count)),
+            Err(OperationError::Storage(e)) => Err(ExecError::Storage(e)),
+            Err(OperationError::Runtime(e)) => Err(ExecError::InvalidExpression(format!(
+                "Trigger error: {}",
+                e
+            ))),
+            Err(OperationError::TriggerAbort(msg)) => {
+                // FK constraint violation from trigger
+                Err(ExecError::InvalidExpression(format!(
+                    "Constraint violation: {}",
+                    msg
+                )))
             }
         }
-
-        // Delete old rows and insert new ones
-        // For simplicity, delete all matching rows then insert updated versions
-        let count = updates.len();
-        if count > 0 {
-            // Delete matching rows
-            let _ = self.storage.delete(table, |row| match where_clause {
-                Some(predicate) => eval_predicate(predicate, row, &column_names),
-                None => true,
-            })?;
-
-            // Insert updated rows
-            for (_, new_row) in updates {
-                self.storage.insert(table, new_row)?;
-            }
-        }
-
-        Ok(QueryResult::RowsAffected(count))
     }
 
-    /// Execute a DELETE with referential integrity support
+    /// Execute a DELETE with trigger-based referential integrity support
     fn execute_delete(&mut self, table: &str, where_clause: Option<&Expr>) -> ExecResult {
         let schema = self.storage.get_schema(table)?.clone();
         let column_names: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
 
-        // Find rows to delete
-        let all_rows = self.storage.scan(table)?;
-        let rows_to_delete: Vec<Row> = all_rows
-            .into_iter()
-            .filter(|row| match where_clause {
+        let runtime = SqlRuntime::new();
+
+        // Use trigger-aware delete that handles FK constraints through AFTER DELETE triggers
+        let deleted = delete(
+            &mut self.storage,
+            &runtime,
+            table,
+            |row| match where_clause {
                 Some(predicate) => eval_predicate(predicate, row, &column_names),
                 None => true,
-            })
-            .collect();
+            },
+        );
 
-        if rows_to_delete.is_empty() {
-            return Ok(QueryResult::RowsAffected(0));
-        }
-
-        // Find primary key columns
-        let pk_columns: Vec<(usize, &str)> = schema
-            .columns
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.primary_key)
-            .map(|(i, c)| (i, c.name.as_str()))
-            .collect();
-
-        // Get deleted key values (for checking foreign key references)
-        let deleted_values: Vec<Vec<(&str, &Value)>> = rows_to_delete
-            .iter()
-            .map(|row| {
-                pk_columns
-                    .iter()
-                    .filter_map(|(idx, col_name)| row.get(*idx).map(|v| (*col_name, v)))
-                    .collect()
-            })
-            .collect();
-
-        // Handle referential integrity for each referencing table
-        self.handle_cascade_delete(table, &deleted_values)?;
-
-        // Now delete the rows from the main table
-        let deleted = self.storage.delete(table, |row| match where_clause {
-            Some(predicate) => eval_predicate(predicate, row, &column_names),
-            None => true,
-        })?;
-
-        Ok(QueryResult::RowsAffected(deleted))
-    }
-
-    /// Handle cascade delete for foreign key references
-    fn handle_cascade_delete(
-        &mut self,
-        referenced_table: &str,
-        deleted_values: &[Vec<(&str, &Value)>],
-    ) -> Result<(), ExecError> {
-        // Find all tables that reference this table
-        let table_names = self.storage.table_names();
-        let mut fk_refs: Vec<(String, String, String, StorageRefAction)> = Vec::new();
-
-        for tbl_name in &table_names {
-            if let Ok(schema) = self.storage.get_schema(tbl_name) {
-                for col in &schema.columns {
-                    if let Some(ref fk) = col.references {
-                        if fk.table == referenced_table {
-                            fk_refs.push((
-                                tbl_name.clone(),
-                                col.name.clone(),
-                                fk.column.clone(),
-                                fk.on_delete.clone(),
-                            ));
-                        }
-                    }
-                }
+        match deleted {
+            Ok(count) => Ok(QueryResult::RowsAffected(count)),
+            Err(OperationError::Storage(e)) => Err(ExecError::Storage(e)),
+            Err(OperationError::Runtime(e)) => Err(ExecError::InvalidExpression(format!(
+                "Trigger error: {}",
+                e
+            ))),
+            Err(OperationError::TriggerAbort(msg)) => {
+                // FK constraint violation from trigger
+                Err(ExecError::InvalidExpression(format!(
+                    "Constraint violation: {}",
+                    msg
+                )))
             }
         }
-
-        // Process each foreign key reference
-        for (child_table, child_col, parent_col, action) in fk_refs {
-            let child_schema = self.storage.get_schema(&child_table)?.clone();
-            let child_col_idx = child_schema
-                .columns
-                .iter()
-                .position(|c| c.name == child_col)
-                .ok_or_else(|| ExecError::ColumnNotFound(child_col.clone()))?;
-
-            // Check for matching values in the child table
-            for deleted_row in deleted_values {
-                if let Some((_, deleted_val)) =
-                    deleted_row.iter().find(|(col, _)| *col == parent_col)
-                {
-                    match action {
-                        StorageRefAction::Cascade => {
-                            // Recursively delete matching rows in child table
-                            self.storage.delete(&child_table, |row| {
-                                row.get(child_col_idx)
-                                    .map(|v| values_equal(v, deleted_val))
-                                    .unwrap_or(false)
-                            })?;
-                        }
-                        StorageRefAction::SetNull => {
-                            // Set the foreign key column to NULL
-                            self.storage.update(
-                                &child_table,
-                                |row| {
-                                    row.get(child_col_idx)
-                                        .map(|v| values_equal(v, deleted_val))
-                                        .unwrap_or(false)
-                                },
-                                |row| {
-                                    if let Some(val) = row.get_mut(child_col_idx) {
-                                        *val = Value::Null;
-                                    }
-                                },
-                            )?;
-                        }
-                        StorageRefAction::SetDefault => {
-                            // Set the foreign key column to its default value
-                            let default_val = child_schema.columns[child_col_idx]
-                                .default
-                                .clone()
-                                .unwrap_or(Value::Null);
-                            self.storage.update(
-                                &child_table,
-                                |row| {
-                                    row.get(child_col_idx)
-                                        .map(|v| values_equal(v, deleted_val))
-                                        .unwrap_or(false)
-                                },
-                                |row| {
-                                    if let Some(val) = row.get_mut(child_col_idx) {
-                                        *val = default_val.clone();
-                                    }
-                                },
-                            )?;
-                        }
-                        StorageRefAction::Restrict | StorageRefAction::NoAction => {
-                            // Check if any child rows reference this value
-                            let child_rows = self.storage.scan(&child_table)?;
-                            let has_reference = child_rows.iter().any(|row| {
-                                row.get(child_col_idx)
-                                    .map(|v| values_equal(v, deleted_val))
-                                    .unwrap_or(false)
-                            });
-
-                            if has_reference {
-                                return Err(ExecError::ForeignKeyViolation {
-                                    table: child_table.clone(),
-                                    column: child_col.clone(),
-                                    references_table: referenced_table.to_string(),
-                                    references_column: parent_col.to_string(),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
     }
 
     /// Begin a new transaction
@@ -4305,11 +4465,22 @@ mod tests {
             .unwrap();
 
         // Try to delete category - should fail due to RESTRICT
+        // The error now comes from a trigger-based FK constraint
         let result = engine.execute("DELETE FROM categories WHERE id = 1");
-        assert!(matches!(
-            result.unwrap_err(),
-            ExecError::ForeignKeyViolation { .. }
-        ));
+        let err = result.unwrap_err();
+        match &err {
+            ExecError::InvalidExpression(msg) => {
+                assert!(
+                    msg.contains("Cannot delete") || msg.contains("referenced by"),
+                    "Expected FK constraint error, got: {}",
+                    msg
+                );
+            }
+            _ => panic!(
+                "Expected InvalidExpression error with FK constraint message, got: {:?}",
+                err
+            ),
+        }
 
         // Verify category still exists
         let result = engine.execute("SELECT COUNT(*) FROM categories");

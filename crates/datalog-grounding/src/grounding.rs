@@ -579,11 +579,114 @@ mod tests {
         Term::Variable(sym(name))
     }
 
+    fn atom_term(name: &str) -> Term {
+        Term::Constant(Value::Atom(sym(name)))
+    }
+
+    fn int_term(n: i64) -> Term {
+        Term::Constant(Value::Integer(n))
+    }
+
+    fn compound_term(functor: &str, args: Vec<Term>) -> Term {
+        Term::Compound(sym(functor), args)
+    }
+
     fn make_atom(pred: &str, terms: Vec<Term>) -> Atom {
         Atom {
             predicate: sym(pred),
             terms,
         }
+    }
+
+    fn make_rule(head: Atom, body: Vec<Literal>) -> Rule {
+        Rule { head, body }
+    }
+
+    // ===== Basic Grounding Tests =====
+
+    #[test]
+    fn test_ground_rule_no_variables() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(
+            make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
+            &mut storage,
+        )
+        .unwrap();
+
+        // Rule: ancestor(john, mary) :- parent(john, mary).
+        let rule = make_rule(
+            make_atom("ancestor", vec![atom_term("john"), atom_term("mary")]),
+            vec![Literal::Positive(make_atom(
+                "parent",
+                vec![atom_term("john"), atom_term("mary")],
+            ))],
+        );
+
+        let results = ground_rule(&rule, &db, &storage);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].predicate.as_ref(), "ancestor");
+    }
+
+    #[test]
+    fn test_ground_rule_single_variable() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(
+            make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("john"), atom_term("bob")]),
+            &mut storage,
+        )
+        .unwrap();
+
+        // Rule: child(X) :- parent(john, X).
+        let rule = make_rule(
+            make_atom("child", vec![var_term("X")]),
+            vec![Literal::Positive(make_atom(
+                "parent",
+                vec![atom_term("john"), var_term("X")],
+            ))],
+        );
+
+        let results = ground_rule(&rule, &db, &storage);
+        assert_eq!(results.len(), 2);
+
+        // Both child(mary) and child(bob) should be generated
+        let terms: Vec<_> = results.iter().map(|a| &a.terms[0]).collect();
+        assert!(terms.contains(&&atom_term("mary")));
+        assert!(terms.contains(&&atom_term("bob")));
+    }
+
+    #[test]
+    fn test_ground_rule_multiple_variables() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(
+            make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("bob"), atom_term("alice")]),
+            &mut storage,
+        )
+        .unwrap();
+
+        // Rule: ancestor(X, Y) :- parent(X, Y).
+        let rule = make_rule(
+            make_atom("ancestor", vec![var_term("X"), var_term("Y")]),
+            vec![Literal::Positive(make_atom(
+                "parent",
+                vec![var_term("X"), var_term("Y")],
+            ))],
+        );
+
+        let results = ground_rule(&rule, &db, &storage);
+        assert_eq!(results.len(), 2);
     }
 
     #[test]
@@ -593,24 +696,12 @@ mod tests {
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
         db.insert(
-            make_atom(
-                "parent",
-                vec![
-                    Term::Constant(Value::Atom(sym("john"))),
-                    Term::Constant(Value::Atom(sym("mary"))),
-                ],
-            ),
+            make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
             &mut storage,
         )
         .unwrap();
         db.insert(
-            make_atom(
-                "parent",
-                vec![
-                    Term::Constant(Value::Atom(sym("mary"))),
-                    Term::Constant(Value::Atom(sym("jane"))),
-                ],
-            ),
+            make_atom("parent", vec![atom_term("mary"), atom_term("jane")]),
             &mut storage,
         )
         .unwrap();
@@ -627,30 +718,83 @@ mod tests {
         assert_eq!(results.len(), 2);
     }
 
+    // ===== Join Tests (Multiple Literals) =====
+
+    #[test]
+    fn test_ground_rule_join_two_literals() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(
+            make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("mary"), atom_term("alice")]),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("bob"), atom_term("charlie")]),
+            &mut storage,
+        )
+        .unwrap();
+
+        // Rule: grandparent(X, Z) :- parent(X, Y), parent(Y, Z).
+        let rule = make_rule(
+            make_atom("grandparent", vec![var_term("X"), var_term("Z")]),
+            vec![
+                Literal::Positive(make_atom("parent", vec![var_term("X"), var_term("Y")])),
+                Literal::Positive(make_atom("parent", vec![var_term("Y"), var_term("Z")])),
+            ],
+        );
+
+        let results = ground_rule(&rule, &db, &storage);
+
+        // Only john -> mary -> alice forms a valid chain
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].terms[0], atom_term("john"));
+        assert_eq!(results[0].terms[1], atom_term("alice"));
+    }
+
+    #[test]
+    fn test_ground_rule_multiple_chains() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(make_atom("parent", vec![atom_term("a"), atom_term("b")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("parent", vec![atom_term("b"), atom_term("c")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("parent", vec![atom_term("b"), atom_term("d")]), &mut storage)
+            .unwrap();
+
+        // Rule: grandparent(X, Z) :- parent(X, Y), parent(Y, Z).
+        let rule = make_rule(
+            make_atom("grandparent", vec![var_term("X"), var_term("Z")]),
+            vec![
+                Literal::Positive(make_atom("parent", vec![var_term("X"), var_term("Y")])),
+                Literal::Positive(make_atom("parent", vec![var_term("Y"), var_term("Z")])),
+            ],
+        );
+
+        let results = ground_rule(&rule, &db, &storage);
+
+        // a -> b -> c and a -> b -> d
+        assert_eq!(results.len(), 2);
+    }
+
     #[test]
     fn test_ground_transitive_rule() {
         // ancestor(X, Z) :- ancestor(X, Y), parent(Y, Z).
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
         db.insert(
-            make_atom(
-                "ancestor",
-                vec![
-                    Term::Constant(Value::Atom(sym("john"))),
-                    Term::Constant(Value::Atom(sym("mary"))),
-                ],
-            ),
+            make_atom("ancestor", vec![atom_term("john"), atom_term("mary")]),
             &mut storage,
         )
         .unwrap();
         db.insert(
-            make_atom(
-                "parent",
-                vec![
-                    Term::Constant(Value::Atom(sym("mary"))),
-                    Term::Constant(Value::Atom(sym("jane"))),
-                ],
-            ),
+            make_atom("parent", vec![atom_term("mary"), atom_term("jane")]),
             &mut storage,
         )
         .unwrap();
@@ -669,28 +813,114 @@ mod tests {
     }
 
     #[test]
+    fn test_ground_rule_three_literals() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(make_atom("edge", vec![atom_term("a"), atom_term("b")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("edge", vec![atom_term("b"), atom_term("c")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("edge", vec![atom_term("c"), atom_term("d")]), &mut storage)
+            .unwrap();
+
+        // Rule: path3(X, W) :- edge(X, Y), edge(Y, Z), edge(Z, W).
+        let rule = make_rule(
+            make_atom("path3", vec![var_term("X"), var_term("W")]),
+            vec![
+                Literal::Positive(make_atom("edge", vec![var_term("X"), var_term("Y")])),
+                Literal::Positive(make_atom("edge", vec![var_term("Y"), var_term("Z")])),
+                Literal::Positive(make_atom("edge", vec![var_term("Z"), var_term("W")])),
+            ],
+        );
+
+        let results = ground_rule(&rule, &db, &storage);
+
+        // Only a -> b -> c -> d
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].terms[0], atom_term("a"));
+        assert_eq!(results[0].terms[1], atom_term("d"));
+    }
+
+    // ===== No Matches / Empty Body Tests =====
+
+    #[test]
+    fn test_ground_rule_no_matches() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(
+            make_atom("parent", vec![atom_term("john"), atom_term("mary")]),
+            &mut storage,
+        )
+        .unwrap();
+
+        // Rule: child(X) :- parent(alice, X).
+        // No facts match parent(alice, X)
+        let rule = make_rule(
+            make_atom("child", vec![var_term("X")]),
+            vec![Literal::Positive(make_atom(
+                "parent",
+                vec![atom_term("alice"), var_term("X")],
+            ))],
+        );
+
+        let results = ground_rule(&rule, &db, &storage);
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_ground_rule_empty_body() {
+        let db = DatalogContext::new();
+        let storage = MemoryEngine::new();
+
+        // Rule: fact(a) :- .
+        // (A rule with no body is always true)
+        let rule = make_rule(make_atom("fact", vec![atom_term("a")]), vec![]);
+
+        let results = ground_rule(&rule, &db, &storage);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], make_atom("fact", vec![atom_term("a")]));
+    }
+
+    // ===== Negation Tests =====
+
+    #[test]
+    fn test_ground_rule_simple_negation() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(make_atom("bird", vec![atom_term("tweety")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("bird", vec![atom_term("polly")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("penguin", vec![atom_term("polly")]), &mut storage)
+            .unwrap();
+
+        // Rule: flies(X) :- bird(X), not penguin(X).
+        let rule = make_rule(
+            make_atom("flies", vec![var_term("X")]),
+            vec![
+                Literal::Positive(make_atom("bird", vec![var_term("X")])),
+                Literal::Negative(make_atom("penguin", vec![var_term("X")])),
+            ],
+        );
+
+        let results = ground_rule(&rule, &db, &storage);
+
+        // Only tweety should fly (polly is a penguin)
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].terms[0], atom_term("tweety"));
+    }
+
+    #[test]
     fn test_negation() {
         // not_parent(X) :- person(X), not parent(X, _).
         let mut db = DatalogContext::new();
         let mut storage = MemoryEngine::new();
+        db.insert(make_atom("person", vec![atom_term("john")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("person", vec![atom_term("mary")]), &mut storage)
+            .unwrap();
         db.insert(
-            make_atom("person", vec![Term::Constant(Value::Atom(sym("john")))]),
-            &mut storage,
-        )
-        .unwrap();
-        db.insert(
-            make_atom("person", vec![Term::Constant(Value::Atom(sym("mary")))]),
-            &mut storage,
-        )
-        .unwrap();
-        db.insert(
-            make_atom(
-                "parent",
-                vec![
-                    Term::Constant(Value::Atom(sym("john"))),
-                    Term::Constant(Value::Atom(sym("jane"))),
-                ],
-            ),
+            make_atom("parent", vec![atom_term("john"), atom_term("jane")]),
             &mut storage,
         )
         .unwrap();
@@ -704,5 +934,294 @@ mod tests {
         let substs = satisfy_body(&body, &db, &storage);
         // Mary should be the only one without a parent entry
         assert_eq!(substs.len(), 1);
+    }
+
+    #[test]
+    fn test_ground_rule_negation_with_ground_term() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(make_atom("bird", vec![atom_term("tweety")]), &mut storage)
+            .unwrap();
+
+        // Rule: not_bird_polly :- not bird(polly).
+        let rule = make_rule(
+            make_atom("not_bird_polly", vec![]),
+            vec![Literal::Negative(make_atom("bird", vec![atom_term("polly")]))],
+        );
+
+        let results = ground_rule(&rule, &db, &storage);
+
+        // polly is not a bird, so this succeeds
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_ground_rule_multiple_negations() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(make_atom("a", vec![atom_term("x")]), &mut storage).unwrap();
+        db.insert(make_atom("b", vec![atom_term("y")]), &mut storage).unwrap();
+        db.insert(make_atom("c", vec![atom_term("z")]), &mut storage).unwrap();
+
+        // Rule: result :- not a(y), not b(x), not c(w).
+        let rule = make_rule(
+            make_atom("result", vec![]),
+            vec![
+                Literal::Negative(make_atom("a", vec![atom_term("y")])),
+                Literal::Negative(make_atom("b", vec![atom_term("x")])),
+                Literal::Negative(make_atom("c", vec![atom_term("w")])),
+            ],
+        );
+
+        let results = ground_rule(&rule, &db, &storage);
+
+        // All negations succeed (a(y), b(x), c(w) don't exist)
+        assert_eq!(results.len(), 1);
+    }
+
+    // ===== Compound Term Tests =====
+
+    #[test]
+    fn test_ground_rule_with_compound_terms() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(
+            make_atom(
+                "has",
+                vec![atom_term("john"), compound_term("item", vec![atom_term("sword"), int_term(10)])],
+            ),
+            &mut storage,
+        )
+        .unwrap();
+        db.insert(
+            make_atom(
+                "has",
+                vec![atom_term("mary"), compound_term("item", vec![atom_term("shield"), int_term(5)])],
+            ),
+            &mut storage,
+        )
+        .unwrap();
+
+        // Rule: armed(P) :- has(P, item(sword, _)).
+        let rule = make_rule(
+            make_atom("armed", vec![var_term("P")]),
+            vec![Literal::Positive(make_atom(
+                "has",
+                vec![var_term("P"), compound_term("item", vec![atom_term("sword"), var_term("_W")])],
+            ))],
+        );
+
+        let results = ground_rule(&rule, &db, &storage);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].terms[0], atom_term("john"));
+    }
+
+    #[test]
+    fn test_ground_rule_extract_from_compound() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(
+            make_atom(
+                "item",
+                vec![compound_term("weapon", vec![atom_term("sword"), int_term(10)])],
+            ),
+            &mut storage,
+        )
+        .unwrap();
+
+        // Rule: weapon_name(N) :- item(weapon(N, _)).
+        let rule = make_rule(
+            make_atom("weapon_name", vec![var_term("N")]),
+            vec![Literal::Positive(make_atom(
+                "item",
+                vec![compound_term("weapon", vec![var_term("N"), var_term("_D")])],
+            ))],
+        );
+
+        let results = ground_rule(&rule, &db, &storage);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].terms[0], atom_term("sword"));
+    }
+
+    // ===== Semi-Naive Grounding Tests =====
+
+    #[test]
+    fn test_semi_naive_basic() {
+        let mut full_db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        full_db
+            .insert(make_atom("edge", vec![atom_term("a"), atom_term("b")]), &mut storage)
+            .unwrap();
+        full_db
+            .insert(make_atom("edge", vec![atom_term("b"), atom_term("c")]), &mut storage)
+            .unwrap();
+        full_db
+            .insert(make_atom("path", vec![atom_term("a"), atom_term("b")]), &mut storage)
+            .unwrap();
+
+        // Delta: only the new path fact
+        let mut delta = DatalogContext::new();
+        delta
+            .insert(make_atom("path", vec![atom_term("a"), atom_term("b")]), &mut storage)
+            .unwrap();
+
+        // Rule: path(X, Z) :- path(X, Y), edge(Y, Z).
+        let rule = make_rule(
+            make_atom("path", vec![var_term("X"), var_term("Z")]),
+            vec![
+                Literal::Positive(make_atom("path", vec![var_term("X"), var_term("Y")])),
+                Literal::Positive(make_atom("edge", vec![var_term("Y"), var_term("Z")])),
+            ],
+        );
+
+        let results = ground_rule_semi_naive(&rule, &delta, &full_db, &storage);
+
+        // Should derive path(a, c) using the delta path(a, b) with edge(b, c)
+        assert!(!results.is_empty());
+    }
+
+    // ===== Satisfy Body Tests =====
+
+    #[test]
+    fn test_satisfy_body_single_literal() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(make_atom("fact", vec![atom_term("a")]), &mut storage).unwrap();
+        db.insert(make_atom("fact", vec![atom_term("b")]), &mut storage).unwrap();
+
+        let body = vec![Literal::Positive(make_atom("fact", vec![var_term("X")]))];
+        let results = satisfy_body(&body, &db, &storage);
+
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_satisfy_body_join() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        db.insert(make_atom("r", vec![atom_term("a"), atom_term("b")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("s", vec![atom_term("b"), atom_term("c")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("s", vec![atom_term("x"), atom_term("y")]), &mut storage)
+            .unwrap();
+
+        // r(X, Y), s(Y, Z) - should only match where r.Y = s.Y
+        let body = vec![
+            Literal::Positive(make_atom("r", vec![var_term("X"), var_term("Y")])),
+            Literal::Positive(make_atom("s", vec![var_term("Y"), var_term("Z")])),
+        ];
+        let results = satisfy_body(&body, &db, &storage);
+
+        // Only one match: X=a, Y=b, Z=c
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_satisfy_body_empty() {
+        let db = DatalogContext::new();
+        let storage = MemoryEngine::new();
+
+        let body: Vec<Literal> = vec![];
+        let results = satisfy_body(&body, &db, &storage);
+
+        // Empty body succeeds with one empty substitution
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_empty());
+    }
+
+    // ===== Integration Tests =====
+
+    #[test]
+    fn test_integration_ground_query() {
+        // A complete workflow: facts -> rules -> ground -> query
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+
+        // Facts
+        db.insert(make_atom("parent", vec![atom_term("john"), atom_term("mary")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("parent", vec![atom_term("mary"), atom_term("alice")]), &mut storage)
+            .unwrap();
+        db.insert(make_atom("parent", vec![atom_term("bob"), atom_term("charlie")]), &mut storage)
+            .unwrap();
+        db.insert(
+            make_atom("parent", vec![atom_term("charlie"), atom_term("dave")]),
+            &mut storage,
+        )
+        .unwrap();
+
+        // Rule: grandparent(X, Z) :- parent(X, Y), parent(Y, Z).
+        let rule = make_rule(
+            make_atom("grandparent", vec![var_term("X"), var_term("Z")]),
+            vec![
+                Literal::Positive(make_atom("parent", vec![var_term("X"), var_term("Y")])),
+                Literal::Positive(make_atom("parent", vec![var_term("Y"), var_term("Z")])),
+            ],
+        );
+
+        let derived = ground_rule(&rule, &db, &storage);
+
+        // Should derive:
+        // grandparent(john, alice) from parent(john, mary) + parent(mary, alice)
+        // grandparent(bob, dave) from parent(bob, charlie) + parent(charlie, dave)
+        assert_eq!(derived.len(), 2);
+
+        // Verify specific derivations
+        let has_john_alice = derived.iter().any(|a| {
+            a.predicate.as_ref() == "grandparent"
+                && a.terms[0] == atom_term("john")
+                && a.terms[1] == atom_term("alice")
+        });
+        let has_bob_dave = derived.iter().any(|a| {
+            a.predicate.as_ref() == "grandparent"
+                && a.terms[0] == atom_term("bob")
+                && a.terms[1] == atom_term("dave")
+        });
+
+        assert!(has_john_alice, "Should derive grandparent(john, alice)");
+        assert!(has_bob_dave, "Should derive grandparent(bob, dave)");
+    }
+
+    // ===== Allocation/Performance Tests =====
+
+    #[test]
+    fn test_large_rule_chain() {
+        let mut db = DatalogContext::new();
+        let mut storage = MemoryEngine::new();
+        let chain_len = 20;
+
+        for i in 0..chain_len {
+            db.insert(
+                make_atom("link", vec![int_term(i), int_term(i + 1)]),
+                &mut storage,
+            )
+            .unwrap();
+        }
+
+        // Build a long chain rule: result(X, Y) :- link(X, V1), link(V1, V2), ..., link(Vn, Y)
+        let mut body = vec![Literal::Positive(make_atom(
+            "link",
+            vec![var_term("X"), var_term("V0")],
+        ))];
+        for i in 0..5 {
+            let current = format!("V{}", i);
+            let next = format!("V{}", i + 1);
+            body.push(Literal::Positive(make_atom(
+                "link",
+                vec![var_term(&current), var_term(&next)],
+            )));
+        }
+
+        let rule = make_rule(
+            make_atom("result", vec![var_term("X"), var_term("V5")]),
+            body,
+        );
+
+        let results = ground_rule(&rule, &db, &storage);
+
+        // Should find paths of length 6 in a chain of 20
+        // Starting positions: 0, 1, 2, ..., 14 (14+6=20)
+        assert_eq!(results.len(), 15);
     }
 }

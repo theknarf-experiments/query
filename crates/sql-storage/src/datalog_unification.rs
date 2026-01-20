@@ -175,40 +175,426 @@ mod tests {
     use datalog_parser::Value;
     use internment::Intern;
 
-    #[test]
-    fn test_unify_constants() {
-        let c1 = Term::Constant(Value::Integer(42));
-        let c2 = Term::Constant(Value::Integer(42));
-        let mut subst = Substitution::new();
-        assert!(unify(&c1, &c2, &mut subst));
+    // Helper functions for creating terms in tests
+    fn var(name: &str) -> Term {
+        Term::Variable(Intern::new(name.to_string()))
     }
+
+    fn int(n: i64) -> Term {
+        Term::Constant(Value::Integer(n))
+    }
+
+    fn atom(name: &str) -> Term {
+        Term::Constant(Value::Atom(Intern::new(name.to_string())))
+    }
+
+    fn float(f: f64) -> Term {
+        Term::Constant(Value::Float(f))
+    }
+
+    fn compound(functor: &str, args: Vec<Term>) -> Term {
+        Term::Compound(Intern::new(functor.to_string()), args)
+    }
+
+    fn make_atom(predicate: &str, terms: Vec<Term>) -> Atom {
+        Atom {
+            predicate: Intern::new(predicate.to_string()),
+            terms,
+        }
+    }
+
+    // ===== Substitution Tests =====
+
+    #[test]
+    fn test_substitution_new() {
+        let subst = Substitution::new();
+        assert_eq!(subst.len(), 0);
+        assert!(subst.is_empty());
+    }
+
+    #[test]
+    fn test_substitution_bind_and_get() {
+        let mut subst = Substitution::new();
+        let x = Intern::new("X".to_string());
+
+        subst.bind(x, int(42));
+        assert!(subst.contains(&x));
+        assert_eq!(subst.get(&x), Some(&int(42)));
+    }
+
+    #[test]
+    fn test_substitution_apply_variable() {
+        let mut subst = Substitution::new();
+        let x = Intern::new("X".to_string());
+
+        subst.bind(x, int(42));
+
+        let result = subst.apply(&var("X"));
+        assert_eq!(result, int(42));
+    }
+
+    #[test]
+    fn test_substitution_apply_unbound_variable() {
+        let subst = Substitution::new();
+        let result = subst.apply(&var("Y"));
+        assert_eq!(result, var("Y"));
+    }
+
+    #[test]
+    fn test_substitution_apply_compound() {
+        let mut subst = Substitution::new();
+        let x = Intern::new("X".to_string());
+
+        subst.bind(x, int(42));
+
+        let term = compound("f", vec![var("X"), atom("a")]);
+        let result = subst.apply(&term);
+
+        assert_eq!(result, compound("f", vec![int(42), atom("a")]));
+    }
+
+    #[test]
+    fn test_substitution_apply_transitive() {
+        let mut subst = Substitution::new();
+        let x = Intern::new("X".to_string());
+        let y = Intern::new("Y".to_string());
+
+        subst.bind(x, var("Y"));
+        subst.bind(y, int(42));
+
+        let result = subst.apply(&var("X"));
+        assert_eq!(result, int(42));
+    }
+
+    #[test]
+    fn test_substitution_apply_atom() {
+        let mut subst = Substitution::new();
+        subst.bind(Intern::new("X".to_string()), atom("john"));
+        subst.bind(Intern::new("Y".to_string()), atom("mary"));
+
+        let original = make_atom("parent", vec![var("X"), var("Y")]);
+        let result = subst.apply_atom(&original);
+
+        assert_eq!(result, make_atom("parent", vec![atom("john"), atom("mary")]));
+    }
+
+    // ===== Unification Tests - Constants =====
+
+    #[test]
+    fn test_unify_identical_constants() {
+        let mut subst = Substitution::new();
+        assert!(unify(&int(42), &int(42), &mut subst));
+        assert_eq!(subst.len(), 0);
+    }
+
+    #[test]
+    fn test_unify_different_constants() {
+        let mut subst = Substitution::new();
+        assert!(!unify(&int(42), &int(43), &mut subst));
+    }
+
+    #[test]
+    fn test_unify_different_types() {
+        let mut subst = Substitution::new();
+        assert!(!unify(&int(42), &atom("john"), &mut subst));
+    }
+
+    #[test]
+    fn test_unify_float_constants() {
+        let mut subst = Substitution::new();
+        assert!(unify(&float(3.14), &float(3.14), &mut subst));
+        assert!(!unify(&float(3.14), &float(2.71), &mut subst));
+    }
+
+    #[test]
+    fn test_unify_atom_constants() {
+        let mut subst = Substitution::new();
+        assert!(unify(&atom("john"), &atom("john"), &mut subst));
+        assert!(!unify(&atom("john"), &atom("mary"), &mut subst));
+    }
+
+    // ===== Unification Tests - Variables =====
 
     #[test]
     fn test_unify_variable_with_constant() {
-        let var = Term::Variable(Intern::new("X".to_string()));
-        let val = Term::Constant(Value::Integer(42));
         let mut subst = Substitution::new();
-        assert!(unify(&var, &val, &mut subst));
-        assert_eq!(subst.apply(&var), val);
+        assert!(unify(&var("X"), &int(42), &mut subst));
+
+        let x = Intern::new("X".to_string());
+        assert_eq!(subst.get(&x), Some(&int(42)));
     }
 
     #[test]
-    fn test_unify_atoms() {
-        let atom1 = Atom {
-            predicate: Intern::new("parent".to_string()),
-            terms: vec![
-                Term::Variable(Intern::new("X".to_string())),
-                Term::Constant(Value::Atom(Intern::new("mary".to_string()))),
-            ],
-        };
-        let atom2 = Atom {
-            predicate: Intern::new("parent".to_string()),
-            terms: vec![
-                Term::Constant(Value::Atom(Intern::new("john".to_string()))),
-                Term::Constant(Value::Atom(Intern::new("mary".to_string()))),
-            ],
-        };
+    fn test_unify_constant_with_variable() {
         let mut subst = Substitution::new();
+        assert!(unify(&int(42), &var("X"), &mut subst));
+
+        let x = Intern::new("X".to_string());
+        assert_eq!(subst.get(&x), Some(&int(42)));
+    }
+
+    #[test]
+    fn test_unify_two_variables() {
+        let mut subst = Substitution::new();
+        assert!(unify(&var("X"), &var("Y"), &mut subst));
+
+        // One should be bound to the other
+        assert_eq!(subst.len(), 1);
+    }
+
+    #[test]
+    fn test_unify_variable_already_bound_same() {
+        let mut subst = Substitution::new();
+        let x = Intern::new("X".to_string());
+
+        subst.bind(x, int(42));
+
+        // Unifying X with 42 should succeed (already bound to 42)
+        assert!(unify(&var("X"), &int(42), &mut subst));
+    }
+
+    #[test]
+    fn test_unify_variable_already_bound_different() {
+        let mut subst = Substitution::new();
+        let x = Intern::new("X".to_string());
+
+        subst.bind(x, int(42));
+
+        // Unifying X with 43 should fail (bound to different value)
+        assert!(!unify(&var("X"), &int(43), &mut subst));
+    }
+
+    #[test]
+    fn test_unify_anonymous_variable() {
+        let mut subst = Substitution::new();
+
+        // Anonymous variable "_" unifies with anything without binding
+        assert!(unify(&var("_"), &int(42), &mut subst));
+        assert!(subst.is_empty()); // No binding created
+
+        assert!(unify(&atom("test"), &var("_"), &mut subst));
+        assert!(subst.is_empty());
+    }
+
+    // ===== Unification Tests - Compound Terms =====
+
+    #[test]
+    fn test_unify_identical_compound() {
+        let mut subst = Substitution::new();
+        let term = compound("f", vec![atom("a"), atom("b")]);
+        assert!(unify(&term, &term.clone(), &mut subst));
+    }
+
+    #[test]
+    fn test_unify_compound_different_functors() {
+        let mut subst = Substitution::new();
+        let t1 = compound("f", vec![atom("a")]);
+        let t2 = compound("g", vec![atom("a")]);
+        assert!(!unify(&t1, &t2, &mut subst));
+    }
+
+    #[test]
+    fn test_unify_compound_different_arity() {
+        let mut subst = Substitution::new();
+        let t1 = compound("f", vec![atom("a")]);
+        let t2 = compound("f", vec![atom("a"), atom("b")]);
+        assert!(!unify(&t1, &t2, &mut subst));
+    }
+
+    #[test]
+    fn test_unify_compound_with_variables() {
+        let mut subst = Substitution::new();
+        let t1 = compound("f", vec![var("X"), atom("b")]);
+        let t2 = compound("f", vec![atom("a"), var("Y")]);
+
+        assert!(unify(&t1, &t2, &mut subst));
+
+        let x = Intern::new("X".to_string());
+        let y = Intern::new("Y".to_string());
+
+        assert_eq!(subst.get(&x), Some(&atom("a")));
+        assert_eq!(subst.get(&y), Some(&atom("b")));
+    }
+
+    #[test]
+    fn test_unify_nested_compound() {
+        let mut subst = Substitution::new();
+        let t1 = compound("f", vec![compound("g", vec![var("X")])]);
+        let t2 = compound("f", vec![compound("g", vec![int(42)])]);
+
+        assert!(unify(&t1, &t2, &mut subst));
+
+        let x = Intern::new("X".to_string());
+        assert_eq!(subst.get(&x), Some(&int(42)));
+    }
+
+    #[test]
+    fn test_unify_deeply_nested_compound() {
+        let mut subst = Substitution::new();
+        // f(g(h(X))) with f(g(h(42)))
+        let t1 = compound("f", vec![compound("g", vec![compound("h", vec![var("X")])])]);
+        let t2 = compound("f", vec![compound("g", vec![compound("h", vec![int(42)])])]);
+
+        assert!(unify(&t1, &t2, &mut subst));
+
+        let x = Intern::new("X".to_string());
+        assert_eq!(subst.get(&x), Some(&int(42)));
+    }
+
+    #[test]
+    fn test_unify_compound_with_multiple_variables() {
+        let mut subst = Substitution::new();
+        // pair(X, Y) with pair(1, 2)
+        let t1 = compound("pair", vec![var("X"), var("Y")]);
+        let t2 = compound("pair", vec![int(1), int(2)]);
+
+        assert!(unify(&t1, &t2, &mut subst));
+
+        assert_eq!(subst.apply(&var("X")), int(1));
+        assert_eq!(subst.apply(&var("Y")), int(2));
+    }
+
+    // ===== Occurs Check Tests =====
+
+    #[test]
+    fn test_occurs_check_simple() {
+        let mut subst = Substitution::new();
+        // X = f(X) should fail (infinite structure)
+        assert!(!unify(&var("X"), &compound("f", vec![var("X")]), &mut subst));
+    }
+
+    #[test]
+    fn test_occurs_check_nested() {
+        let mut subst = Substitution::new();
+        // X = f(g(X)) should fail
+        let term = compound("f", vec![compound("g", vec![var("X")])]);
+        assert!(!unify(&var("X"), &term, &mut subst));
+    }
+
+    #[test]
+    fn test_occurs_check_deeply_nested() {
+        let mut subst = Substitution::new();
+        // X = a(b(c(d(X)))) should fail
+        let term = compound(
+            "a",
+            vec![compound(
+                "b",
+                vec![compound("c", vec![compound("d", vec![var("X")])])],
+            )],
+        );
+        assert!(!unify(&var("X"), &term, &mut subst));
+    }
+
+    #[test]
+    fn test_no_occurs_check_different_var() {
+        let mut subst = Substitution::new();
+        // X = f(Y) should succeed (Y is different from X)
+        assert!(unify(&var("X"), &compound("f", vec![var("Y")]), &mut subst));
+    }
+
+    // ===== Atom Unification Tests =====
+
+    #[test]
+    fn test_unify_atoms_simple() {
+        let mut subst = Substitution::new();
+        let atom1 = make_atom("parent", vec![atom("john"), var("X")]);
+        let atom2 = make_atom("parent", vec![var("Y"), atom("mary")]);
+
         assert!(unify_atoms(&atom1, &atom2, &mut subst));
+
+        let x = Intern::new("X".to_string());
+        let y = Intern::new("Y".to_string());
+
+        assert_eq!(subst.get(&x), Some(&atom("mary")));
+        assert_eq!(subst.get(&y), Some(&atom("john")));
+    }
+
+    #[test]
+    fn test_unify_atoms_different_predicates() {
+        let mut subst = Substitution::new();
+        let atom1 = make_atom("parent", vec![atom("john")]);
+        let atom2 = make_atom("child", vec![atom("john")]);
+
+        assert!(!unify_atoms(&atom1, &atom2, &mut subst));
+    }
+
+    #[test]
+    fn test_unify_atoms_different_arity() {
+        let mut subst = Substitution::new();
+        let atom1 = make_atom("parent", vec![atom("john")]);
+        let atom2 = make_atom("parent", vec![atom("john"), atom("mary")]);
+
+        assert!(!unify_atoms(&atom1, &atom2, &mut subst));
+    }
+
+    #[test]
+    fn test_unify_atoms_ground() {
+        let mut subst = Substitution::new();
+        let atom1 = make_atom("parent", vec![atom("john"), atom("mary")]);
+        let atom2 = make_atom("parent", vec![atom("john"), atom("mary")]);
+
+        assert!(unify_atoms(&atom1, &atom2, &mut subst));
+        assert!(subst.is_empty()); // No variables, so no bindings
+    }
+
+    #[test]
+    fn test_unify_atoms_with_compound_terms() {
+        let mut subst = Substitution::new();
+        let atom1 = make_atom("has", vec![atom("john"), compound("item", vec![var("X"), int(5)])]);
+        let atom2 = make_atom(
+            "has",
+            vec![atom("john"), compound("item", vec![atom("sword"), var("Y")])],
+        );
+
+        assert!(unify_atoms(&atom1, &atom2, &mut subst));
+        assert_eq!(subst.apply(&var("X")), atom("sword"));
+        assert_eq!(subst.apply(&var("Y")), int(5));
+    }
+
+    #[test]
+    fn test_unify_atoms_conflicting_bindings() {
+        let mut subst = Substitution::new();
+        // parent(X, X) with parent(john, mary) should fail
+        // because X can't be both john and mary
+        let atom1 = make_atom("parent", vec![var("X"), var("X")]);
+        let atom2 = make_atom("parent", vec![atom("john"), atom("mary")]);
+
+        assert!(!unify_atoms(&atom1, &atom2, &mut subst));
+    }
+
+    #[test]
+    fn test_unify_atoms_same_variable_consistent() {
+        let mut subst = Substitution::new();
+        // parent(X, X) with parent(john, john) should succeed
+        let atom1 = make_atom("parent", vec![var("X"), var("X")]);
+        let atom2 = make_atom("parent", vec![atom("john"), atom("john")]);
+
+        assert!(unify_atoms(&atom1, &atom2, &mut subst));
+        assert_eq!(subst.apply(&var("X")), atom("john"));
+    }
+
+    // ===== Edge Cases =====
+
+    #[test]
+    fn test_unify_empty_compound() {
+        let mut subst = Substitution::new();
+        let t1 = compound("empty", vec![]);
+        let t2 = compound("empty", vec![]);
+        assert!(unify(&t1, &t2, &mut subst));
+    }
+
+    #[test]
+    fn test_unify_compound_with_constant_fails() {
+        let mut subst = Substitution::new();
+        let t1 = compound("f", vec![atom("a")]);
+        let t2 = atom("a");
+        assert!(!unify(&t1, &t2, &mut subst));
+    }
+
+    #[test]
+    fn test_unify_integer_with_float_fails() {
+        let mut subst = Substitution::new();
+        // Integer 42 != Float 42.0 in strict typing
+        assert!(!unify(&int(42), &float(42.0), &mut subst));
     }
 }

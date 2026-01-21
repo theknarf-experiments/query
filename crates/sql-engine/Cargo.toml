@@ -8,8 +8,7 @@ sql-parser = { workspace = true }
 sql-planner = { workspace = true }
 logical = { workspace = true }
 
-# Datalog support
-datalog-parser = { path = "../datalog-parser" }
+# Datalog support (planner re-exports parser types)
 datalog-planner = { path = "../datalog-planner" }
 datalog-eval = { path = "../datalog-eval" }
 internment = "0.8"

@@ -20,7 +20,10 @@
 //! ```
 
 use datalog_eval::{evaluate, satisfy_body, EvaluationError};
-use datalog_parser::{Constraint, Literal, Query, Rule, SrcId, Symbol, Term, Value as DValue};
+use datalog_planner::{
+    parse_program, Constraint, Literal, Query, Rule, SrcId, Statement, Symbol, Term,
+    Value as DValue,
+};
 use logical::DatalogContext;
 use logical::{PredicateSchema, StorageEngine, Value as SValue};
 
@@ -138,7 +141,7 @@ pub fn execute_datalog_program<S: StorageEngine>(
 
     // Parse the Datalog program
     let src = SrcId::repl();
-    let program = datalog_parser::parse_program(program_text, src)
+    let program = parse_program(program_text, src)
         .map_err(|errors| DatalogError::ParseError(format!("{:?}", errors)))?;
 
     // Separate statements into facts, rules, constraints, and queries
@@ -149,16 +152,16 @@ pub fn execute_datalog_program<S: StorageEngine>(
 
     for stmt in program.statements {
         match stmt {
-            datalog_parser::Statement::Fact(fact) => {
+            Statement::Fact(fact) => {
                 let _ = db.insert(fact.atom, storage, &runtime);
             }
-            datalog_parser::Statement::Rule(rule) => {
+            Statement::Rule(rule) => {
                 rules.push(rule);
             }
-            datalog_parser::Statement::Constraint(constraint) => {
+            Statement::Constraint(constraint) => {
                 constraints.push(constraint);
             }
-            datalog_parser::Statement::Query(query) => {
+            Statement::Query(query) => {
                 queries.push(query);
             }
         }

@@ -1,9 +1,10 @@
 pub mod safety;
 pub mod stratification;
 
-// Re-export parser types needed by datalog-eval
+// Re-export parser types needed by downstream crates (datalog-eval, sql-engine)
 pub use datalog_parser::{
-    Atom, ComparisonOp, Constraint, Literal, Query, Rule, Symbol, Term, Value,
+    parse_program, Atom, ComparisonOp, Constraint, Literal, Query, Rule, SrcId, Statement, Symbol,
+    Term, Value,
 };
 
 // Re-export safety

@@ -6,10 +6,12 @@
 //! - Row modification, skip, and abort
 //! - Triggers with Datalog operations
 
-use db::{Engine, ExecError, QueryResult, SqlRuntime};
-use logical::{
-    insert, update, FunctionDef, MemoryEngine, Runtime, RuntimeError, StorageEngine,
-    TriggerContext, TriggerDef, TriggerEvent, TriggerResult, TriggerTiming, Value,
+use db::{
+    logical::{
+        insert, update, FunctionDef, MemoryEngine, Runtime, RuntimeError, StorageEngine,
+        TriggerContext, TriggerDef, TriggerEvent, TriggerResult, TriggerTiming, Value,
+    },
+    Engine, ExecError, QueryResult, SqlRuntime,
 };
 
 // ============================================================================
@@ -162,7 +164,7 @@ impl<S: StorageEngine> Runtime<S> for TrackingRuntime {
 
 #[test]
 fn test_triggers_with_logical_layer() {
-    use logical::{ColumnSchema, DataType, TableSchema};
+    use db::logical::{ColumnSchema, DataType, TableSchema};
 
     let mut storage = MemoryEngine::new();
 
@@ -226,7 +228,7 @@ fn test_triggers_with_logical_layer() {
 
 #[test]
 fn test_sql_runtime_with_datalog_operations() {
-    use logical::{ColumnSchema, DataType, TableSchema};
+    use db::logical::{ColumnSchema, DataType, TableSchema};
 
     let mut storage = MemoryEngine::new();
 
@@ -308,7 +310,7 @@ fn test_sql_runtime_with_datalog_operations() {
 
 #[test]
 fn test_before_trigger_can_skip_update() {
-    use logical::{ColumnSchema, DataType, TableSchema};
+    use db::logical::{ColumnSchema, DataType, TableSchema};
 
     let mut storage = MemoryEngine::new();
 
@@ -540,7 +542,7 @@ fn test_after_trigger_with_datalog() {
 /// Test that an AFTER trigger can insert into another table using INSERT INTO
 #[test]
 fn test_trigger_with_insert_into_another_table() {
-    use logical::{ColumnSchema, DataType, FunctionDef, TableSchema, TriggerDef};
+    use db::logical::{ColumnSchema, DataType, FunctionDef, TableSchema, TriggerDef};
 
     let mut storage = MemoryEngine::new();
 
@@ -643,7 +645,7 @@ fn test_trigger_with_insert_into_another_table() {
 /// Test INSERT INTO with NEW.column references
 #[test]
 fn test_trigger_insert_with_new_references() {
-    use logical::{ColumnSchema, DataType, FunctionDef, TableSchema, TriggerDef};
+    use db::logical::{ColumnSchema, DataType, FunctionDef, TableSchema, TriggerDef};
 
     let mut storage = MemoryEngine::new();
 

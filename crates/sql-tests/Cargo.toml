@@ -7,8 +7,6 @@ license.workspace = true
 
 [dependencies]
 db = { path = "../db" }
-sql-parser = { workspace = true }
-logical = { workspace = true }
 
 [dev-dependencies]
 proptest.workspace = true

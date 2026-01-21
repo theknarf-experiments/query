@@ -3,8 +3,7 @@
 //! These tests generate random but valid SQL queries and verify
 //! that the database handles them correctly.
 
-use db::Engine;
-use logical::Value;
+use db::{logical::Value, Engine};
 use proptest::prelude::*;
 
 /// SQL reserved words that cannot be used as identifiers

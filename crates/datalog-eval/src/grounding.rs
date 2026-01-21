@@ -615,45 +615,6 @@ fn satisfy_body_with_delta_recursive<S: StorageEngine>(
     }
 }
 
-// ============================================================================
-// Storage-Aware Grounding Functions
-// ============================================================================
-//
-// These functions enable Datalog queries to use SQL storage indexes for efficient
-// lookups. For storage-backed predicates, they query the storage engine directly
-// instead of local facts.
-
-/// Ground a rule using storage for indexed lookups
-#[deprecated(note = "Use ground_rule() with storage parameter instead")]
-pub fn ground_rule_with_storage<S: StorageEngine>(
-    rule: &Rule,
-    db: &DatalogContext,
-    storage: &S,
-) -> Vec<Atom> {
-    ground_rule(rule, db, storage)
-}
-
-/// Find all substitutions that satisfy a conjunction of literals, using storage indexes
-#[deprecated(note = "Use satisfy_body() with storage parameter instead")]
-pub fn satisfy_body_with_storage<S: StorageEngine>(
-    body: &[Literal],
-    db: &DatalogContext,
-    storage: &S,
-) -> Vec<Substitution> {
-    satisfy_body(body, db, storage)
-}
-
-/// Ground a rule using semi-naive evaluation with storage support
-#[deprecated(note = "Use ground_rule_semi_naive() with storage parameter instead")]
-pub fn ground_rule_semi_naive_with_storage<S: StorageEngine>(
-    rule: &Rule,
-    delta: &DatalogContext,
-    full_db: &DatalogContext,
-    storage: &S,
-) -> Vec<Atom> {
-    ground_rule_semi_naive(rule, delta, full_db, storage)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

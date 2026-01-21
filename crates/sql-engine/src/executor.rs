@@ -11,14 +11,12 @@ use logical::{
 };
 
 use crate::runtime::SqlRuntime;
-use sql_parser::{
+use sql_planner::{
     AggregateFunc, AlterAction, Assignment, BinaryOp, ColumnDef, Cte, DataType, Expr,
-    ForeignKeyRef as ParserFKRef, JoinType, OrderBy, ProcedureStatement,
-    ReferentialAction as ParserRefAction, SetOperator, Statement,
-    TableConstraint as ParserTableConstraint, TriggerAction, TriggerActionType, TriggerEvent,
-    TriggerTiming, UnaryOp, WindowFunc,
+    ForeignKeyRef as PlannerFKRef, JoinType, LogicalPlan, OrderBy, ProcedureStatement,
+    ReferentialAction as PlannerRefAction, SetOperator, TableConstraint as PlannerTableConstraint,
+    TriggerAction, TriggerActionType, TriggerEvent, TriggerTiming, UnaryOp, WindowFunc,
 };
-use sql_planner::LogicalPlan;
 
 /// CTE context - stores materialized CTE results during query execution
 #[derive(Default, Clone)]
@@ -125,8 +123,8 @@ struct ViewDefinition {
 /// Stored procedure definition
 #[derive(Debug, Clone)]
 struct ProcedureDefinition {
-    params: Vec<sql_parser::ProcedureParam>,
-    body: Vec<sql_parser::ProcedureStatement>,
+    params: Vec<sql_planner::ProcedureParam>,
+    body: Vec<ProcedureStatement>,
 }
 
 /// Foreign key trigger info for creating implicit triggers
@@ -237,7 +235,7 @@ impl Engine {
 
     /// Execute a SQL string
     pub fn execute(&mut self, sql: &str) -> ExecResult {
-        let stmt = sql_parser::parse(sql)
+        let stmt = sql_planner::parse(sql)
             .map_err(|_| ExecError::InvalidExpression("Parse error".to_string()))?;
         let plan = sql_planner::plan(stmt)
             .map_err(|_| ExecError::InvalidExpression("Planning error".to_string()))?;
@@ -444,12 +442,10 @@ impl Engine {
         bindings: &HashMap<String, Value>,
     ) -> ExecResult {
         match stmt {
-            ProcedureStatement::Sql(sql_stmt) => {
-                // Substitute parameters in the statement and execute
-                let substituted = substitute_params_in_statement(sql_stmt, bindings);
-                let plan = sql_planner::plan(substituted)
-                    .map_err(|_| ExecError::InvalidExpression("Planning error".to_string()))?;
-                self.execute_plan(plan)
+            ProcedureStatement::Plan(plan) => {
+                // Substitute parameters in the plan and execute
+                let substituted = substitute_params_in_plan(plan, bindings);
+                self.execute_plan(substituted)
             }
             ProcedureStatement::Declare { .. } => {
                 // Variable declarations are no-ops at runtime (already handled via bindings)
@@ -471,7 +467,7 @@ impl Engine {
         &mut self,
         name: &str,
         columns: &[ColumnDef],
-        constraints: &[ParserTableConstraint],
+        constraints: &[PlannerTableConstraint],
     ) -> ExecResult {
         let schema = TableSchema {
             name: name.to_string(),
@@ -519,14 +515,14 @@ impl Engine {
         // Collect unique constraints (table-level)
         for constraint in constraints {
             match constraint {
-                ParserTableConstraint::PrimaryKey { columns: cols, .. } => {
+                PlannerTableConstraint::PrimaryKey { columns: cols, .. } => {
                     unique_constraints.push(UniqueConstraintInfo {
                         table: name.to_string(),
                         columns: cols.clone(),
                         is_primary_key: true,
                     });
                 }
-                ParserTableConstraint::Unique { columns: cols, .. } => {
+                PlannerTableConstraint::Unique { columns: cols, .. } => {
                     unique_constraints.push(UniqueConstraintInfo {
                         table: name.to_string(),
                         columns: cols.clone(),
@@ -1258,10 +1254,8 @@ impl Engine {
         cte: &Cte,
         ctx: &CteContext,
     ) -> Result<(Vec<String>, Vec<Vec<Value>>), ExecError> {
-        // Plan and execute the CTE query based on its type
-        let plan = self.plan_cte_query(&cte.query)?;
-
-        let result = self.execute_query_with_cte(plan, ctx)?;
+        // The CTE already has a pre-planned LogicalPlan
+        let result = self.execute_query_with_cte((*cte.plan).clone(), ctx)?;
 
         match result {
             QueryResult::Select { columns, rows } => {
@@ -1277,37 +1271,6 @@ impl Engine {
                 "CTE query must be a SELECT".to_string(),
             )),
         }
-    }
-
-    /// Plan a CTE query (handles both simple SELECT and set operations)
-    fn plan_cte_query(&self, query: &sql_parser::CteQuery) -> Result<LogicalPlan, ExecError> {
-        match query {
-            sql_parser::CteQuery::Select(select) => {
-                sql_planner::plan(Statement::Select(select.clone())).map_err(|_| {
-                    ExecError::InvalidExpression("Failed to plan CTE SELECT".to_string())
-                })
-            }
-            sql_parser::CteQuery::SetOp(set_op) => {
-                // Convert CteSetOperation to a LogicalPlan SetOperation
-                self.plan_cte_set_op(set_op)
-            }
-        }
-    }
-
-    /// Plan a CTE set operation (UNION/INTERSECT/EXCEPT within a CTE)
-    fn plan_cte_set_op(
-        &self,
-        set_op: &sql_parser::CteSetOperation,
-    ) -> Result<LogicalPlan, ExecError> {
-        let left = self.plan_cte_query(&set_op.left)?;
-        let right = self.plan_cte_query(&set_op.right)?;
-
-        Ok(LogicalPlan::SetOperation {
-            left: Box::new(left),
-            right: Box::new(right),
-            op: set_op.op.clone(),
-            all: set_op.all,
-        })
     }
 
     /// Execute a SELECT query with CTE context
@@ -2179,15 +2142,12 @@ impl Engine {
                 eval_binary_op(&l, op, &r)
             }
             Expr::Aggregate { .. } => Value::Null,
-            Expr::Subquery(select) => {
-                // Execute the subquery and return the first value
-                if let Ok(plan) = sql_planner::plan(Statement::Select(select.clone())) {
-                    // Clone self to avoid borrow issues - subqueries use same storage
-                    if let Ok(QueryResult::Select { rows, .. }) = self.execute_subquery(&plan) {
-                        if let Some(first_row) = rows.first() {
-                            if let Some(first_val) = first_row.first() {
-                                return first_val.clone();
-                            }
+            Expr::Subquery(plan) => {
+                // Execute the subquery (already planned) and return the first value
+                if let Ok(QueryResult::Select { rows, .. }) = self.execute_subquery(plan) {
+                    if let Some(first_row) = rows.first() {
+                        if let Some(first_val) = first_row.first() {
+                            return first_val.clone();
                         }
                     }
                 }
@@ -2199,22 +2159,20 @@ impl Engine {
                 negated,
             } => {
                 let val = self.eval_expr_with_subquery(expr, row, columns);
-                if let Ok(plan) = sql_planner::plan(Statement::Select(subquery.clone())) {
-                    if let Ok(QueryResult::Select { rows, .. }) = self.execute_subquery(&plan) {
-                        // Check if val is in any of the subquery result rows
-                        let found = rows
-                            .iter()
-                            .any(|r| r.first().map(|v| values_equal(v, &val)).unwrap_or(false));
-                        return Value::Bool(if *negated { !found } else { found });
-                    }
+                // Subquery is already planned
+                if let Ok(QueryResult::Select { rows, .. }) = self.execute_subquery(subquery) {
+                    // Check if val is in any of the subquery result rows
+                    let found = rows
+                        .iter()
+                        .any(|r| r.first().map(|v| values_equal(v, &val)).unwrap_or(false));
+                    return Value::Bool(if *negated { !found } else { found });
                 }
                 Value::Bool(false)
             }
-            Expr::Exists(select) => {
-                if let Ok(plan) = sql_planner::plan(Statement::Select(select.clone())) {
-                    if let Ok(QueryResult::Select { rows, .. }) = self.execute_subquery(&plan) {
-                        return Value::Bool(!rows.is_empty());
-                    }
+            Expr::Exists(plan) => {
+                // Subquery is already planned
+                if let Ok(QueryResult::Select { rows, .. }) = self.execute_subquery(plan) {
+                    return Value::Bool(!rows.is_empty());
                 }
                 Value::Bool(false)
             }
@@ -2554,7 +2512,7 @@ fn convert_data_type(dt: &DataType) -> StorageDataType {
 }
 
 /// Convert parser foreign key ref to storage format
-fn convert_fk_ref(fk: &ParserFKRef) -> ForeignKeyRef {
+fn convert_fk_ref(fk: &PlannerFKRef) -> ForeignKeyRef {
     ForeignKeyRef {
         table: fk.table.clone(),
         column: fk.column.clone(),
@@ -2564,23 +2522,23 @@ fn convert_fk_ref(fk: &ParserFKRef) -> ForeignKeyRef {
 }
 
 /// Convert parser referential action to storage format
-fn convert_ref_action(action: &ParserRefAction) -> StorageRefAction {
+fn convert_ref_action(action: &PlannerRefAction) -> StorageRefAction {
     match action {
-        ParserRefAction::NoAction => StorageRefAction::NoAction,
-        ParserRefAction::Cascade => StorageRefAction::Cascade,
-        ParserRefAction::SetNull => StorageRefAction::SetNull,
-        ParserRefAction::SetDefault => StorageRefAction::SetDefault,
-        ParserRefAction::Restrict => StorageRefAction::Restrict,
+        PlannerRefAction::NoAction => StorageRefAction::NoAction,
+        PlannerRefAction::Cascade => StorageRefAction::Cascade,
+        PlannerRefAction::SetNull => StorageRefAction::SetNull,
+        PlannerRefAction::SetDefault => StorageRefAction::SetDefault,
+        PlannerRefAction::Restrict => StorageRefAction::Restrict,
     }
 }
 
 /// Convert parser table constraint to storage format
-fn convert_table_constraint(constraint: &ParserTableConstraint) -> StorageTableConstraint {
+fn convert_table_constraint(constraint: &PlannerTableConstraint) -> StorageTableConstraint {
     match constraint {
-        ParserTableConstraint::PrimaryKey { columns, .. } => StorageTableConstraint::PrimaryKey {
+        PlannerTableConstraint::PrimaryKey { columns, .. } => StorageTableConstraint::PrimaryKey {
             columns: columns.clone(),
         },
-        ParserTableConstraint::ForeignKey {
+        PlannerTableConstraint::ForeignKey {
             columns,
             references_table,
             references_columns,
@@ -2594,10 +2552,10 @@ fn convert_table_constraint(constraint: &ParserTableConstraint) -> StorageTableC
             on_delete: convert_ref_action(on_delete),
             on_update: convert_ref_action(on_update),
         },
-        ParserTableConstraint::Unique { columns, .. } => StorageTableConstraint::Unique {
+        PlannerTableConstraint::Unique { columns, .. } => StorageTableConstraint::Unique {
             columns: columns.clone(),
         },
-        ParserTableConstraint::Check { .. } => {
+        PlannerTableConstraint::Check { .. } => {
             // CHECK constraints are not yet enforced at storage level
             // For now, we skip them (they're validated at query time)
             StorageTableConstraint::Unique {
@@ -2607,17 +2565,31 @@ fn convert_table_constraint(constraint: &ParserTableConstraint) -> StorageTableC
     }
 }
 
-/// Substitute procedure parameters in a statement
-fn substitute_params_in_statement(
-    stmt: &Statement,
-    bindings: &HashMap<String, Value>,
-) -> Statement {
-    match stmt {
-        Statement::Insert(insert) => Statement::Insert(sql_parser::InsertStatement {
-            table: insert.table.clone(),
-            columns: insert.columns.clone(),
-            values: insert
-                .values
+/// Substitute procedure parameters in a LogicalPlan
+fn substitute_params_in_plan(plan: &LogicalPlan, bindings: &HashMap<String, Value>) -> LogicalPlan {
+    match plan {
+        LogicalPlan::Scan { table } => LogicalPlan::Scan {
+            table: table.clone(),
+        },
+        LogicalPlan::Filter { input, predicate } => LogicalPlan::Filter {
+            input: Box::new(substitute_params_in_plan(input, bindings)),
+            predicate: substitute_params_in_expr(predicate, bindings),
+        },
+        LogicalPlan::Projection { input, exprs } => LogicalPlan::Projection {
+            input: Box::new(substitute_params_in_plan(input, bindings)),
+            exprs: exprs
+                .iter()
+                .map(|(e, alias)| (substitute_params_in_expr(e, bindings), alias.clone()))
+                .collect(),
+        },
+        LogicalPlan::Insert {
+            table,
+            columns,
+            values,
+        } => LogicalPlan::Insert {
+            table: table.clone(),
+            columns: columns.clone(),
+            values: values
                 .iter()
                 .map(|row| {
                     row.iter()
@@ -2625,74 +2597,35 @@ fn substitute_params_in_statement(
                         .collect()
                 })
                 .collect(),
-        }),
-        Statement::Update(update) => Statement::Update(sql_parser::UpdateStatement {
-            table: update.table.clone(),
-            assignments: update
-                .assignments
+        },
+        LogicalPlan::Update {
+            table,
+            assignments,
+            where_clause,
+        } => LogicalPlan::Update {
+            table: table.clone(),
+            assignments: assignments
                 .iter()
-                .map(|a| sql_parser::Assignment {
+                .map(|a| Assignment {
                     column: a.column.clone(),
                     value: substitute_params_in_expr(&a.value, bindings),
                 })
                 .collect(),
-            where_clause: update
-                .where_clause
+            where_clause: where_clause
                 .as_ref()
                 .map(|e| substitute_params_in_expr(e, bindings)),
-        }),
-        Statement::Delete(delete) => Statement::Delete(sql_parser::DeleteStatement {
-            table: delete.table.clone(),
-            where_clause: delete
-                .where_clause
+        },
+        LogicalPlan::Delete {
+            table,
+            where_clause,
+        } => LogicalPlan::Delete {
+            table: table.clone(),
+            where_clause: where_clause
                 .as_ref()
                 .map(|e| substitute_params_in_expr(e, bindings)),
-        }),
-        Statement::Select(select) => {
-            Statement::Select(Box::new(substitute_params_in_select(select, bindings)))
-        }
-        // Other statements don't need parameter substitution
+        },
+        // For other plan types, just clone (simplified)
         other => other.clone(),
-    }
-}
-
-/// Substitute procedure parameters in a SELECT statement
-fn substitute_params_in_select(
-    select: &sql_parser::SelectStatement,
-    bindings: &HashMap<String, Value>,
-) -> sql_parser::SelectStatement {
-    sql_parser::SelectStatement {
-        with_clause: select.with_clause.clone(),
-        distinct: select.distinct,
-        columns: select
-            .columns
-            .iter()
-            .map(|col| match col {
-                sql_parser::SelectColumn::Star => sql_parser::SelectColumn::Star,
-                sql_parser::SelectColumn::Expr { expr, alias } => sql_parser::SelectColumn::Expr {
-                    expr: substitute_params_in_expr(expr, bindings),
-                    alias: alias.clone(),
-                },
-            })
-            .collect(),
-        from: select.from.clone(),
-        joins: select.joins.clone(),
-        where_clause: select
-            .where_clause
-            .as_ref()
-            .map(|e| substitute_params_in_expr(e, bindings)),
-        group_by: select
-            .group_by
-            .iter()
-            .map(|e| substitute_params_in_expr(e, bindings))
-            .collect(),
-        having: select
-            .having
-            .as_ref()
-            .map(|e| substitute_params_in_expr(e, bindings)),
-        order_by: select.order_by.clone(),
-        limit: select.limit.clone(),
-        offset: select.offset.clone(),
     }
 }
 
@@ -2709,11 +2642,11 @@ fn substitute_params_in_expr(expr: &Expr, bindings: &HashMap<String, Value>) -> 
         }
         Expr::BinaryOp { left, op, right } => Expr::BinaryOp {
             left: Box::new(substitute_params_in_expr(left, bindings)),
-            op: op.clone(),
+            op: *op,
             right: Box::new(substitute_params_in_expr(right, bindings)),
         },
         Expr::UnaryOp { op, expr } => Expr::UnaryOp {
-            op: op.clone(),
+            op: *op,
             expr: Box::new(substitute_params_in_expr(expr, bindings)),
         },
         // For other expression types, just clone them

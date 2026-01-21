@@ -26,10 +26,10 @@
 //! // }
 //! ```
 
+use crate::ir::{BinaryOp, Expr, JoinType, SetOperator};
 use crate::LogicalPlan;
 use datalog_parser::{Atom, Literal, Program, Rule, Symbol, Term};
 use datalog_planner::{check_program_safety, stratify, SafetyError, StratificationError};
-use sql_parser::Expr;
 use std::collections::{HashMap, HashSet};
 
 /// Errors during Datalog compilation
@@ -254,7 +254,7 @@ fn compile_rules_union(rules: &[&Rule], _pred: Symbol) -> Result<LogicalPlan, Da
         result = LogicalPlan::SetOperation {
             left: Box::new(result),
             right: Box::new(plan),
-            op: sql_parser::SetOperator::Union,
+            op: SetOperator::Union,
             all: true,
         };
     }
@@ -296,7 +296,7 @@ fn compile_rule(rule: &Rule) -> Result<LogicalPlan, DatalogPlanError> {
             current = LogicalPlan::Join {
                 left: Box::new(current),
                 right: Box::new(right),
-                join_type: sql_parser::JoinType::Inner,
+                join_type: JoinType::Inner,
                 on: join_cond,
             };
         }
@@ -321,7 +321,7 @@ fn compile_rule(rule: &Rule) -> Result<LogicalPlan, DatalogPlanError> {
         plan = LogicalPlan::Join {
             left: Box::new(plan),
             right: Box::new(neg_scan),
-            join_type: sql_parser::JoinType::Left,
+            join_type: JoinType::Left,
             on: None, // Would need proper condition
         };
         // Filter where right side is NULL (anti-join semantics)
@@ -357,17 +357,17 @@ fn build_join_condition(_left: &Atom, _right: &Atom) -> Option<Expr> {
     None
 }
 
-/// Convert a Datalog comparison to SQL Expr
+/// Convert a Datalog comparison to IR Expr
 fn comparison_to_expr(comp: &datalog_parser::ComparisonLiteral) -> Expr {
     let left = term_to_expr(&comp.left);
     let right = term_to_expr(&comp.right);
     let op = match comp.op {
-        datalog_parser::ComparisonOp::Equal => sql_parser::BinaryOp::Eq,
-        datalog_parser::ComparisonOp::NotEqual => sql_parser::BinaryOp::NotEq,
-        datalog_parser::ComparisonOp::LessThan => sql_parser::BinaryOp::Lt,
-        datalog_parser::ComparisonOp::LessOrEqual => sql_parser::BinaryOp::LtEq,
-        datalog_parser::ComparisonOp::GreaterThan => sql_parser::BinaryOp::Gt,
-        datalog_parser::ComparisonOp::GreaterOrEqual => sql_parser::BinaryOp::GtEq,
+        datalog_parser::ComparisonOp::Equal => BinaryOp::Eq,
+        datalog_parser::ComparisonOp::NotEqual => BinaryOp::NotEq,
+        datalog_parser::ComparisonOp::LessThan => BinaryOp::Lt,
+        datalog_parser::ComparisonOp::LessOrEqual => BinaryOp::LtEq,
+        datalog_parser::ComparisonOp::GreaterThan => BinaryOp::Gt,
+        datalog_parser::ComparisonOp::GreaterOrEqual => BinaryOp::GtEq,
     };
     Expr::BinaryOp {
         left: Box::new(left),
@@ -376,7 +376,7 @@ fn comparison_to_expr(comp: &datalog_parser::ComparisonLiteral) -> Expr {
     }
 }
 
-/// Convert a Datalog term to SQL Expr
+/// Convert a Datalog term to IR Expr
 fn term_to_expr(term: &Term) -> Expr {
     match term {
         Term::Variable(v) => Expr::Column(v.to_string()),

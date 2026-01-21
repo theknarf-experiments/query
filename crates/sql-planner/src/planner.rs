@@ -3,11 +3,17 @@
 use sql_parser::{
     CallProcedureStatement, CreateFunctionStatement, CreateIndexStatement,
     CreateProcedureStatement, CreateTableStatement, CreateTriggerStatement, CreateViewStatement,
-    Cte, CteQuery, CteSetOperation, DeleteStatement, Expr, InsertStatement, SelectColumn,
-    SelectOrSet, SelectStatement, SetOperationStatement, SetOperator, Statement, UpdateStatement,
-    WithClause,
+    CteQuery, CteSetOperation, DeleteStatement, InsertStatement, SelectColumn, SelectOrSet,
+    SelectStatement, SetOperationStatement, Statement, UpdateStatement, WithClause,
 };
 
+use crate::convert::{
+    convert_alter_action, convert_assignment, convert_column_def, convert_cte, convert_expr,
+    convert_join_type, convert_order_by, convert_procedure_param, convert_procedure_statement,
+    convert_set_operator, convert_table_constraint, convert_trigger_action_type,
+    convert_trigger_event, convert_trigger_timing,
+};
+use crate::ir::{self, Expr, SetOperator};
 use crate::plan::LogicalPlan;
 
 /// Result type for planning operations
@@ -40,7 +46,7 @@ pub fn plan(statement: Statement) -> PlanResult {
         Statement::DropTable(name) => Ok(LogicalPlan::DropTable { name }),
         Statement::AlterTable(alter) => Ok(LogicalPlan::AlterTable {
             table: alter.table,
-            action: alter.action,
+            action: convert_alter_action(alter.action)?,
         }),
         Statement::CreateIndex(create) => plan_create_index(create),
         Statement::DropIndex(name) => Ok(LogicalPlan::DropIndex { name }),
@@ -65,7 +71,7 @@ fn plan_set_operation(set_op: SetOperationStatement) -> PlanResult {
     Ok(LogicalPlan::SetOperation {
         left: Box::new(left),
         right: Box::new(right),
-        op: set_op.op,
+        op: convert_set_operator(set_op.op),
         all: set_op.all,
     })
 }
@@ -97,24 +103,35 @@ fn wrap_with_cte(plan: LogicalPlan, with_clause: Option<WithClause>) -> PlanResu
             // Handle recursive CTEs by compiling to Recursive nodes
             compile_recursive_ctes(plan, with.ctes)
         }
-        Some(with) => Ok(LogicalPlan::WithCte {
-            ctes: with.ctes,
-            recursive: false,
-            input: Box::new(plan),
-        }),
+        Some(with) => {
+            let ctes = with
+                .ctes
+                .into_iter()
+                .map(convert_cte)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(LogicalPlan::WithCte {
+                ctes,
+                recursive: false,
+                input: Box::new(plan),
+            })
+        }
         None => Ok(plan),
     }
 }
 
 /// Compile recursive CTEs into appropriate LogicalPlan nodes
-fn compile_recursive_ctes(plan: LogicalPlan, ctes: Vec<Cte>) -> PlanResult {
+fn compile_recursive_ctes(plan: LogicalPlan, ctes: Vec<sql_parser::Cte>) -> PlanResult {
     // Find the first recursive CTE (one that references itself)
     let recursive_idx = ctes.iter().position(cte_references_self);
 
     match recursive_idx {
         Some(idx) => {
             let recursive_cte = &ctes[idx];
-            let pre_ctes: Vec<Cte> = ctes[..idx].to_vec();
+            let pre_ctes: Vec<ir::Cte> = ctes[..idx]
+                .iter()
+                .cloned()
+                .map(convert_cte)
+                .collect::<Result<Vec<_>, _>>()?;
 
             // Compile the recursive CTE into base and step plans
             let (base, step) = compile_recursive_cte_query(recursive_cte)?;
@@ -133,6 +150,10 @@ fn compile_recursive_ctes(plan: LogicalPlan, ctes: Vec<Cte>) -> PlanResult {
         }
         None => {
             // No recursive CTEs - just use regular CTE handling
+            let ctes = ctes
+                .into_iter()
+                .map(convert_cte)
+                .collect::<Result<Vec<_>, _>>()?;
             Ok(LogicalPlan::WithCte {
                 ctes,
                 recursive: true,
@@ -143,7 +164,7 @@ fn compile_recursive_ctes(plan: LogicalPlan, ctes: Vec<Cte>) -> PlanResult {
 }
 
 /// Check if a CTE references itself (is recursive)
-fn cte_references_self(cte: &Cte) -> bool {
+fn cte_references_self(cte: &sql_parser::Cte) -> bool {
     cte_query_references_table(&cte.query, &cte.name)
 }
 
@@ -194,30 +215,25 @@ fn select_references_table(query: &SelectStatement, table_name: &str) -> bool {
 }
 
 /// Check if an expression references a table (via subqueries)
-fn expr_references_table(expr: &Expr, table_name: &str) -> bool {
+fn expr_references_table(expr: &sql_parser::Expr, table_name: &str) -> bool {
     match expr {
-        Expr::Subquery(select) => select_references_table(select, table_name),
-        Expr::InSubquery { subquery, .. } => select_references_table(subquery, table_name),
-        Expr::Exists(select) => select_references_table(select, table_name),
-        Expr::BinaryOp { left, right, .. } => {
+        sql_parser::Expr::Subquery(select) => select_references_table(select, table_name),
+        sql_parser::Expr::InSubquery { subquery, .. } => {
+            select_references_table(subquery, table_name)
+        }
+        sql_parser::Expr::Exists(select) => select_references_table(select, table_name),
+        sql_parser::Expr::BinaryOp { left, right, .. } => {
             expr_references_table(left, table_name) || expr_references_table(right, table_name)
         }
-        Expr::UnaryOp { expr, .. } => expr_references_table(expr, table_name),
+        sql_parser::Expr::UnaryOp { expr, .. } => expr_references_table(expr, table_name),
         _ => false,
     }
 }
 
 /// Compile a recursive CTE query into base and step LogicalPlan nodes
-///
-/// For a proper recursive CTE like:
-///   WITH RECURSIVE x(n) AS (
-///       SELECT 1             -- base case
-///       UNION ALL
-///       SELECT n + 1 FROM x  -- recursive step
-///   )
-///
-/// This function separates the base case (non-recursive) from the step (recursive).
-fn compile_recursive_cte_query(cte: &Cte) -> Result<(LogicalPlan, LogicalPlan), PlanError> {
+fn compile_recursive_cte_query(
+    cte: &sql_parser::Cte,
+) -> Result<(LogicalPlan, LogicalPlan), PlanError> {
     let cte_name = &cte.name;
 
     match &cte.query {
@@ -236,7 +252,6 @@ fn compile_recursive_cte_query(cte: &Cte) -> Result<(LogicalPlan, LogicalPlan), 
 
             // Plan step case (union of all recursive queries)
             let step = if step_queries.is_empty() {
-                // No recursive step - this shouldn't happen for a recursive CTE
                 LogicalPlan::Scan {
                     table: "__empty__".to_string(),
                 }
@@ -247,8 +262,6 @@ fn compile_recursive_cte_query(cte: &Cte) -> Result<(LogicalPlan, LogicalPlan), 
             Ok((base, step))
         }
         CteQuery::Select(select) => {
-            // Single SELECT that references itself - this is just the step
-            // with an empty base (unusual but handle it)
             if select_references_table(select, cte_name) {
                 let step = plan_select_core((**select).clone())?;
                 Ok((
@@ -258,7 +271,6 @@ fn compile_recursive_cte_query(cte: &Cte) -> Result<(LogicalPlan, LogicalPlan), 
                     step,
                 ))
             } else {
-                // Not actually recursive
                 let base = plan_select_core((**select).clone())?;
                 Ok((
                     base,
@@ -343,7 +355,7 @@ fn plan_cte_queries(queries: &[SelectStatement]) -> PlanResult {
 }
 
 /// Plan the core of a SELECT statement (without CTE handling)
-fn plan_select_core(select: SelectStatement) -> PlanResult {
+pub fn plan_select_core(select: SelectStatement) -> PlanResult {
     // Start with a table scan (or empty if no FROM)
     let mut plan = match select.from {
         Some(table_ref) => LogicalPlan::Scan {
@@ -351,8 +363,7 @@ fn plan_select_core(select: SelectStatement) -> PlanResult {
         },
         None => {
             // SELECT without FROM - just project expressions
-            // We need to check if all columns are literals
-            let exprs = extract_select_columns(&select.columns);
+            let exprs = extract_select_columns(&select.columns)?;
             return Ok(LogicalPlan::Projection {
                 input: Box::new(LogicalPlan::Scan {
                     table: "dual".to_string(),
@@ -369,8 +380,8 @@ fn plan_select_core(select: SelectStatement) -> PlanResult {
             right: Box::new(LogicalPlan::Scan {
                 table: join.table.name,
             }),
-            join_type: join.join_type,
-            on: join.on,
+            join_type: convert_join_type(join.join_type),
+            on: join.on.map(convert_expr).transpose()?,
         };
     }
 
@@ -378,22 +389,28 @@ fn plan_select_core(select: SelectStatement) -> PlanResult {
     if let Some(predicate) = select.where_clause {
         plan = LogicalPlan::Filter {
             input: Box::new(plan),
-            predicate,
+            predicate: convert_expr(predicate)?,
         };
     }
 
     // Check if we have GROUP BY or aggregates
     let has_group_by = !select.group_by.is_empty();
-    let exprs = extract_select_columns(&select.columns);
+    let exprs = extract_select_columns(&select.columns)?;
     let has_aggregates = exprs.iter().any(|(e, _)| contains_aggregate(e));
 
     if has_group_by || has_aggregates {
         // Apply aggregation
+        let group_by = select
+            .group_by
+            .into_iter()
+            .map(convert_expr)
+            .collect::<Result<Vec<_>, _>>()?;
+        let having = select.having.map(convert_expr).transpose()?;
         plan = LogicalPlan::Aggregate {
             input: Box::new(plan),
-            group_by: select.group_by,
+            group_by,
             aggregates: exprs,
-            having: select.having,
+            having,
         };
     } else {
         // Apply projection
@@ -412,23 +429,28 @@ fn plan_select_core(select: SelectStatement) -> PlanResult {
 
     // Apply ORDER BY
     if !select.order_by.is_empty() {
+        let order_by = select
+            .order_by
+            .into_iter()
+            .map(convert_order_by)
+            .collect::<Result<Vec<_>, _>>()?;
         plan = LogicalPlan::Sort {
             input: Box::new(plan),
-            order_by: select.order_by,
+            order_by,
         };
     }
 
     // Apply LIMIT/OFFSET
     if select.limit.is_some() || select.offset.is_some() {
         let limit = match select.limit {
-            Some(Expr::Integer(n)) if n >= 0 => n as usize,
+            Some(sql_parser::Expr::Integer(n)) if n >= 0 => n as usize,
             Some(other) => {
                 return Err(PlanError::InvalidLimit(format!("{:?}", other)));
             }
             None => usize::MAX,
         };
         let offset = match select.offset {
-            Some(Expr::Integer(n)) if n >= 0 => n as usize,
+            Some(sql_parser::Expr::Integer(n)) if n >= 0 => n as usize,
             Some(other) => {
                 return Err(PlanError::InvalidOffset(format!("{:?}", other)));
             }
@@ -455,48 +477,76 @@ fn contains_aggregate(expr: &Expr) -> bool {
 }
 
 /// Extract expressions from SELECT columns
-fn extract_select_columns(columns: &[SelectColumn]) -> Vec<(Expr, Option<String>)> {
+fn extract_select_columns(
+    columns: &[SelectColumn],
+) -> Result<Vec<(Expr, Option<String>)>, PlanError> {
     columns
         .iter()
         .map(|col| match col {
-            SelectColumn::Star => (Expr::Column("*".to_string()), None),
-            SelectColumn::Expr { expr, alias } => (expr.clone(), alias.clone()),
+            SelectColumn::Star => Ok((Expr::Column("*".to_string()), None)),
+            SelectColumn::Expr { expr, alias } => Ok((convert_expr(expr.clone())?, alias.clone())),
         })
         .collect()
 }
 
 /// Plan an INSERT statement
 fn plan_insert(insert: InsertStatement) -> PlanResult {
+    let values = insert
+        .values
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(convert_expr)
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(LogicalPlan::Insert {
         table: insert.table,
         columns: insert.columns,
-        values: insert.values,
+        values,
     })
 }
 
 /// Plan a CREATE TABLE statement
 fn plan_create_table(create: CreateTableStatement) -> PlanResult {
+    let columns = create
+        .columns
+        .into_iter()
+        .map(convert_column_def)
+        .collect::<Result<Vec<_>, _>>()?;
+    let constraints = create
+        .constraints
+        .into_iter()
+        .map(convert_table_constraint)
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(LogicalPlan::CreateTable {
         name: create.name,
-        columns: create.columns,
-        constraints: create.constraints,
+        columns,
+        constraints,
     })
 }
 
 /// Plan an UPDATE statement
 fn plan_update(update: UpdateStatement) -> PlanResult {
+    let assignments = update
+        .assignments
+        .into_iter()
+        .map(convert_assignment)
+        .collect::<Result<Vec<_>, _>>()?;
+    let where_clause = update.where_clause.map(convert_expr).transpose()?;
     Ok(LogicalPlan::Update {
         table: update.table,
-        assignments: update.assignments,
-        where_clause: update.where_clause,
+        assignments,
+        where_clause,
     })
 }
 
 /// Plan a DELETE statement
 fn plan_delete(delete: DeleteStatement) -> PlanResult {
+    let where_clause = delete.where_clause.map(convert_expr).transpose()?;
     Ok(LogicalPlan::Delete {
         table: delete.table,
-        where_clause: delete.where_clause,
+        where_clause,
     })
 }
 
@@ -513,10 +563,14 @@ fn plan_create_function(create: CreateFunctionStatement) -> PlanResult {
 fn plan_create_trigger(create: CreateTriggerStatement) -> PlanResult {
     Ok(LogicalPlan::CreateTrigger {
         name: create.name,
-        timing: create.timing,
-        events: create.events,
+        timing: convert_trigger_timing(create.timing),
+        events: create
+            .events
+            .into_iter()
+            .map(convert_trigger_event)
+            .collect(),
         table: create.table,
-        action: create.action,
+        action: convert_trigger_action_type(create.action)?,
     })
 }
 
@@ -531,7 +585,6 @@ fn plan_create_index(create: CreateIndexStatement) -> PlanResult {
 
 /// Plan a CREATE VIEW statement
 fn plan_create_view(create: CreateViewStatement) -> PlanResult {
-    // Plan the view query
     let query_plan = plan_select_core(*create.query)?;
     Ok(LogicalPlan::CreateView {
         name: create.name,
@@ -542,24 +595,40 @@ fn plan_create_view(create: CreateViewStatement) -> PlanResult {
 
 /// Plan a CREATE PROCEDURE statement
 fn plan_create_procedure(create: CreateProcedureStatement) -> PlanResult {
+    let params = create
+        .params
+        .into_iter()
+        .map(convert_procedure_param)
+        .collect();
+    let body = create
+        .body
+        .into_iter()
+        .map(convert_procedure_statement)
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(LogicalPlan::CreateProcedure {
         name: create.name,
-        params: create.params,
-        body: create.body,
+        params,
+        body,
     })
 }
 
 /// Plan a CALL procedure statement
 fn plan_call_procedure(call: CallProcedureStatement) -> PlanResult {
+    let args = call
+        .args
+        .into_iter()
+        .map(convert_expr)
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(LogicalPlan::CallProcedure {
         name: call.name,
-        args: call.args,
+        args,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::{Expr, JoinType};
     use sql_parser::parse;
 
     fn plan_sql(sql: &str) -> PlanResult {
@@ -572,7 +641,6 @@ mod tests {
         let result = plan_sql("SELECT * FROM users");
         assert!(result.is_ok());
         let plan = result.unwrap();
-        // Should be Projection -> Scan
         match plan {
             LogicalPlan::Projection { input, exprs } => {
                 assert_eq!(exprs.len(), 1);
@@ -588,7 +656,6 @@ mod tests {
         let result = plan_sql("SELECT id FROM users WHERE id = 1");
         assert!(result.is_ok());
         let plan = result.unwrap();
-        // Should be Projection -> Filter -> Scan
         match plan {
             LogicalPlan::Projection { input, .. } => match *input {
                 LogicalPlan::Filter { input, .. } => {
@@ -605,7 +672,6 @@ mod tests {
         let result = plan_sql("SELECT id FROM users ORDER BY id DESC");
         assert!(result.is_ok());
         let plan = result.unwrap();
-        // Should be Sort -> Projection -> Scan
         match plan {
             LogicalPlan::Sort { input, order_by } => {
                 assert_eq!(order_by.len(), 1);
@@ -621,7 +687,6 @@ mod tests {
         let result = plan_sql("SELECT id FROM users LIMIT 10 OFFSET 5");
         assert!(result.is_ok());
         let plan = result.unwrap();
-        // Should be Limit -> Projection -> Scan
         match plan {
             LogicalPlan::Limit {
                 input,
@@ -680,7 +745,6 @@ mod tests {
         let result = plan_sql("SELECT id, name FROM users WHERE id > 10 ORDER BY name LIMIT 20");
         assert!(result.is_ok());
         let plan = result.unwrap();
-        // Should be Limit -> Sort -> Projection -> Filter -> Scan
         match plan {
             LogicalPlan::Limit { input, limit, .. } => {
                 assert_eq!(limit, 20);
@@ -746,7 +810,6 @@ mod tests {
         let result = plan_sql("SELECT * FROM users INNER JOIN orders ON users.id = orders.user_id");
         assert!(result.is_ok());
         let plan = result.unwrap();
-        // Should be Projection -> Join -> (Scan, Scan)
         match plan {
             LogicalPlan::Projection { input, .. } => match *input {
                 LogicalPlan::Join {
@@ -755,7 +818,7 @@ mod tests {
                     join_type,
                     on,
                 } => {
-                    assert_eq!(join_type, sql_parser::JoinType::Inner);
+                    assert_eq!(join_type, JoinType::Inner);
                     assert!(on.is_some());
                     assert!(matches!(*left, LogicalPlan::Scan { table } if table == "users"));
                     assert!(matches!(*right, LogicalPlan::Scan { table } if table == "orders"));
@@ -773,13 +836,10 @@ mod tests {
         );
         assert!(result.is_ok());
         let plan = result.unwrap();
-        // Should be Projection -> Join -> (Join -> (Scan, Scan), Scan)
         match plan {
             LogicalPlan::Projection { input, .. } => match *input {
                 LogicalPlan::Join { left, right, .. } => {
-                    // right should be items scan
                     assert!(matches!(*right, LogicalPlan::Scan { table } if table == "items"));
-                    // left should be another join
                     match *left {
                         LogicalPlan::Join { left, right, .. } => {
                             assert!(

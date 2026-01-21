@@ -4,7 +4,6 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-sql-parser = { workspace = true }
 sql-planner = { workspace = true }
 logical = { workspace = true }
 

@@ -22,7 +22,7 @@
 use datalog_eval::{evaluate, satisfy_body, DatalogContext, EvaluationError, PredicateSchema};
 use datalog_planner::{
     parse_program, plan_program, AstAtom, AstTerm, AstValue, Atom, Literal, PlanError,
-    PlannedProgram, Query, Rule, SrcId, Statement, Symbol, Term, Value as DValue,
+    PlannedProgram, Query, SrcId, Statement, Symbol, Term, Value as DValue,
 };
 use logical::{StorageEngine, Value as SValue};
 
@@ -181,15 +181,8 @@ pub fn execute_datalog_program<S: StorageEngine>(
         let _ = load_table_as_facts(storage, table_name, &mut db);
     }
 
-    // Collect rules from all strata
-    let rules: Vec<Rule> = planned
-        .strata
-        .iter()
-        .flat_map(|s| s.rules.iter().cloned())
-        .collect();
-
     // Evaluate the program using storage for indexed lookups
-    let result_db = evaluate(&rules, &planned.constraints, db, storage, &runtime)?;
+    let result_db = evaluate(&planned, db, storage, &runtime)?;
 
     // If there's a query, evaluate it and return results
     if let Some(query) = planned.queries.last() {

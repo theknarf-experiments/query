@@ -8,17 +8,20 @@
 //!
 //! ```ignore
 //! use datalog_eval::evaluate;
+//! use datalog_planner::plan_program;
 //!
-//! let result = evaluate(&rules, &constraints, initial_facts)?;
+//! let program = plan_program(&ast_program)?;
+//! let result = evaluate(&program, initial_facts, &mut storage, &runtime)?;
 //! ```
 
 use crate::datalog_context::{DatalogContext, InsertError};
 use crate::{ground_rule, ground_rule_semi_naive_with_delta, satisfy_body, DeltaTracker};
 use datalog_planner::{
-    check_program_safety, stratify, Constraint, PlannedConstraint, PlannedProgram, Rule,
-    SafetyError, StratificationError,
+    check_program_safety, stratify, Constraint, PlannedConstraint, PlannedProgram, PlannedStratum,
+    Rule, SafetyError, StratificationError, Symbol,
 };
 use logical::{Runtime, StorageEngine, StorageError};
+use std::collections::HashSet;
 
 /// Errors that can occur during evaluation
 #[derive(Debug, Clone, PartialEq)]
@@ -100,20 +103,93 @@ pub struct EvaluationStats {
     pub facts_derived: usize,
 }
 
-/// Evaluate a Datalog program to fixed point.
+/// Build a PlannedProgram from rules and constraints.
 ///
-/// This is the main entry point for Datalog evaluation. It:
-/// 1. Checks that all rules are safe (variables properly bound)
-/// 2. Stratifies the program to handle negation correctly
-/// 3. Evaluates each stratum using semi-naive evaluation
-/// 4. Checks constraints after evaluation
+/// This is a convenience function for creating a PlannedProgram when you have
+/// raw rules (e.g., in tests) rather than parsing from a Datalog source file.
+/// For programs parsed from source, use `datalog_planner::plan_program` instead.
 ///
 /// # Arguments
 ///
-/// * `rules` - The Datalog rules to evaluate
-/// * `constraints` - Integrity constraints that must not be violated
+/// * `rules` - The Datalog rules
+/// * `constraints` - Integrity constraints
+///
+/// # Returns
+///
+/// A PlannedProgram with stratification computed, or an error if the program
+/// is unsafe or cannot be stratified.
+pub fn plan_rules(
+    rules: &[Rule],
+    constraints: &[Constraint],
+) -> Result<PlannedProgram, EvaluationError> {
+    // Check safety first
+    check_program_safety(rules)?;
+
+    // Stratify the program
+    let stratification = stratify(rules)?;
+
+    // Convert to PlannedProgram
+    let strata = stratification
+        .rules_by_stratum
+        .into_iter()
+        .filter(|rules| !rules.is_empty())
+        .map(|stratum_rules| {
+            let predicates: Vec<Symbol> = stratum_rules
+                .iter()
+                .map(|r| r.head.predicate)
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            let is_recursive = is_stratum_recursive(&stratum_rules);
+            PlannedStratum {
+                rules: stratum_rules,
+                is_recursive,
+                predicates,
+            }
+        })
+        .collect();
+
+    Ok(PlannedProgram {
+        strata,
+        constraints: constraints
+            .iter()
+            .map(|c| PlannedConstraint {
+                body: c.body.clone(),
+            })
+            .collect(),
+        queries: vec![],
+    })
+}
+
+/// Check if a stratum contains recursive rules
+fn is_stratum_recursive(rules: &[Rule]) -> bool {
+    let head_predicates: HashSet<_> = rules.iter().map(|r| r.head.predicate).collect();
+
+    for rule in rules {
+        for lit in &rule.body {
+            if let Some(atom) = lit.atom() {
+                if head_predicates.contains(&atom.predicate) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Evaluate a Datalog program to fixed point.
+///
+/// This is the main entry point for Datalog evaluation. It takes a pre-planned
+/// program (created via `plan_program`) and evaluates it using stratified
+/// semi-naive evaluation.
+///
+/// # Arguments
+///
+/// * `program` - A planned program with stratification already computed
 /// * `initial_facts` - The initial fact database (EDB - extensional database)
 /// * `storage` - The storage engine for fact storage
+/// * `runtime` - The runtime for trigger execution
 ///
 /// # Returns
 ///
@@ -122,55 +198,13 @@ pub struct EvaluationStats {
 /// # Example
 ///
 /// ```ignore
-/// // Define rules for transitive closure
-/// // ancestor(X, Y) :- parent(X, Y).
-/// // ancestor(X, Z) :- ancestor(X, Y), parent(Y, Z).
+/// use datalog_planner::plan_program;
+/// use datalog_eval::evaluate;
 ///
-/// let result = evaluate(&rules, &[], facts, &mut storage, &runtime)?;
+/// let program = plan_program(&ast_program)?;
+/// let result = evaluate(&program, facts, &mut storage, &runtime)?;
 /// ```
 pub fn evaluate<S: StorageEngine, R: Runtime<S>>(
-    rules: &[Rule],
-    constraints: &[Constraint],
-    initial_facts: DatalogContext,
-    storage: &mut S,
-    runtime: &R,
-) -> Result<DatalogContext, EvaluationError> {
-    // Check safety first (variables in negation must appear in positive literals, etc.)
-    check_program_safety(rules)?;
-
-    // Stratify the program to handle negation correctly
-    let stratification = stratify(rules)?;
-
-    let mut db = initial_facts;
-
-    // Evaluate each stratum to fixed point before moving to the next
-    for stratum_rules in &stratification.rules_by_stratum {
-        db = semi_naive_evaluate(stratum_rules, db, storage, runtime)?;
-    }
-
-    // Check constraints after evaluation
-    check_constraints(constraints, &db, storage)?;
-
-    Ok(db)
-}
-
-/// Evaluate a pre-planned Datalog program to fixed point.
-///
-/// This is the optimized entry point that uses a PlannedProgram with
-/// pre-computed stratification. Use this when you've already planned
-/// the program (via `plan_program`) to avoid redundant analysis.
-///
-/// # Arguments
-///
-/// * `program` - A pre-planned program with stratification already computed
-/// * `initial_facts` - The initial fact database (EDB - extensional database)
-/// * `storage` - The storage engine for fact storage
-/// * `runtime` - The runtime for trigger execution
-///
-/// # Returns
-///
-/// The complete fact database including all derived facts (IDB - intensional database)
-pub fn evaluate_planned<S: StorageEngine, R: Runtime<S>>(
     program: &PlannedProgram,
     initial_facts: DatalogContext,
     storage: &mut S,
@@ -184,13 +218,32 @@ pub fn evaluate_planned<S: StorageEngine, R: Runtime<S>>(
     }
 
     // Check constraints after evaluation
-    check_constraints_planned(&program.constraints, &db, storage)?;
+    check_constraints(&program.constraints, &db, storage)?;
 
     Ok(db)
 }
 
-/// Evaluate a pre-planned program with instrumentation to collect statistics.
-pub fn evaluate_planned_instrumented<S: StorageEngine, R: Runtime<S>>(
+/// Evaluate a Datalog program with instrumentation to collect statistics.
+///
+/// This is identical to `evaluate()` but also returns `EvaluationStats`
+/// with information about iteration count, rule applications, and facts derived.
+///
+/// Useful for:
+/// - Performance testing and optimization
+/// - Verifying semi-naive efficiency vs naive evaluation
+/// - Understanding evaluation behavior on complex programs
+///
+/// # Example
+///
+/// ```ignore
+/// use datalog_planner::plan_program;
+/// use datalog_eval::evaluate_instrumented;
+///
+/// let program = plan_program(&ast_program)?;
+/// let (result, stats) = evaluate_instrumented(&program, facts, &mut storage, &runtime)?;
+/// println!("Iterations: {}, Facts derived: {}", stats.iterations, stats.facts_derived);
+/// ```
+pub fn evaluate_instrumented<S: StorageEngine, R: Runtime<S>>(
     program: &PlannedProgram,
     initial_facts: DatalogContext,
     storage: &mut S,
@@ -212,57 +265,7 @@ pub fn evaluate_planned_instrumented<S: StorageEngine, R: Runtime<S>>(
     }
 
     // Check constraints after evaluation
-    check_constraints_planned(&program.constraints, &db, storage)?;
-
-    Ok((db, total_stats))
-}
-
-/// Evaluate a Datalog program with instrumentation to collect statistics.
-///
-/// This is identical to `evaluate()` but also returns `EvaluationStats`
-/// with information about iteration count, rule applications, and facts derived.
-///
-/// Useful for:
-/// - Performance testing and optimization
-/// - Verifying semi-naive efficiency vs naive evaluation
-/// - Understanding evaluation behavior on complex programs
-///
-/// # Example
-///
-/// ```ignore
-/// let (result, stats) = evaluate_instrumented(&rules, &[], facts, &mut storage, &runtime)?;
-/// println!("Iterations: {}, Facts derived: {}", stats.iterations, stats.facts_derived);
-/// ```
-pub fn evaluate_instrumented<S: StorageEngine, R: Runtime<S>>(
-    rules: &[Rule],
-    constraints: &[Constraint],
-    initial_facts: DatalogContext,
-    storage: &mut S,
-    runtime: &R,
-) -> Result<(DatalogContext, EvaluationStats), EvaluationError> {
-    // Check safety first
-    check_program_safety(rules)?;
-
-    // Stratify the program
-    let stratification = stratify(rules)?;
-
-    let mut db = initial_facts;
-    let mut total_stats = EvaluationStats::default();
-
-    // Evaluate each stratum to fixed point
-    for stratum_rules in &stratification.rules_by_stratum {
-        let (new_db, stratum_stats) =
-            semi_naive_evaluate_instrumented(stratum_rules, db, storage, runtime)?;
-        db = new_db;
-
-        // Accumulate stats from each stratum
-        total_stats.iterations += stratum_stats.iterations;
-        total_stats.rule_applications += stratum_stats.rule_applications;
-        total_stats.facts_derived += stratum_stats.facts_derived;
-    }
-
-    // Check constraints after evaluation
-    check_constraints(constraints, &db, storage)?;
+    check_constraints(&program.constraints, &db, storage)?;
 
     Ok((db, total_stats))
 }
@@ -272,28 +275,7 @@ pub fn evaluate_instrumented<S: StorageEngine, R: Runtime<S>>(
 /// A constraint is violated if its body can be satisfied (i.e., there exist
 /// substitutions that make all literals in the body true).
 pub fn check_constraints<S: StorageEngine>(
-    constraints: &[Constraint],
-    db: &DatalogContext,
-    storage: &S,
-) -> Result<(), EvaluationError> {
-    for constraint in constraints {
-        let violations = satisfy_body(&constraint.body, db, storage);
-
-        if !violations.is_empty() {
-            return Err(EvaluationError::ConstraintViolation {
-                constraint: format!("{:?}", constraint.body),
-                violation_count: violations.len(),
-            });
-        }
-    }
-    Ok(())
-}
-
-/// Check planned constraints against the database.
-///
-/// Same as `check_constraints` but takes PlannedConstraint from a PlannedProgram.
-pub fn check_constraints_planned<S: StorageEngine>(
-    constraints: &[PlannedConstraint],
+    constraints: &[datalog_planner::PlannedConstraint],
     db: &DatalogContext,
     storage: &S,
 ) -> Result<(), EvaluationError> {
@@ -495,20 +477,6 @@ pub fn naive_evaluate_instrumented<S: StorageEngine, R: Runtime<S>>(
     Ok((db, stats))
 }
 
-/// Evaluate a Datalog program using storage for indexed lookups.
-///
-/// Deprecated: Use `evaluate()` with storage parameter instead.
-#[deprecated(note = "Use evaluate() with storage parameter instead")]
-pub fn evaluate_with_storage<S: StorageEngine, R: Runtime<S>>(
-    rules: &[Rule],
-    constraints: &[Constraint],
-    initial_facts: DatalogContext,
-    storage: &mut S,
-    runtime: &R,
-) -> Result<DatalogContext, EvaluationError> {
-    evaluate(rules, constraints, initial_facts, storage, runtime)
-}
-
 #[cfg(test)]
 #[allow(clippy::approx_constant)]
 mod tests {
@@ -516,6 +484,30 @@ mod tests {
     use datalog_planner::{Atom, Literal, Symbol, Term, Value};
     use logical::NoOpRuntime;
     use storage::MemoryEngine;
+
+    /// Helper for tests: plan rules and evaluate in one call (mirrors old evaluate API)
+    fn evaluate_test<S: StorageEngine, R: Runtime<S>>(
+        rules: &[Rule],
+        constraints: &[Constraint],
+        initial_facts: DatalogContext,
+        storage: &mut S,
+        runtime: &R,
+    ) -> Result<DatalogContext, EvaluationError> {
+        let program = plan_rules(rules, constraints)?;
+        evaluate(&program, initial_facts, storage, runtime)
+    }
+
+    /// Helper for tests: plan rules and evaluate with instrumentation
+    fn evaluate_instrumented_test<S: StorageEngine, R: Runtime<S>>(
+        rules: &[Rule],
+        constraints: &[Constraint],
+        initial_facts: DatalogContext,
+        storage: &mut S,
+        runtime: &R,
+    ) -> Result<(DatalogContext, EvaluationStats), EvaluationError> {
+        let program = plan_rules(rules, constraints)?;
+        evaluate_instrumented(&program, initial_facts, storage, runtime)
+    }
 
     fn sym(s: &str) -> Symbol {
         Symbol::new(s.to_string())
@@ -564,7 +556,7 @@ mod tests {
             ))],
         }];
 
-        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
+        let result = evaluate_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should have derived 2 ancestor facts
         // predicate_count() returns count of distinct predicates, not total facts
@@ -614,7 +606,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
+        let result = evaluate_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should have 2 predicates: parent + ancestor
         assert_eq!(result.predicate_count(), 2);
@@ -654,7 +646,7 @@ mod tests {
             ],
         }];
 
-        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
+        let result = evaluate_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should have 3 predicates: person, parent, childless
         assert_eq!(result.predicate_count(), 3);
@@ -680,7 +672,7 @@ mod tests {
             ))],
         }];
 
-        let result = evaluate(&[], &constraints, db, &mut storage, &runtime);
+        let result = evaluate_test(&[], &constraints, db, &mut storage, &runtime);
 
         assert!(matches!(
             result,
@@ -712,7 +704,7 @@ mod tests {
 
         let mut storage = MemoryEngine::new();
         let runtime = NoOpRuntime;
-        let result = evaluate(&rules, &[], DatalogContext::new(), &mut storage, &runtime);
+        let result = evaluate_test(&rules, &[], DatalogContext::new(), &mut storage, &runtime);
 
         assert!(matches!(result, Err(EvaluationError::Stratification(_))));
     }
@@ -745,7 +737,7 @@ mod tests {
         }];
 
         let (result, stats) =
-            evaluate_instrumented(&rules, &[], db, &mut storage, &runtime).unwrap();
+            evaluate_instrumented_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         assert_eq!(result.predicate_count(), 2); // parent + ancestor
         assert_eq!(stats.facts_derived, 2); // 2 ancestor facts derived
@@ -801,7 +793,7 @@ mod tests {
         ];
 
         let (result, stats) =
-            evaluate_instrumented(&rules, &[], db, &mut storage, &runtime).unwrap();
+            evaluate_instrumented_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         assert_eq!(result.predicate_count(), 2);
         // ancestor facts: (a,b), (b,c), (c,d), (a,c), (b,d), (a,d) = 6
@@ -822,7 +814,7 @@ mod tests {
 
         let runtime = NoOpRuntime;
 
-        let (_, stats) = evaluate_instrumented(&[], &[], db, &mut storage, &runtime).unwrap();
+        let (_, stats) = evaluate_instrumented_test(&[], &[], db, &mut storage, &runtime).unwrap();
 
         assert_eq!(stats.facts_derived, 0);
         assert_eq!(stats.rule_applications, 0);
@@ -868,7 +860,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
+        let result = evaluate_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // p(a) should be derived in stratum 0
         assert!(result.contains(&make_atom("p", vec![atom_term("a")]), &storage));
@@ -940,7 +932,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
+        let result = evaluate_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // b and c are included (not excluded)
         assert!(result.contains(&make_atom("included", vec![atom_term("b")]), &storage));
@@ -1026,7 +1018,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
+        let result = evaluate_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should reach d from a (via b->c->d)
         assert!(result.contains(
@@ -1111,7 +1103,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
+        let result = evaluate_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // All states are reachable
         assert!(result.contains(&make_atom("reachable", vec![atom_term("start")]), &storage));
@@ -1172,7 +1164,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
+        let result = evaluate_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should be able to reach from n0 to n100
         assert!(result.contains(
@@ -1227,7 +1219,7 @@ mod tests {
             },
         ];
 
-        let (result, stats) = evaluate_instrumented(&rules, &[], db, &mut storage, &runtime)
+        let (result, stats) = evaluate_instrumented_test(&rules, &[], db, &mut storage, &runtime)
             .expect("evaluation should succeed");
 
         // Check that semi-naive is efficient
@@ -1277,7 +1269,7 @@ mod tests {
             ))],
         }];
 
-        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
+        let result = evaluate_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // All targets should be reachable
         for i in 0..100 {
@@ -1336,7 +1328,7 @@ mod tests {
             },
         ];
 
-        let (result, stats) = evaluate_instrumented(&rules, &[], db, &mut storage, &runtime)
+        let (result, stats) = evaluate_instrumented_test(&rules, &[], db, &mut storage, &runtime)
             .expect("evaluation should succeed");
 
         // Each level should have all 20 entities
@@ -1512,7 +1504,7 @@ mod tests {
             .unwrap();
 
         let result_naive = naive_evaluate(&rules, db_naive, &mut storage_naive, &runtime).unwrap();
-        let result_semi = evaluate(&rules, &[], db_semi, &mut storage_semi, &runtime).unwrap();
+        let result_semi = evaluate_test(&rules, &[], db_semi, &mut storage_semi, &runtime).unwrap();
 
         // Both should derive the same paths
         assert_eq!(
@@ -1596,7 +1588,7 @@ mod tests {
         let (_, naive_stats) =
             naive_evaluate_instrumented(&rules, db_naive, &mut storage_naive, &runtime).unwrap();
         let (_, semi_stats) =
-            evaluate_instrumented(&rules, &[], db_semi, &mut storage_semi, &runtime).unwrap();
+            evaluate_instrumented_test(&rules, &[], db_semi, &mut storage_semi, &runtime).unwrap();
 
         println!(
             "Naive: {} iterations, {} rule apps, {} facts",
@@ -1648,7 +1640,7 @@ mod tests {
         .unwrap();
 
         // Query should return the compound term
-        let result = evaluate(&[], &[], db, &mut storage, &runtime).unwrap();
+        let result = evaluate_test(&[], &[], db, &mut storage, &runtime).unwrap();
         assert!(result.contains(&make_atom("data", vec![compound]), &storage));
     }
 
@@ -1674,7 +1666,7 @@ mod tests {
             body: vec![Literal::Positive(make_atom("value", vec![var_term("X")]))],
         }];
 
-        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
+        let result = evaluate_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should derive: wrapped(wrap(foo))
         let expected = compound_term("wrap", vec![atom_term("foo")]);
@@ -1721,7 +1713,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
+        let result = evaluate_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should derive:
         // level0(a)
@@ -1779,7 +1771,7 @@ mod tests {
             ))],
         }];
 
-        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
+        let result = evaluate_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should derive first(a) and first(c)
         assert!(result.contains(&make_atom("first", vec![atom_term("a")]), &storage));
@@ -1811,7 +1803,7 @@ mod tests {
             ],
         }];
 
-        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
+        let result = evaluate_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         let expected = compound_term("pair", vec![atom_term("a"), atom_term("b")]);
         assert!(result.contains(&make_atom("combined", vec![expected]), &storage));
@@ -1847,7 +1839,7 @@ mod tests {
 
         let rules = vec![]; // No rules!
 
-        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
+        let result = evaluate_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Database should remain unchanged - only original facts
         assert!(result.contains(&make_atom("fact1", vec![atom_term("a")]), &storage));
@@ -1954,7 +1946,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
+        let result = evaluate_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should work fine, duplicate derivations get deduplicated
         assert!(result.contains(
@@ -2029,7 +2021,7 @@ mod tests {
             ],
         }];
 
-        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
+        let result = evaluate_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should find: john is grandparent of sue
         assert!(result.contains(
@@ -2154,7 +2146,7 @@ mod tests {
             ))],
         }];
 
-        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
+        let result = evaluate_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Verify compound term matching worked
         assert!(result.contains(
@@ -2208,7 +2200,7 @@ mod tests {
             ))],
         }];
 
-        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
+        let result = evaluate_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Only alice should be alive
         assert!(result.contains(
@@ -2249,7 +2241,7 @@ mod tests {
         }];
 
         // Should pass - no unsafe facts
-        let result = evaluate(&[], &constraints, db, &mut storage, &runtime);
+        let result = evaluate_test(&[], &constraints, db, &mut storage, &runtime);
         assert!(result.is_ok());
     }
 
@@ -2284,7 +2276,7 @@ mod tests {
             body: vec![Literal::Positive(make_atom("unsafe", vec![var_term("X")]))],
         }];
 
-        let result = evaluate(&[], &constraints, db, &mut storage, &runtime);
+        let result = evaluate_test(&[], &constraints, db, &mut storage, &runtime);
         assert!(result.is_err());
 
         if let Err(EvaluationError::ConstraintViolation {
@@ -2338,7 +2330,7 @@ mod tests {
             ],
         }];
 
-        let result = evaluate(&[], &constraints, db, &mut storage, &runtime);
+        let result = evaluate_test(&[], &constraints, db, &mut storage, &runtime);
         assert!(result.is_err());
     }
 
@@ -2378,7 +2370,7 @@ mod tests {
             ],
         }];
 
-        let result = evaluate(&[], &constraints, db, &mut storage, &runtime);
+        let result = evaluate_test(&[], &constraints, db, &mut storage, &runtime);
         assert!(result.is_err());
 
         if let Err(EvaluationError::ConstraintViolation {
@@ -2444,7 +2436,7 @@ mod tests {
         }];
 
         // Should fail - paths exist from blocked node 'a'
-        let result = evaluate(&rules, &constraints, db, &mut storage, &runtime);
+        let result = evaluate_test(&rules, &constraints, db, &mut storage, &runtime);
         assert!(result.is_err());
     }
 
@@ -2517,7 +2509,7 @@ mod tests {
             });
         }
 
-        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
+        let result = evaluate_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should derive level5(wrap(wrap(wrap(wrap(wrap(a))))))
         let mut expected = atom_term("a");
@@ -2577,7 +2569,7 @@ mod tests {
             ],
         }];
 
-        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
+        let result = evaluate_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // shield is safe (no dangerous(property(shield, sharp)))
         assert!(result.contains(&make_atom("safe_item", vec![atom_term("shield")]), &storage));
@@ -2652,7 +2644,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
+        let result = evaluate_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // bob is unarmed (no weapon)
         assert!(result.contains(&make_atom("unarmed", vec![atom_term("bob")]), &storage));
@@ -2729,7 +2721,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
+        let result = evaluate_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // charlie needs financial aid (no scholarship, no job)
         assert!(result.contains(
@@ -2804,7 +2796,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
+        let result = evaluate_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should derive path(a,c) by combining path(a,b) + edge(b,c)
         assert!(result.contains(
@@ -2871,7 +2863,7 @@ mod tests {
         ];
 
         let (result, stats) =
-            evaluate_instrumented(&rules, &[], db, &mut storage, &runtime).unwrap();
+            evaluate_instrumented_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should derive all ancestor relationships
         let ancestor_count = result.count_facts("ancestor", &storage);
@@ -2951,7 +2943,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
+        let result = evaluate_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Grandpa -> dad -> alice should exist in ancestor
         assert!(result.contains(
@@ -3045,7 +3037,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
+        let result = evaluate_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Bob is vulnerable (no shield)
         assert!(result.contains(&make_atom("vulnerable", vec![atom_term("bob")]), &storage));
@@ -3121,7 +3113,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate(&rules, &[], db, &mut storage, &runtime).unwrap();
+        let result = evaluate_test(&rules, &[], db, &mut storage, &runtime).unwrap();
 
         // Should derive path from node(a,1) to node(c,3)
         assert!(result.contains(

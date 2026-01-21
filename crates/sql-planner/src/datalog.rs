@@ -283,6 +283,10 @@ fn compile_rule(rule: &PlannedRule) -> Result<LogicalPlan, DatalogPlanError> {
             Literal::Positive(atom) => positive_atoms.push(atom),
             Literal::Negative(atom) => negative_atoms.push(atom),
             Literal::Comparison(comp) => comparisons.push(comp),
+            Literal::BuiltIn(_) => {
+                // Builtins are handled at Datalog evaluation time, not SQL planning
+                // They act as filters similar to comparisons
+            }
         }
     }
 

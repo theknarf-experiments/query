@@ -61,7 +61,7 @@ pub struct PlannedQuery {
     pub body: Vec<Literal>,
 }
 
-/// A literal is either a positive atom, negative atom, or comparison
+/// A literal is either a positive atom, negative atom, comparison, or builtin
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Literal {
     /// Positive atom: `parent(X, Y)`
@@ -70,6 +70,19 @@ pub enum Literal {
     Negative(Atom),
     /// Comparison: `X > 5`, `X = Y`
     Comparison(Comparison),
+    /// Built-in predicate (classified at planning time)
+    BuiltIn(BuiltIn),
+}
+
+/// Built-in predicates that can be evaluated directly without database lookup
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BuiltIn {
+    /// Arithmetic comparison: `=(X, Y)`, `<(X, 5)`, etc. (predicate syntax)
+    Comparison(ComparisonOp, Term, Term),
+    /// True (always succeeds)
+    True,
+    /// Fail (always fails)
+    Fail,
 }
 
 /// A comparison between two terms
@@ -81,7 +94,7 @@ pub struct Comparison {
 }
 
 /// Comparison operators
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ComparisonOp {
     Equal,
     NotEqual,
@@ -165,11 +178,11 @@ impl std::hash::Hash for Value {
 
 // Helper methods for Literal
 impl Literal {
-    /// Get the underlying atom from a literal (None for comparisons)
+    /// Get the underlying atom from a literal (None for comparisons/builtins)
     pub fn atom(&self) -> Option<&Atom> {
         match self {
             Literal::Positive(atom) | Literal::Negative(atom) => Some(atom),
-            Literal::Comparison(_) => None,
+            Literal::Comparison(_) | Literal::BuiltIn(_) => None,
         }
     }
 
@@ -186,6 +199,11 @@ impl Literal {
     /// Check if the literal is a comparison
     pub fn is_comparison(&self) -> bool {
         matches!(self, Literal::Comparison(_))
+    }
+
+    /// Check if the literal is a builtin
+    pub fn is_builtin(&self) -> bool {
+        matches!(self, Literal::BuiltIn(_))
     }
 }
 
@@ -281,6 +299,17 @@ impl std::fmt::Display for Literal {
             Literal::Positive(atom) => write!(f, "{}", atom),
             Literal::Negative(atom) => write!(f, "not {}", atom),
             Literal::Comparison(comp) => write!(f, "{} {} {}", comp.left, comp.op, comp.right),
+            Literal::BuiltIn(builtin) => write!(f, "{}", builtin),
+        }
+    }
+}
+
+impl std::fmt::Display for BuiltIn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BuiltIn::Comparison(op, left, right) => write!(f, "{} {} {}", left, op, right),
+            BuiltIn::True => write!(f, "true"),
+            BuiltIn::Fail => write!(f, "fail"),
         }
     }
 }

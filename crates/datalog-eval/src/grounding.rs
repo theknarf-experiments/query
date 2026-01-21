@@ -22,7 +22,7 @@
 use crate::builtins;
 use crate::datalog_context::{sql_value_to_term, DatalogContext};
 use crate::{unify_atoms, Substitution};
-use datalog_planner::{Atom, Literal, Rule, Term};
+use datalog_planner::{Atom, BuiltIn, Literal, Rule, Term};
 use logical::StorageEngine;
 use storage::Row;
 
@@ -267,6 +267,28 @@ where
 
             result
         }
+        Literal::BuiltIn(builtin) => {
+            // Pre-classified builtins act as filters - evaluate after satisfying the rest
+            let rest_substs = satisfy_body_with_selector_recursive(
+                body,
+                full_db,
+                storage,
+                delta,
+                selector,
+                index + 1,
+                current_subst,
+            );
+            let mut result = Vec::new();
+
+            for subst in rest_substs {
+                let eval_builtin = ir_builtin_to_eval_builtin(builtin, &subst);
+                if let Some(true) = builtins::eval_builtin(&eval_builtin, &subst) {
+                    result.push(subst);
+                }
+            }
+
+            result
+        }
     }
 }
 
@@ -280,6 +302,19 @@ fn comp_op_to_builtin(op: &datalog_planner::ComparisonOp) -> builtins::CompOp {
         ComparisonOp::LessOrEqual => builtins::CompOp::Lte,
         ComparisonOp::GreaterThan => builtins::CompOp::Gt,
         ComparisonOp::GreaterOrEqual => builtins::CompOp::Gte,
+    }
+}
+
+/// Convert IR BuiltIn to eval builtins::BuiltIn, applying substitution
+fn ir_builtin_to_eval_builtin(builtin: &BuiltIn, subst: &Substitution) -> builtins::BuiltIn {
+    match builtin {
+        BuiltIn::Comparison(op, left, right) => builtins::BuiltIn::Comparison(
+            comp_op_to_builtin(op),
+            subst.apply(left),
+            subst.apply(right),
+        ),
+        BuiltIn::True => builtins::BuiltIn::True,
+        BuiltIn::Fail => builtins::BuiltIn::Fail,
     }
 }
 
@@ -378,9 +413,11 @@ fn satisfy_body_mixed<S: StorageEngine>(
     satisfy_body_with_selector(body, full_db, storage, Some(delta), &|index, literal| {
         if index == delta_pos {
             match literal {
+                // Builtins (either pre-classified or detected at runtime) don't use delta
                 Literal::Positive(atom) if builtins::parse_builtin(atom).is_some() => {
                     DatabaseSelection::Full
                 }
+                Literal::BuiltIn(_) => DatabaseSelection::Full,
                 Literal::Positive(_) => DatabaseSelection::Delta,
                 Literal::Negative(_) => DatabaseSelection::Full,
                 Literal::Comparison(_) => DatabaseSelection::Full,
@@ -550,6 +587,26 @@ fn satisfy_body_with_delta_recursive<S: StorageEngine>(
                 let builtin =
                     builtins::BuiltIn::Comparison(comp_op_to_builtin(&comp.op), left, right);
                 if let Some(true) = builtins::eval_builtin(&builtin, &subst) {
+                    result.push(subst);
+                }
+            }
+            result
+        }
+        Literal::BuiltIn(builtin) => {
+            // Pre-classified builtins act as filters
+            let rest_substs = satisfy_body_with_delta_recursive(
+                body,
+                delta,
+                full_db,
+                storage,
+                delta_pos,
+                index + 1,
+                current_subst,
+            );
+            let mut result = Vec::new();
+            for subst in rest_substs {
+                let eval_builtin = ir_builtin_to_eval_builtin(builtin, &subst);
+                if let Some(true) = builtins::eval_builtin(&eval_builtin, &subst) {
                     result.push(subst);
                 }
             }

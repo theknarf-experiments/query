@@ -344,6 +344,16 @@ fn collect_literal_variables(lit: &Literal, vars: &mut Vec<Symbol>) {
             collect_term_variables(&comp.left, vars);
             collect_term_variables(&comp.right, vars);
         }
+        Literal::BuiltIn(builtin) => {
+            use datalog_planner::BuiltIn;
+            match builtin {
+                BuiltIn::Comparison(_, left, right) => {
+                    collect_term_variables(left, vars);
+                    collect_term_variables(right, vars);
+                }
+                BuiltIn::True | BuiltIn::Fail => {}
+            }
+        }
     }
 }
 

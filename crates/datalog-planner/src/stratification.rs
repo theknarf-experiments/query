@@ -130,8 +130,8 @@ fn build_dependency_graph(rules: &[PlannedRule]) -> DependencyGraph {
                 Literal::Negative(atom) => {
                     graph.add_dependency(head_pred, atom.predicate, DependencyType::Negative);
                 }
-                Literal::Comparison(_) => {
-                    // Comparisons don't create predicate dependencies
+                Literal::Comparison(_) | Literal::BuiltIn(_) => {
+                    // Comparisons and builtins don't create predicate dependencies
                 }
             }
         }

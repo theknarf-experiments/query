@@ -15,7 +15,8 @@
 use crate::datalog_context::{DatalogContext, InsertError};
 use crate::{ground_rule, ground_rule_semi_naive_with_delta, satisfy_body, DeltaTracker};
 use datalog_planner::{
-    check_program_safety, stratify, Constraint, Rule, SafetyError, StratificationError,
+    check_program_safety, stratify, Constraint, PlannedConstraint, PlannedProgram, Rule,
+    SafetyError, StratificationError,
 };
 use logical::{Runtime, StorageEngine, StorageError};
 
@@ -153,6 +154,69 @@ pub fn evaluate<S: StorageEngine, R: Runtime<S>>(
     Ok(db)
 }
 
+/// Evaluate a pre-planned Datalog program to fixed point.
+///
+/// This is the optimized entry point that uses a PlannedProgram with
+/// pre-computed stratification. Use this when you've already planned
+/// the program (via `plan_program`) to avoid redundant analysis.
+///
+/// # Arguments
+///
+/// * `program` - A pre-planned program with stratification already computed
+/// * `initial_facts` - The initial fact database (EDB - extensional database)
+/// * `storage` - The storage engine for fact storage
+/// * `runtime` - The runtime for trigger execution
+///
+/// # Returns
+///
+/// The complete fact database including all derived facts (IDB - intensional database)
+pub fn evaluate_planned<S: StorageEngine, R: Runtime<S>>(
+    program: &PlannedProgram,
+    initial_facts: DatalogContext,
+    storage: &mut S,
+    runtime: &R,
+) -> Result<DatalogContext, EvaluationError> {
+    let mut db = initial_facts;
+
+    // Evaluate each pre-computed stratum to fixed point
+    for stratum in &program.strata {
+        db = semi_naive_evaluate(&stratum.rules, db, storage, runtime)?;
+    }
+
+    // Check constraints after evaluation
+    check_constraints_planned(&program.constraints, &db, storage)?;
+
+    Ok(db)
+}
+
+/// Evaluate a pre-planned program with instrumentation to collect statistics.
+pub fn evaluate_planned_instrumented<S: StorageEngine, R: Runtime<S>>(
+    program: &PlannedProgram,
+    initial_facts: DatalogContext,
+    storage: &mut S,
+    runtime: &R,
+) -> Result<(DatalogContext, EvaluationStats), EvaluationError> {
+    let mut db = initial_facts;
+    let mut total_stats = EvaluationStats::default();
+
+    // Evaluate each pre-computed stratum to fixed point
+    for stratum in &program.strata {
+        let (new_db, stratum_stats) =
+            semi_naive_evaluate_instrumented(&stratum.rules, db, storage, runtime)?;
+        db = new_db;
+
+        // Accumulate stats from each stratum
+        total_stats.iterations += stratum_stats.iterations;
+        total_stats.rule_applications += stratum_stats.rule_applications;
+        total_stats.facts_derived += stratum_stats.facts_derived;
+    }
+
+    // Check constraints after evaluation
+    check_constraints_planned(&program.constraints, &db, storage)?;
+
+    Ok((db, total_stats))
+}
+
 /// Evaluate a Datalog program with instrumentation to collect statistics.
 ///
 /// This is identical to `evaluate()` but also returns `EvaluationStats`
@@ -209,6 +273,27 @@ pub fn evaluate_instrumented<S: StorageEngine, R: Runtime<S>>(
 /// substitutions that make all literals in the body true).
 pub fn check_constraints<S: StorageEngine>(
     constraints: &[Constraint],
+    db: &DatalogContext,
+    storage: &S,
+) -> Result<(), EvaluationError> {
+    for constraint in constraints {
+        let violations = satisfy_body(&constraint.body, db, storage);
+
+        if !violations.is_empty() {
+            return Err(EvaluationError::ConstraintViolation {
+                constraint: format!("{:?}", constraint.body),
+                violation_count: violations.len(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Check planned constraints against the database.
+///
+/// Same as `check_constraints` but takes PlannedConstraint from a PlannedProgram.
+pub fn check_constraints_planned<S: StorageEngine>(
+    constraints: &[PlannedConstraint],
     db: &DatalogContext,
     storage: &S,
 ) -> Result<(), EvaluationError> {

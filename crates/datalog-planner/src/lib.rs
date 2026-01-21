@@ -15,8 +15,8 @@ pub use convert::{plan_program, PlanError};
 // Re-export IR types for use by datalog-eval
 // These are the primary types that downstream crates should use
 pub use ir::{
-    Atom, Comparison, ComparisonOp, Literal, PlannedConstraint, PlannedProgram, PlannedQuery,
-    PlannedRule, PlannedStratum, Symbol, Term, Value,
+    Atom, BuiltIn, Comparison, ComparisonOp, Literal, PlannedConstraint, PlannedProgram,
+    PlannedQuery, PlannedRule, PlannedStratum, Symbol, Term, Value,
 };
 
 // Provide simpler aliases for common types

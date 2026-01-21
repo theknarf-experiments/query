@@ -4,8 +4,8 @@
 //! During conversion, we also perform planning tasks like stratification.
 
 use crate::ir::{
-    Atom, Comparison, ComparisonOp, Literal, PlannedConstraint, PlannedProgram, PlannedQuery,
-    PlannedRule, PlannedStratum, Symbol, Term, Value,
+    Atom, BuiltIn, Comparison, ComparisonOp, Literal, PlannedConstraint, PlannedProgram,
+    PlannedQuery, PlannedRule, PlannedStratum, Symbol, Term, Value,
 };
 use crate::safety::{check_program_safety, SafetyError};
 use crate::stratification::{stratify, StratificationError};
@@ -134,11 +134,66 @@ pub fn convert_query(query: &ast::Query) -> PlannedQuery {
 }
 
 /// Convert a parser Literal to an IR Literal
+///
+/// During conversion, we also classify builtins: atoms like `=(X, Y)`, `<(X, 5)`,
+/// `true`, and `fail` are converted to `Literal::BuiltIn` instead of `Literal::Positive`.
 pub fn convert_literal(lit: &ast::Literal) -> Literal {
     match lit {
-        ast::Literal::Positive(atom) => Literal::Positive(convert_atom(atom)),
+        ast::Literal::Positive(atom) => {
+            // Check if this positive atom is actually a builtin predicate
+            if let Some(builtin) = try_parse_builtin_atom(atom) {
+                Literal::BuiltIn(builtin)
+            } else {
+                Literal::Positive(convert_atom(atom))
+            }
+        }
         ast::Literal::Negative(atom) => Literal::Negative(convert_atom(atom)),
         ast::Literal::Comparison(comp) => Literal::Comparison(convert_comparison(comp)),
+    }
+}
+
+/// Try to parse an AST atom as a builtin predicate
+///
+/// Recognizes:
+/// - Comparison operators: `=`, `!=`, `\=`, `<`, `>`, `<=`, `=<`, `>=`
+/// - Constants: `true`, `fail`, `false`
+fn try_parse_builtin_atom(atom: &ast::Atom) -> Option<BuiltIn> {
+    let pred = atom.predicate.as_ref().as_str();
+
+    match pred {
+        "=" if atom.terms.len() == 2 => Some(BuiltIn::Comparison(
+            ComparisonOp::Equal,
+            convert_term(&atom.terms[0]),
+            convert_term(&atom.terms[1]),
+        )),
+        "!=" | "\\=" if atom.terms.len() == 2 => Some(BuiltIn::Comparison(
+            ComparisonOp::NotEqual,
+            convert_term(&atom.terms[0]),
+            convert_term(&atom.terms[1]),
+        )),
+        "<" if atom.terms.len() == 2 => Some(BuiltIn::Comparison(
+            ComparisonOp::LessThan,
+            convert_term(&atom.terms[0]),
+            convert_term(&atom.terms[1]),
+        )),
+        ">" if atom.terms.len() == 2 => Some(BuiltIn::Comparison(
+            ComparisonOp::GreaterThan,
+            convert_term(&atom.terms[0]),
+            convert_term(&atom.terms[1]),
+        )),
+        "<=" | "=<" if atom.terms.len() == 2 => Some(BuiltIn::Comparison(
+            ComparisonOp::LessOrEqual,
+            convert_term(&atom.terms[0]),
+            convert_term(&atom.terms[1]),
+        )),
+        ">=" if atom.terms.len() == 2 => Some(BuiltIn::Comparison(
+            ComparisonOp::GreaterOrEqual,
+            convert_term(&atom.terms[0]),
+            convert_term(&atom.terms[1]),
+        )),
+        "true" if atom.terms.is_empty() => Some(BuiltIn::True),
+        "fail" | "false" if atom.terms.is_empty() => Some(BuiltIn::Fail),
+        _ => None,
     }
 }
 

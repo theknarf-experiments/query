@@ -23,7 +23,7 @@
 //! }
 //! ```
 
-use datalog_parser::{Literal, Rule, Symbol};
+use crate::ir::{Literal, PlannedRule, Symbol};
 use std::collections::{HashMap, HashSet};
 
 /// Result of stratification analysis
@@ -32,7 +32,7 @@ pub struct Stratification {
     /// Map from predicate name to stratum number (0 = bottom stratum)
     pub predicate_strata: HashMap<Symbol, usize>,
     /// Rules organized by stratum
-    pub rules_by_stratum: Vec<Vec<Rule>>,
+    pub rules_by_stratum: Vec<Vec<PlannedRule>>,
     /// Total number of strata
     pub num_strata: usize,
 }
@@ -116,7 +116,7 @@ impl DependencyGraph {
 }
 
 /// Build dependency graph from rules
-fn build_dependency_graph(rules: &[Rule]) -> DependencyGraph {
+fn build_dependency_graph(rules: &[PlannedRule]) -> DependencyGraph {
     let mut graph = DependencyGraph::new();
 
     for rule in rules {
@@ -221,7 +221,7 @@ fn compute_strata(graph: &DependencyGraph) -> HashMap<Symbol, usize> {
 }
 
 /// Stratify a program
-pub fn stratify(rules: &[Rule]) -> Result<Stratification, StratificationError> {
+pub fn stratify(rules: &[PlannedRule]) -> Result<Stratification, StratificationError> {
     if rules.is_empty() {
         return Ok(Stratification {
             predicate_strata: HashMap::new(),
@@ -245,7 +245,7 @@ pub fn stratify(rules: &[Rule]) -> Result<Stratification, StratificationError> {
     let num_strata = predicate_strata.values().max().copied().unwrap_or(0) + 1;
 
     // Organize rules by stratum
-    let mut rules_by_stratum: Vec<Vec<Rule>> = vec![Vec::new(); num_strata];
+    let mut rules_by_stratum: Vec<Vec<PlannedRule>> = vec![Vec::new(); num_strata];
 
     for rule in rules {
         let stratum = *predicate_strata.get(&rule.head.predicate).unwrap_or(&0);
@@ -262,29 +262,29 @@ pub fn stratify(rules: &[Rule]) -> Result<Stratification, StratificationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datalog_parser::{Atom, Literal, Rule, Value};
+    use crate::ir::{Atom, Literal, PlannedRule, Term, Value};
 
     fn sym(s: &str) -> Symbol {
         Symbol::new(s.to_string())
     }
 
-    fn var_term(name: &str) -> datalog_parser::Term {
-        datalog_parser::Term::Variable(sym(name))
+    fn var_term(name: &str) -> Term {
+        Term::Variable(sym(name))
     }
 
-    fn atom_term(name: &str) -> datalog_parser::Term {
-        datalog_parser::Term::Constant(Value::Atom(sym(name)))
+    fn atom_term(name: &str) -> Term {
+        Term::Constant(Value::Atom(sym(name)))
     }
 
-    fn atom(pred: &str, terms: Vec<datalog_parser::Term>) -> Atom {
+    fn atom(pred: &str, terms: Vec<Term>) -> Atom {
         Atom {
             predicate: sym(pred),
             terms,
         }
     }
 
-    fn make_rule(head: Atom, body: Vec<Literal>) -> Rule {
-        Rule { head, body }
+    fn make_rule(head: Atom, body: Vec<Literal>) -> PlannedRule {
+        PlannedRule { head, body }
     }
 
     // ===== Basic Stratification Tests =====
@@ -509,7 +509,7 @@ mod tests {
 
     #[test]
     fn test_empty_program() {
-        let rules: Vec<Rule> = vec![];
+        let rules: Vec<PlannedRule> = vec![];
         let result = stratify(&rules).unwrap();
         assert_eq!(result.num_strata, 0);
         assert!(result.rules_by_stratum.is_empty());

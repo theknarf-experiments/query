@@ -21,7 +21,7 @@
 //! // Unsafe: bad(X) :- not good(X).  // X appears only in negation
 //! ```
 
-use datalog_parser::{Atom, Literal, Rule, Symbol, Term};
+use crate::ir::{Atom, Literal, PlannedRule, Symbol, Term};
 use std::collections::HashSet;
 
 /// Error indicating a rule is unsafe
@@ -55,7 +55,7 @@ impl std::error::Error for SafetyError {}
 /// - The head
 /// - A negated literal
 ///   also appears in at least one positive literal in the body
-pub fn check_rule_safety(rule: &Rule) -> Result<(), SafetyError> {
+pub fn check_rule_safety(rule: &PlannedRule) -> Result<(), SafetyError> {
     // Collect all variables from positive literals
     let mut positive_vars = HashSet::new();
     for literal in &rule.body {
@@ -106,7 +106,7 @@ pub fn check_rule_safety(rule: &Rule) -> Result<(), SafetyError> {
 }
 
 /// Check if all rules in a program are safe
-pub fn check_program_safety(rules: &[Rule]) -> Result<(), SafetyError> {
+pub fn check_program_safety(rules: &[PlannedRule]) -> Result<(), SafetyError> {
     for rule in rules {
         check_rule_safety(rule)?;
     }
@@ -142,14 +142,14 @@ fn collect_vars_from_term(term: &Term, vars: &mut HashSet<Symbol>) {
 }
 
 /// Format a rule as a string for error messages
-fn format_rule(rule: &Rule) -> String {
+fn format_rule(rule: &PlannedRule) -> String {
     format!("{:?}", rule.head.predicate)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datalog_parser::Value;
+    use crate::ir::Value;
     use internment::Intern;
 
     fn var(name: &str) -> Term {
@@ -167,8 +167,8 @@ mod tests {
         }
     }
 
-    fn make_rule(head: Atom, body: Vec<Literal>) -> Rule {
-        Rule { head, body }
+    fn make_rule(head: Atom, body: Vec<Literal>) -> PlannedRule {
+        PlannedRule { head, body }
     }
 
     // ===== Basic Safety Tests =====
@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn test_program_safety_empty() {
-        let rules: Vec<Rule> = vec![];
+        let rules: Vec<PlannedRule> = vec![];
         assert!(check_program_safety(&rules).is_ok());
     }
 

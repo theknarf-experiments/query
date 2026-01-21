@@ -21,8 +21,8 @@
 
 use datalog_eval::{evaluate, satisfy_body, EvaluationError};
 use datalog_planner::{
-    parse_program, Constraint, Literal, Query, Rule, SrcId, Statement, Symbol, Term,
-    Value as DValue,
+    parse_program, plan_program, AstAtom, AstTerm, AstValue, Atom, Literal, PlanError,
+    PlannedProgram, Query, Rule, SrcId, Statement, Symbol, Term, Value as DValue,
 };
 use logical::DatalogContext;
 use logical::{PredicateSchema, StorageEngine, Value as SValue};
@@ -35,6 +35,8 @@ use crate::{ExecError, QueryResult};
 pub enum DatalogError {
     /// Parse error in Datalog program
     ParseError(String),
+    /// Plan error (safety or stratification)
+    PlanError(String),
     /// Evaluation error
     EvaluationError(String),
     /// No query found in program
@@ -47,10 +49,17 @@ impl std::fmt::Display for DatalogError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DatalogError::ParseError(msg) => write!(f, "Datalog parse error: {}", msg),
+            DatalogError::PlanError(msg) => write!(f, "Datalog plan error: {}", msg),
             DatalogError::EvaluationError(msg) => write!(f, "Datalog evaluation error: {}", msg),
             DatalogError::NoQuery => write!(f, "No query found in Datalog program"),
             DatalogError::TableNotFound(name) => write!(f, "Table not found: {}", name),
         }
+    }
+}
+
+impl From<PlanError> for DatalogError {
+    fn from(err: PlanError) -> Self {
+        DatalogError::PlanError(err.to_string())
     }
 }
 
@@ -144,31 +153,27 @@ pub fn execute_datalog_program<S: StorageEngine>(
     let program = parse_program(program_text, src)
         .map_err(|errors| DatalogError::ParseError(format!("{:?}", errors)))?;
 
-    // Separate statements into facts, rules, constraints, and queries
+    // Separate statements into facts, rules, constraints, and queries (still as AST)
     let mut db = DatalogContext::new();
-    let mut rules = Vec::new();
-    let mut constraints = Vec::new();
-    let mut queries = Vec::new();
+    let mut ast_facts = Vec::new();
 
-    for stmt in program.statements {
-        match stmt {
-            Statement::Fact(fact) => {
-                let _ = db.insert(fact.atom, storage, &runtime);
-            }
-            Statement::Rule(rule) => {
-                rules.push(rule);
-            }
-            Statement::Constraint(constraint) => {
-                constraints.push(constraint);
-            }
-            Statement::Query(query) => {
-                queries.push(query);
-            }
+    for stmt in &program.statements {
+        if let Statement::Fact(fact) = stmt {
+            ast_facts.push(fact);
         }
     }
 
+    // Insert facts (convert AST atoms to IR atoms)
+    for fact in ast_facts {
+        let ir_atom = convert_ast_atom(&fact.atom);
+        let _ = db.insert(ir_atom, storage, &runtime);
+    }
+
+    // Plan the program (converts AST rules/constraints/queries to IR)
+    let planned = plan_program(&program)?;
+
     // Find all predicates used in the program
-    let predicates = collect_predicates(&rules, &constraints, &queries);
+    let predicates = collect_predicates_from_planned(&planned);
 
     // Register SQL tables as storage-backed predicates
     for pred in &predicates {
@@ -177,11 +182,18 @@ pub fn execute_datalog_program<S: StorageEngine>(
         let _ = load_table_as_facts(storage, table_name, &mut db);
     }
 
+    // Collect rules from all strata
+    let rules: Vec<Rule> = planned
+        .strata
+        .iter()
+        .flat_map(|s| s.rules.iter().cloned())
+        .collect();
+
     // Evaluate the program using storage for indexed lookups
-    let result_db = evaluate(&rules, &constraints, db, storage, &runtime)?;
+    let result_db = evaluate(&rules, &planned.constraints, db, storage, &runtime)?;
 
     // If there's a query, evaluate it and return results
-    if let Some(query) = queries.last() {
+    if let Some(query) = planned.queries.last() {
         return execute_query(&result_db, query, storage);
     }
 
@@ -189,24 +201,52 @@ pub fn execute_datalog_program<S: StorageEngine>(
     Err(DatalogError::NoQuery)
 }
 
-/// Collect all predicate names used in a program
-fn collect_predicates(
-    rules: &[Rule],
-    constraints: &[Constraint],
-    queries: &[Query],
-) -> Vec<Symbol> {
+/// Convert a parser AST Atom to an IR Atom
+fn convert_ast_atom(ast_atom: &AstAtom) -> Atom {
+    Atom {
+        predicate: ast_atom.predicate,
+        terms: ast_atom.terms.iter().map(convert_ast_term).collect(),
+    }
+}
+
+/// Convert a parser AST Term to an IR Term
+fn convert_ast_term(ast_term: &AstTerm) -> Term {
+    match ast_term {
+        AstTerm::Variable(v) => Term::Variable(*v),
+        AstTerm::Constant(c) => Term::Constant(convert_ast_value(c)),
+        AstTerm::Compound(f, args) => {
+            Term::Compound(*f, args.iter().map(convert_ast_term).collect())
+        }
+    }
+}
+
+/// Convert a parser AST Value to an IR Value
+fn convert_ast_value(ast_val: &AstValue) -> DValue {
+    match ast_val {
+        AstValue::Integer(i) => DValue::Integer(*i),
+        AstValue::Float(f) => DValue::Float(*f),
+        AstValue::Boolean(b) => DValue::Boolean(*b),
+        AstValue::String(s) => DValue::String(*s),
+        AstValue::Atom(a) => DValue::Atom(*a),
+    }
+}
+
+/// Collect all predicate names used in a planned program
+fn collect_predicates_from_planned(planned: &PlannedProgram) -> Vec<Symbol> {
     let mut predicates = Vec::new();
 
-    for rule in rules {
-        predicates.push(rule.head.predicate);
-        for lit in &rule.body {
-            if let Some(atom) = lit.atom() {
-                predicates.push(atom.predicate);
+    for stratum in &planned.strata {
+        for rule in &stratum.rules {
+            predicates.push(rule.head.predicate);
+            for lit in &rule.body {
+                if let Some(atom) = lit.atom() {
+                    predicates.push(atom.predicate);
+                }
             }
         }
     }
 
-    for constraint in constraints {
+    for constraint in &planned.constraints {
         for lit in &constraint.body {
             if let Some(atom) = lit.atom() {
                 predicates.push(atom.predicate);
@@ -214,7 +254,7 @@ fn collect_predicates(
         }
     }
 
-    for query in queries {
+    for query in &planned.queries {
         for lit in &query.body {
             if let Some(atom) = lit.atom() {
                 predicates.push(atom.predicate);

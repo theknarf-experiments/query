@@ -28,8 +28,10 @@
 
 use crate::ir::{BinaryOp, Expr, JoinType, SetOperator};
 use crate::LogicalPlan;
-use datalog_parser::{Atom, Literal, Program, Rule, Symbol, Term};
-use datalog_planner::{check_program_safety, stratify, SafetyError, StratificationError};
+use datalog_planner::{
+    plan_program, Atom, Literal, PlannedRule, SafetyError, StratificationError, Symbol, Term,
+    Value as DatalogValue,
+};
 use std::collections::{HashMap, HashSet};
 
 /// Errors during Datalog compilation
@@ -71,29 +73,31 @@ impl From<StratificationError> for DatalogPlanError {
 ///
 /// The resulting plan uses Stratify at the top level (if negation is present)
 /// and Recursive nodes for recursive predicates.
-pub fn compile_datalog(program: &Program) -> Result<LogicalPlan, DatalogPlanError> {
-    // Extract rules from the program
-    let rules: Vec<Rule> = program.rules().cloned().collect();
-
-    if rules.is_empty() && program.facts().next().is_none() {
+pub fn compile_datalog(program: &datalog_parser::Program) -> Result<LogicalPlan, DatalogPlanError> {
+    if program.rules().next().is_none() && program.facts().next().is_none() {
         return Err(DatalogPlanError::EmptyProgram);
     }
 
-    // Safety check
-    check_program_safety(&rules)?;
-
-    // Stratify the program
-    let stratification = stratify(&rules)?;
+    // Use plan_program to convert AST to IR and handle safety/stratification
+    let planned = plan_program(program).map_err(|e| match e {
+        datalog_planner::PlanError::Safety(s) => DatalogPlanError::Safety(s),
+        datalog_planner::PlanError::Stratification(s) => DatalogPlanError::Stratification(s),
+    })?;
 
     // If only one stratum and no recursion, generate simple plan
-    if stratification.num_strata <= 1 {
-        compile_stratum(&rules)
+    if planned.strata.len() <= 1 {
+        if planned.strata.is_empty() {
+            return Ok(LogicalPlan::Scan {
+                table: "__empty__".to_string(),
+            });
+        }
+        compile_stratum(&planned.strata[0].rules)
     } else {
         // Multiple strata - wrap in Stratify
         let mut strata_plans = Vec::new();
-        for stratum_rules in &stratification.rules_by_stratum {
-            if !stratum_rules.is_empty() {
-                strata_plans.push(compile_stratum(stratum_rules)?);
+        for stratum in &planned.strata {
+            if !stratum.rules.is_empty() {
+                strata_plans.push(compile_stratum(&stratum.rules)?);
             }
         }
         Ok(LogicalPlan::Stratify {
@@ -103,7 +107,7 @@ pub fn compile_datalog(program: &Program) -> Result<LogicalPlan, DatalogPlanErro
 }
 
 /// Compile a single stratum (set of rules at the same level)
-fn compile_stratum(rules: &[Rule]) -> Result<LogicalPlan, DatalogPlanError> {
+fn compile_stratum(rules: &[PlannedRule]) -> Result<LogicalPlan, DatalogPlanError> {
     if rules.is_empty() {
         // Empty stratum - return empty scan placeholder
         return Ok(LogicalPlan::Scan {
@@ -112,7 +116,7 @@ fn compile_stratum(rules: &[Rule]) -> Result<LogicalPlan, DatalogPlanError> {
     }
 
     // Group rules by head predicate
-    let mut rules_by_predicate: HashMap<Symbol, Vec<&Rule>> = HashMap::new();
+    let mut rules_by_predicate: HashMap<Symbol, Vec<&PlannedRule>> = HashMap::new();
     for rule in rules {
         rules_by_predicate
             .entry(rule.head.predicate)
@@ -145,7 +149,9 @@ fn compile_stratum(rules: &[Rule]) -> Result<LogicalPlan, DatalogPlanError> {
 }
 
 /// Find predicates that are recursive (appear in their own rule bodies)
-fn find_recursive_predicates(rules_by_predicate: &HashMap<Symbol, Vec<&Rule>>) -> HashSet<Symbol> {
+fn find_recursive_predicates(
+    rules_by_predicate: &HashMap<Symbol, Vec<&PlannedRule>>,
+) -> HashSet<Symbol> {
     let mut recursive = HashSet::new();
 
     for (pred, rules) in rules_by_predicate {
@@ -167,7 +173,7 @@ fn find_recursive_predicates(rules_by_predicate: &HashMap<Symbol, Vec<&Rule>>) -
 /// Compile a recursive predicate to a Recursive LogicalPlan node
 fn compile_recursive_predicate(
     pred: Symbol,
-    rules: &[&Rule],
+    rules: &[&PlannedRule],
 ) -> Result<LogicalPlan, DatalogPlanError> {
     // Separate base case rules (non-recursive) from recursive rules
     let mut base_rules = Vec::new();
@@ -226,13 +232,16 @@ fn compile_recursive_predicate(
 /// Compile a non-recursive predicate
 fn compile_non_recursive_predicate(
     pred: Symbol,
-    rules: &[&Rule],
+    rules: &[&PlannedRule],
 ) -> Result<LogicalPlan, DatalogPlanError> {
     compile_rules_union(rules, pred)
 }
 
 /// Compile multiple rules for the same predicate as a UNION
-fn compile_rules_union(rules: &[&Rule], _pred: Symbol) -> Result<LogicalPlan, DatalogPlanError> {
+fn compile_rules_union(
+    rules: &[&PlannedRule],
+    _pred: Symbol,
+) -> Result<LogicalPlan, DatalogPlanError> {
     if rules.is_empty() {
         return Ok(LogicalPlan::Scan {
             table: "__empty__".to_string(),
@@ -263,7 +272,7 @@ fn compile_rules_union(rules: &[&Rule], _pred: Symbol) -> Result<LogicalPlan, Da
 }
 
 /// Compile a single rule to a LogicalPlan
-fn compile_rule(rule: &Rule) -> Result<LogicalPlan, DatalogPlanError> {
+fn compile_rule(rule: &PlannedRule) -> Result<LogicalPlan, DatalogPlanError> {
     // Extract positive literals (joins) and negative literals (filters)
     let mut positive_atoms = Vec::new();
     let mut negative_atoms = Vec::new();
@@ -358,16 +367,16 @@ fn build_join_condition(_left: &Atom, _right: &Atom) -> Option<Expr> {
 }
 
 /// Convert a Datalog comparison to IR Expr
-fn comparison_to_expr(comp: &datalog_parser::ComparisonLiteral) -> Expr {
+fn comparison_to_expr(comp: &datalog_planner::Comparison) -> Expr {
     let left = term_to_expr(&comp.left);
     let right = term_to_expr(&comp.right);
     let op = match comp.op {
-        datalog_parser::ComparisonOp::Equal => BinaryOp::Eq,
-        datalog_parser::ComparisonOp::NotEqual => BinaryOp::NotEq,
-        datalog_parser::ComparisonOp::LessThan => BinaryOp::Lt,
-        datalog_parser::ComparisonOp::LessOrEqual => BinaryOp::LtEq,
-        datalog_parser::ComparisonOp::GreaterThan => BinaryOp::Gt,
-        datalog_parser::ComparisonOp::GreaterOrEqual => BinaryOp::GtEq,
+        datalog_planner::ComparisonOp::Equal => BinaryOp::Eq,
+        datalog_planner::ComparisonOp::NotEqual => BinaryOp::NotEq,
+        datalog_planner::ComparisonOp::LessThan => BinaryOp::Lt,
+        datalog_planner::ComparisonOp::LessOrEqual => BinaryOp::LtEq,
+        datalog_planner::ComparisonOp::GreaterThan => BinaryOp::Gt,
+        datalog_planner::ComparisonOp::GreaterOrEqual => BinaryOp::GtEq,
     };
     Expr::BinaryOp {
         left: Box::new(left),
@@ -381,11 +390,11 @@ fn term_to_expr(term: &Term) -> Expr {
     match term {
         Term::Variable(v) => Expr::Column(v.to_string()),
         Term::Constant(val) => match val {
-            datalog_parser::Value::Integer(i) => Expr::Integer(*i),
-            datalog_parser::Value::Float(f) => Expr::Float(*f),
-            datalog_parser::Value::Boolean(b) => Expr::Boolean(*b),
-            datalog_parser::Value::String(s) => Expr::String(s.to_string()),
-            datalog_parser::Value::Atom(a) => Expr::String(a.to_string()),
+            DatalogValue::Integer(i) => Expr::Integer(*i),
+            DatalogValue::Float(f) => Expr::Float(*f),
+            DatalogValue::Boolean(b) => Expr::Boolean(*b),
+            DatalogValue::String(s) => Expr::String(s.to_string()),
+            DatalogValue::Atom(a) => Expr::String(a.to_string()),
         },
         Term::Compound(functor, _args) => {
             // Compound terms don't have a direct SQL equivalent
@@ -398,36 +407,49 @@ fn term_to_expr(term: &Term) -> Expr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datalog_parser::Statement;
+    use datalog_parser::{
+        Atom as AstAtom, Literal as AstLiteral, Rule as AstRule, Statement, Term as AstTerm,
+    };
     use internment::Intern;
 
     fn sym(s: &str) -> Symbol {
         Intern::new(s.to_string())
     }
 
-    fn var(name: &str) -> Term {
-        Term::Variable(sym(name))
+    fn var(name: &str) -> AstTerm {
+        AstTerm::Variable(sym(name))
     }
 
-    fn make_atom(pred: &str, terms: Vec<Term>) -> Atom {
+    fn make_ast_atom(pred: &str, terms: Vec<AstTerm>) -> AstAtom {
+        AstAtom {
+            predicate: sym(pred),
+            terms,
+        }
+    }
+
+    fn make_ir_atom(pred: &str, terms: Vec<Term>) -> Atom {
         Atom {
             predicate: sym(pred),
             terms,
         }
     }
 
+    fn ir_var(name: &str) -> Term {
+        Term::Variable(sym(name))
+    }
+
     #[test]
     fn test_compile_simple_rule() {
         // ancestor(X, Y) :- parent(X, Y).
-        let rule = Rule {
-            head: make_atom("ancestor", vec![var("X"), var("Y")]),
-            body: vec![Literal::Positive(make_atom(
+        let rule = AstRule {
+            head: make_ast_atom("ancestor", vec![var("X"), var("Y")]),
+            body: vec![AstLiteral::Positive(make_ast_atom(
                 "parent",
                 vec![var("X"), var("Y")],
             ))],
         };
 
-        let program = Program {
+        let program = datalog_parser::Program {
             statements: vec![Statement::Rule(rule)],
         };
 
@@ -447,23 +469,23 @@ mod tests {
     fn test_compile_recursive_rule() {
         // ancestor(X, Y) :- parent(X, Y).
         // ancestor(X, Z) :- ancestor(X, Y), parent(Y, Z).
-        let base_rule = Rule {
-            head: make_atom("ancestor", vec![var("X"), var("Y")]),
-            body: vec![Literal::Positive(make_atom(
+        let base_rule = AstRule {
+            head: make_ast_atom("ancestor", vec![var("X"), var("Y")]),
+            body: vec![AstLiteral::Positive(make_ast_atom(
                 "parent",
                 vec![var("X"), var("Y")],
             ))],
         };
 
-        let recursive_rule = Rule {
-            head: make_atom("ancestor", vec![var("X"), var("Z")]),
+        let recursive_rule = AstRule {
+            head: make_ast_atom("ancestor", vec![var("X"), var("Z")]),
             body: vec![
-                Literal::Positive(make_atom("ancestor", vec![var("X"), var("Y")])),
-                Literal::Positive(make_atom("parent", vec![var("Y"), var("Z")])),
+                AstLiteral::Positive(make_ast_atom("ancestor", vec![var("X"), var("Y")])),
+                AstLiteral::Positive(make_ast_atom("parent", vec![var("Y"), var("Z")])),
             ],
         };
 
-        let program = Program {
+        let program = datalog_parser::Program {
             statements: vec![Statement::Rule(base_rule), Statement::Rule(recursive_rule)],
         };
 
@@ -480,11 +502,11 @@ mod tests {
 
     #[test]
     fn test_detect_recursive_predicates() {
-        let rule = Rule {
-            head: make_atom("ancestor", vec![var("X"), var("Z")]),
+        let rule = PlannedRule {
+            head: make_ir_atom("ancestor", vec![ir_var("X"), ir_var("Z")]),
             body: vec![
-                Literal::Positive(make_atom("ancestor", vec![var("X"), var("Y")])),
-                Literal::Positive(make_atom("parent", vec![var("Y"), var("Z")])),
+                Literal::Positive(make_ir_atom("ancestor", vec![ir_var("X"), ir_var("Y")])),
+                Literal::Positive(make_ir_atom("parent", vec![ir_var("Y"), ir_var("Z")])),
             ],
         };
 

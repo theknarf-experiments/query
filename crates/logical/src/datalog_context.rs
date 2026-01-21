@@ -24,7 +24,7 @@
 
 use crate::operations::{insert as insert_row, OperationError};
 use crate::runtime::Runtime;
-use datalog_parser::{Atom, Symbol, Term, Value as DatalogValue};
+use datalog_planner::{Atom, Symbol, Term, Value as DatalogValue};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
@@ -745,7 +745,7 @@ pub fn json_to_term(json: &JsonValue) -> Term {
 mod tests {
     use super::*;
     use crate::NoOpRuntime;
-    use datalog_parser::Value;
+    use datalog_planner::Value;
     use internment::Intern;
     use storage::MemoryEngine;
 

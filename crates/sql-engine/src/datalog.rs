@@ -19,13 +19,12 @@
 //! "#)?;
 //! ```
 
-use datalog_eval::{evaluate, satisfy_body, EvaluationError};
+use datalog_eval::{evaluate, satisfy_body, DatalogContext, EvaluationError, PredicateSchema};
 use datalog_planner::{
     parse_program, plan_program, AstAtom, AstTerm, AstValue, Atom, Literal, PlanError,
     PlannedProgram, Query, Rule, SrcId, Statement, Symbol, Term, Value as DValue,
 };
-use logical::DatalogContext;
-use logical::{PredicateSchema, StorageEngine, Value as SValue};
+use logical::{StorageEngine, Value as SValue};
 
 use crate::runtime::SqlRuntime;
 use crate::{ExecError, QueryResult};

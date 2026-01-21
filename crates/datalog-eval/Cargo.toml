@@ -3,9 +3,13 @@ name = "datalog-eval"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+test-utils = ["storage/test-utils"]
+
 [dependencies]
 datalog-planner = { path = "../datalog-planner" }
 logical = { path = "../logical" }
+storage = { path = "../storage" }
+internment = "0.8"
 
 [dev-dependencies]
-internment = "0.8"

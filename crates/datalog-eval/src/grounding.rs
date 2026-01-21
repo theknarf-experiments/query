@@ -20,9 +20,11 @@
 //! ```
 
 use crate::builtins;
+use crate::datalog_context::{sql_value_to_term, DatalogContext};
 use crate::{unify_atoms, Substitution};
 use datalog_planner::{Atom, Literal, Rule, Term};
-use logical::{sql_value_to_term, DatalogContext, Row, StorageEngine};
+use logical::StorageEngine;
+use storage::Row;
 
 #[cfg(test)]
 #[allow(unused_imports)]
@@ -599,7 +601,8 @@ pub fn ground_rule_semi_naive_with_storage<S: StorageEngine>(
 mod tests {
     use super::*;
     use datalog_planner::{Atom, Rule, Symbol, Value};
-    use logical::{MemoryEngine, NoOpRuntime};
+    use logical::NoOpRuntime;
+    use storage::MemoryEngine;
 
     fn sym(s: &str) -> Symbol {
         Symbol::new(s.to_string())

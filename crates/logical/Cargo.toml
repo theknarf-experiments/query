@@ -8,7 +8,5 @@ test-utils = ["storage/test-utils"]
 
 [dependencies]
 storage = { path = "../storage" }
-datalog-planner = { path = "../datalog-planner" }
 
 [dev-dependencies]
-internment = "0.8"

@@ -12,11 +12,12 @@
 //! let result = evaluate(&rules, &constraints, initial_facts)?;
 //! ```
 
+use crate::datalog_context::{DatalogContext, InsertError};
 use crate::{ground_rule, ground_rule_semi_naive_with_delta, satisfy_body, DeltaTracker};
 use datalog_planner::{
     check_program_safety, stratify, Constraint, Rule, SafetyError, StratificationError,
 };
-use logical::{DatalogContext, InsertError, Runtime, StorageEngine, StorageError};
+use logical::{Runtime, StorageEngine, StorageError};
 
 /// Errors that can occur during evaluation
 #[derive(Debug, Clone, PartialEq)]
@@ -428,7 +429,8 @@ pub fn evaluate_with_storage<S: StorageEngine, R: Runtime<S>>(
 mod tests {
     use super::*;
     use datalog_planner::{Atom, Literal, Symbol, Term, Value};
-    use logical::{MemoryEngine, NoOpRuntime};
+    use logical::NoOpRuntime;
+    use storage::MemoryEngine;
 
     fn sym(s: &str) -> Symbol {
         Symbol::new(s.to_string())

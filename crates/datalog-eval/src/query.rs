@@ -16,10 +16,11 @@
 //! // Returns: [{X -> john}, {X -> alice}]
 //! ```
 
+use crate::datalog_context::DatalogContext;
 use crate::satisfy_body;
 use crate::Substitution;
 use datalog_planner::{Query, Symbol};
-use logical::{DatalogContext, StorageEngine};
+use logical::StorageEngine;
 use std::collections::HashSet;
 
 /// Result of query evaluation - list of substitutions that satisfy the query
@@ -93,7 +94,8 @@ pub fn query_variables(query: &Query) -> HashSet<Symbol> {
 mod tests {
     use super::*;
     use datalog_planner::{Atom, Literal, Term, Value};
-    use logical::{MemoryEngine, NoOpRuntime};
+    use logical::NoOpRuntime;
+    use storage::MemoryEngine;
 
     fn sym(s: &str) -> Symbol {
         Symbol::new(s.to_string())

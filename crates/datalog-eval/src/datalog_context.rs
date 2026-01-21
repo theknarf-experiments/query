@@ -22,9 +22,9 @@
 //! let results = ctx.query(&pattern_with_variables, &storage);
 //! ```
 
-use crate::operations::{insert as insert_row, OperationError};
-use crate::runtime::Runtime;
 use datalog_planner::{Atom, Symbol, Term, Value as DatalogValue};
+use logical::operations::{insert as insert_row, OperationError};
+use logical::Runtime;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
@@ -744,9 +744,9 @@ pub fn json_to_term(json: &JsonValue) -> Term {
 #[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
-    use crate::NoOpRuntime;
     use datalog_planner::Value;
     use internment::Intern;
+    use logical::NoOpRuntime;
     use storage::MemoryEngine;
 
     #[test]

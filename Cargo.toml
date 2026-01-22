@@ -14,15 +14,15 @@ members = [
     "crates/datalog-parser",
     "crates/datalog-planner",
     "crates/datalog-eval",
-    # Top-level database crate
-    "crates/db",
+    # Top-level query engine crate
+    "crates/query",
     "crates/sql-tests",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-authors = ["SQL-RS Contributors"]
+authors = ["theknarf"]
 license = "MIT"
 
 [workspace.dependencies]
@@ -44,7 +44,7 @@ sql-planner = { path = "crates/sql-planner" }
 sql-engine = { path = "crates/sql-engine" }
 
 # Top-level crate
-db = { path = "crates/db" }
+query = { path = "crates/query" }
 
 # Datalog crates
 datalog-parser = { path = "crates/datalog-parser" }

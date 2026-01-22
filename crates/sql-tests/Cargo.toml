@@ -6,7 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-db = { path = "../db" }
+query = { path = "../query" }
 
 [dev-dependencies]
 proptest.workspace = true

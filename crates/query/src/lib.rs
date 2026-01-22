@@ -1,12 +1,20 @@
-//! Database Engine
+//! Query Engine
 //!
-//! This is the top-level crate that ties together all database components.
-//! It supports both SQL and Datalog queries against the same underlying tables.
+//! An embeddable query engine supporting both SQL and Datalog.
+//! Designed to be integrated into applications that need to provide
+//! query capabilities over their own data.
+//!
+//! # Features
+//!
+//! - **SQL support**: Full SQL query parsing and execution
+//! - **Datalog support**: Logic programming queries with recursion and negation
+//! - **Pluggable storage**: Bring your own storage backend via the `StorageEngine` trait
+//! - **In-memory engine included**: `MemoryEngine` for quick prototyping
 //!
 //! # Example
 //!
 //! ```ignore
-//! use db::Engine;
+//! use query::Engine;
 //!
 //! let mut engine = Engine::new();
 //! engine.execute("CREATE TABLE users (id INT, name TEXT)");

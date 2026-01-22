@@ -5,12 +5,12 @@
 //!
 //! Reference: ISO/IEC 9075 (SQL standard)
 
-use db::{logical::Value, Engine};
+use query::{logical::Value, Engine};
 
 /// Helper to run a query and get results
 fn query_rows(engine: &mut Engine, sql: &str) -> Vec<Vec<Value>> {
     match engine.execute(sql) {
-        Ok(db::QueryResult::Select { rows, .. }) => rows,
+        Ok(query::QueryResult::Select { rows, .. }) => rows,
         Ok(_) => vec![],
         Err(e) => panic!("Query failed: {} - Error: {:?}", sql, e),
     }

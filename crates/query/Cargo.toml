@@ -1,7 +1,8 @@
 [package]
-name = "db"
+name = "query"
 version = "0.1.0"
 edition = "2021"
+description = "An embeddable query engine supporting SQL and Datalog"
 
 [dependencies]
 # Re-export all components

@@ -1,0 +1,33 @@
+-- Example script demonstrating SQL and Datalog integration
+-- This script creates a graph with SQL and computes transitive closure with Datalog
+
+-- @sql
+
+-- Create a table representing edges in a directed graph
+CREATE TABLE edge (src INT, dst INT);
+
+-- Insert some edges: 1 -> 2 -> 3 -> 4 -> 5
+INSERT INTO edge VALUES (1, 2), (2, 3), (3, 4), (4, 5);
+
+-- Add some branches: 1 -> 6 -> 7
+INSERT INTO edge VALUES (1, 6), (6, 7);
+
+-- Verify the edges
+SELECT * FROM edge ORDER BY src, dst;
+
+-- @datalog
+
+-- Define recursive path relation (transitive closure)
+path(X, Y) :- edge(X, Y).
+path(X, Z) :- path(X, Y), edge(Y, Z).
+
+-- Query all paths starting from node 1
+?- path(1, X).
+
+-- @sql
+
+-- Query the computed paths using SQL
+SELECT * FROM path ORDER BY col0, col1;
+
+-- Find all nodes reachable from node 1
+SELECT DISTINCT col1 AS reachable_from_1 FROM path WHERE col0 = 1 ORDER BY col1;

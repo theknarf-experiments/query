@@ -16,6 +16,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 use std::io;
+use std::{env, fs, path::Path};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
@@ -69,33 +70,52 @@ impl App {
         }
     }
 
-    fn execute_query(&mut self) {
-        if self.input.trim().is_empty() {
+    fn execute_statement(&mut self, mode: Mode, query: &str) {
+        if query.trim().is_empty() {
             return;
         }
 
-        let query = self.input.clone();
-        let (result, is_error) = match self.mode {
-            Mode::Sql => match self.engine.execute(&query) {
+        let (result, is_error) = match mode {
+            Mode::Sql => match self.engine.execute(query) {
                 Ok(result) => (format_result(&result), false),
                 Err(e) => (format!("Error: {:?}", e), true),
             },
-            Mode::Datalog => match self.engine.execute_datalog(&query) {
+            Mode::Datalog => match self.engine.execute_datalog(query) {
                 Ok(result) => (format_result(&result), false),
                 Err(e) => (format!("Error: {:?}", e), true),
             },
         };
 
         self.history.push(HistoryEntry {
-            mode: self.mode,
-            query,
+            mode,
+            query: query.to_string(),
             result,
             is_error,
         });
+    }
+
+    fn execute_query(&mut self) {
+        if self.input.trim().is_empty() {
+            return;
+        }
+
+        let query = self.input.clone();
+        self.execute_statement(self.mode, &query);
 
         self.input.clear();
         self.cursor_pos = 0;
         self.scroll_offset = 0;
+    }
+
+    fn load_script(&mut self, path: &Path) -> Result<()> {
+        let content = fs::read_to_string(path)?;
+        let statements = parse_script(&content);
+
+        for (mode, statement) in statements {
+            self.execute_statement(mode, &statement);
+        }
+
+        Ok(())
     }
 
     fn insert_char(&mut self, c: char) {
@@ -219,7 +239,81 @@ fn format_result(result: &QueryResult) -> String {
     }
 }
 
+/// Parse a script file into a list of (mode, statement) pairs.
+///
+/// Script format:
+/// - Lines starting with `-- @sql` switch to SQL mode
+/// - Lines starting with `-- @datalog` switch to Datalog mode
+/// - Default is SQL mode
+/// - SQL statements are separated by semicolons
+/// - Datalog blocks continue until the next mode switch or end of file
+fn parse_script(content: &str) -> Vec<(Mode, String)> {
+    let mut statements = Vec::new();
+    let mut mode = Mode::Sql;
+    let mut current = String::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // Check for mode switches
+        if trimmed.starts_with("-- @sql") {
+            // Flush current statement
+            if !current.trim().is_empty() {
+                statements.push((mode, current.trim().to_string()));
+            }
+            current.clear();
+            mode = Mode::Sql;
+            continue;
+        } else if trimmed.starts_with("-- @datalog") {
+            // Flush current statement
+            if !current.trim().is_empty() {
+                statements.push((mode, current.trim().to_string()));
+            }
+            current.clear();
+            mode = Mode::Datalog;
+            continue;
+        }
+
+        // Skip comment-only lines (but not mode switches)
+        if trimmed.starts_with("--") {
+            continue;
+        }
+
+        match mode {
+            Mode::Sql => {
+                // SQL: split by semicolons
+                current.push_str(line);
+                current.push('\n');
+
+                // Check for statement end
+                if trimmed.ends_with(';') {
+                    let stmt = current.trim().trim_end_matches(';').trim();
+                    if !stmt.is_empty() {
+                        statements.push((mode, stmt.to_string()));
+                    }
+                    current.clear();
+                }
+            }
+            Mode::Datalog => {
+                // Datalog: accumulate until mode switch or end
+                current.push_str(line);
+                current.push('\n');
+            }
+        }
+    }
+
+    // Flush any remaining content
+    if !current.trim().is_empty() {
+        statements.push((mode, current.trim().to_string()));
+    }
+
+    statements
+}
+
 fn main() -> Result<()> {
+    let args: Vec<String> = env::args().collect();
+    let script_path = args.get(1).map(Path::new);
+
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -228,6 +322,19 @@ fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new();
+
+    // Load script if provided
+    if let Some(path) = script_path
+        && let Err(e) = app.load_script(path)
+    {
+        app.history.push(HistoryEntry {
+            mode: Mode::Sql,
+            query: format!("-- Loading script: {}", path.display()),
+            result: format!("Error loading script: {}", e),
+            is_error: true,
+        });
+    }
+
     let result = run_app(&mut terminal, &mut app);
 
     // Restore terminal
@@ -485,6 +592,10 @@ fn render_help_popup(f: &mut Frame) {
         Line::from("    Facts: predicate(arg1, arg2)."),
         Line::from("    Rules: head(X) :- body(X), other(X)."),
         Line::from("    Query: ?- predicate(X)."),
+        Line::from(""),
+        Line::from("  Script Loading:"),
+        Line::from("    query-repl script.qry"),
+        Line::from("    Use -- @sql and -- @datalog to switch modes"),
         Line::from(""),
         Line::styled(
             "  Press any key to close",

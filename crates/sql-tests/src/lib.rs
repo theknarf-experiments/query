@@ -14,4 +14,7 @@ mod proptest_queries;
 mod sql_compliance;
 
 #[cfg(test)]
+mod sql_datalog_integration;
+
+#[cfg(test)]
 mod trigger_tests;

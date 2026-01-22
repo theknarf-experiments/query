@@ -15,6 +15,6 @@ pub use engine::{
 pub use io_types::{ExportData, ImportData};
 pub use memory::MemoryEngine;
 pub use metadata::{
-    events_from_json, events_to_json, FunctionDef, TriggerDef, TriggerEvent, TriggerTiming,
+    FunctionDef, TriggerDef, TriggerEvent, TriggerTiming, events_from_json, events_to_json,
 };
 pub use value::{DateValue, JsonParseError, JsonValue, TimeValue, TimestampValue, Value};

@@ -19,10 +19,10 @@
 //! "#)?;
 //! ```
 
-use datalog_eval::{evaluate, satisfy_body, DatalogContext, EvaluationError, PredicateSchema};
+use datalog_eval::{DatalogContext, EvaluationError, PredicateSchema, evaluate, satisfy_body};
 use datalog_planner::{
-    parse_program, plan_program, AstAtom, AstTerm, AstValue, Atom, Literal, PlanError,
-    PlannedProgram, Query, SrcId, Statement, Symbol, Term, Value as DValue,
+    AstAtom, AstTerm, AstValue, Atom, Literal, PlanError, PlannedProgram, Query, SrcId, Statement,
+    Symbol, Term, Value as DValue, parse_program, plan_program,
 };
 use logical::{StorageEngine, Value as SValue};
 

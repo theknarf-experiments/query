@@ -4,7 +4,7 @@
 //! that the database handles them correctly.
 
 use proptest::prelude::*;
-use query::{logical::Value, Engine};
+use query::{Engine, logical::Value};
 
 /// SQL reserved words that cannot be used as identifiers
 const SQL_RESERVED_WORDS: &[&str] = &[

@@ -10,7 +10,7 @@ pub mod plan;
 pub mod planner;
 
 pub use plan::*;
-pub use planner::{plan, PlanError, PlanResult};
+pub use planner::{PlanError, PlanResult, plan};
 
 // Re-export IR types for use by sql-engine
 pub use ir::{
@@ -24,4 +24,4 @@ pub use ir::{
 pub use sql_parser::parse;
 
 // Datalog compilation
-pub use datalog::{compile_datalog, DatalogPlanError};
+pub use datalog::{DatalogPlanError, compile_datalog};

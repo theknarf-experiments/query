@@ -1,7 +1,7 @@
 //! SQL Parser implementation using Chumsky 0.9
 
-use chumsky::prelude::*;
 use chumsky::BoxedParser;
+use chumsky::prelude::*;
 
 use crate::ast::*;
 use crate::lexer::{Keyword, Span, Token};
@@ -1080,8 +1080,8 @@ fn subquery_select_parser() -> BoxedParser<'static, Token, SelectStatement, Simp
     subquery_select_parser_impl().boxed()
 }
 
-fn subquery_select_parser_impl(
-) -> impl Parser<Token, SelectStatement, Error = Simple<Token>> + Clone {
+fn subquery_select_parser_impl()
+-> impl Parser<Token, SelectStatement, Error = Simple<Token>> + Clone {
     let select_kw = just(Token::Keyword(Keyword::Select));
     let from_kw = just(Token::Keyword(Keyword::From));
     let where_kw = just(Token::Keyword(Keyword::Where));
@@ -1441,8 +1441,8 @@ fn literal_expr() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone {
 }
 
 /// Parse referential actions (ON DELETE/UPDATE)
-fn referential_action_parser(
-) -> impl Parser<Token, (ReferentialAction, ReferentialAction), Error = Simple<Token>> + Clone {
+fn referential_action_parser()
+-> impl Parser<Token, (ReferentialAction, ReferentialAction), Error = Simple<Token>> + Clone {
     let action = just(Token::Keyword(Keyword::Cascade))
         .to(ReferentialAction::Cascade)
         .or(just(Token::Keyword(Keyword::Restrict)).to(ReferentialAction::Restrict))
@@ -1911,7 +1911,7 @@ mod tests {
     #[test]
     fn test_parse_multiple_joins() {
         let result = parse(
-            "SELECT * FROM users JOIN orders ON users.id = orders.user_id JOIN items ON orders.id = items.order_id"
+            "SELECT * FROM users JOIN orders ON users.id = orders.user_id JOIN items ON orders.id = items.order_id",
         );
         assert!(result.is_ok());
         let stmt = result.unwrap();
@@ -2211,7 +2211,7 @@ mod tests {
     #[test]
     fn test_parse_full_query_with_group_by() {
         let result = parse(
-            "SELECT category, SUM(amount) AS total FROM orders WHERE active = 1 GROUP BY category HAVING SUM(amount) > 100 ORDER BY total DESC LIMIT 10"
+            "SELECT category, SUM(amount) AS total FROM orders WHERE active = 1 GROUP BY category HAVING SUM(amount) > 100 ORDER BY total DESC LIMIT 10",
         );
         assert!(result.is_ok());
         let stmt = result.unwrap();

@@ -3,7 +3,7 @@
 //! These tests simulate various failure scenarios to ensure the database
 //! handles them correctly.
 
-use query::{logical::Value, Engine, ExecError};
+use query::{Engine, ExecError, logical::Value};
 
 /// A deterministic random number generator for simulation
 struct SimRng {

@@ -7,11 +7,11 @@
 //! - Triggers with Datalog operations
 
 use query::{
-    logical::{
-        insert, update, FunctionDef, MemoryEngine, Runtime, RuntimeError, StorageEngine,
-        TriggerContext, TriggerDef, TriggerEvent, TriggerResult, TriggerTiming, Value,
-    },
     Engine, ExecError, QueryResult, SqlRuntime,
+    logical::{
+        FunctionDef, MemoryEngine, Runtime, RuntimeError, StorageEngine, TriggerContext,
+        TriggerDef, TriggerEvent, TriggerResult, TriggerTiming, Value, insert, update,
+    },
 };
 
 // ============================================================================

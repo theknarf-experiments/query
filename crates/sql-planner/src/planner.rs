@@ -182,10 +182,10 @@ fn cte_query_references_table(query: &CteQuery, table_name: &str) -> bool {
 /// Check if a SELECT statement references a given table name
 fn select_references_table(query: &SelectStatement, table_name: &str) -> bool {
     // Check FROM clause
-    if let Some(ref table_ref) = query.from {
-        if table_ref.name == table_name {
-            return true;
-        }
+    if let Some(ref table_ref) = query.from
+        && table_ref.name == table_name
+    {
+        return true;
     }
 
     // Check JOINs
@@ -196,10 +196,10 @@ fn select_references_table(query: &SelectStatement, table_name: &str) -> bool {
     }
 
     // Check subqueries in WHERE clause
-    if let Some(ref where_clause) = query.where_clause {
-        if expr_references_table(where_clause, table_name) {
-            return true;
-        }
+    if let Some(ref where_clause) = query.where_clause
+        && expr_references_table(where_clause, table_name)
+    {
+        return true;
     }
 
     // Check nested WITH clause
@@ -832,7 +832,7 @@ mod tests {
     #[test]
     fn test_plan_multiple_joins() {
         let result = plan_sql(
-            "SELECT * FROM users JOIN orders ON users.id = orders.user_id JOIN items ON orders.id = items.order_id"
+            "SELECT * FROM users JOIN orders ON users.id = orders.user_id JOIN items ON orders.id = items.order_id",
         );
         assert!(result.is_ok());
         let plan = result.unwrap();

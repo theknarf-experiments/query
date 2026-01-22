@@ -12,7 +12,7 @@ pub mod parser;
 pub use ast::*;
 
 // Re-export lexer types
-pub use lexer::{lexer, FloatBits, Keyword, LexError, LexResult, Span, Token};
+pub use lexer::{FloatBits, Keyword, LexError, LexResult, Span, Token, lexer};
 
 // Re-export parser types
-pub use parser::{parse, ParseError, ParseResult};
+pub use parser::{ParseError, ParseResult, parse};

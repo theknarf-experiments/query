@@ -26,11 +26,11 @@
 //! // }
 //! ```
 
-use crate::ir::{BinaryOp, Expr, JoinType, SetOperator};
 use crate::LogicalPlan;
+use crate::ir::{BinaryOp, Expr, JoinType, SetOperator};
 use datalog_planner::{
-    plan_program, Atom, Literal, PlannedRule, SafetyError, StratificationError, Symbol, Term,
-    Value as DatalogValue,
+    Atom, Literal, PlannedRule, SafetyError, StratificationError, Symbol, Term,
+    Value as DatalogValue, plan_program,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -157,11 +157,11 @@ fn find_recursive_predicates(
     for (pred, rules) in rules_by_predicate {
         for rule in rules {
             for literal in &rule.body {
-                if let Literal::Positive(atom) | Literal::Negative(atom) = literal {
-                    if atom.predicate == *pred {
-                        recursive.insert(*pred);
-                        break;
-                    }
+                if let Literal::Positive(atom) | Literal::Negative(atom) = literal
+                    && atom.predicate == *pred
+                {
+                    recursive.insert(*pred);
+                    break;
                 }
             }
         }

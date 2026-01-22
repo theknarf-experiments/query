@@ -361,10 +361,10 @@ impl SqlRuntime {
 
         Ok(rows.iter().any(|row| {
             // Skip if this row matches the OLD row exactly
-            if let Some(old) = old_row {
-                if row == old {
-                    return false;
-                }
+            if let Some(old) = old_row
+                && row == old
+            {
+                return false;
             }
 
             // Check if this row matches all WHERE conditions
@@ -594,10 +594,10 @@ fn extract_string_literal(text: &str, keyword: &str) -> Option<String> {
     if let Some(pos) = upper.find(&keyword_upper) {
         let rest = &text[pos + keyword.len()..].trim();
         // Look for quoted string
-        if let Some(stripped) = rest.strip_prefix('\'') {
-            if let Some(end) = stripped.find('\'') {
-                return Some(stripped[..end].to_string());
-            }
+        if let Some(stripped) = rest.strip_prefix('\'')
+            && let Some(end) = stripped.find('\'')
+        {
+            return Some(stripped[..end].to_string());
         }
     }
     None
@@ -628,14 +628,13 @@ fn parse_literal_value(s: &str, context: &TriggerContext) -> Result<Value, Runti
     // NEW.<column> reference
     if s.to_uppercase().starts_with("NEW.") {
         let col_name = &s[4..];
-        if let Some(new_row) = context.new_row {
-            if let Some(idx) = context
+        if let Some(new_row) = context.new_row
+            && let Some(idx) = context
                 .column_names
                 .iter()
                 .position(|c| c.eq_ignore_ascii_case(col_name))
-            {
-                return Ok(new_row.get(idx).cloned().unwrap_or(Value::Null));
-            }
+        {
+            return Ok(new_row.get(idx).cloned().unwrap_or(Value::Null));
         }
         return Ok(Value::Null);
     }
@@ -643,14 +642,13 @@ fn parse_literal_value(s: &str, context: &TriggerContext) -> Result<Value, Runti
     // OLD.<column> reference
     if s.to_uppercase().starts_with("OLD.") {
         let col_name = &s[4..];
-        if let Some(old_row) = context.old_row {
-            if let Some(idx) = context
+        if let Some(old_row) = context.old_row
+            && let Some(idx) = context
                 .column_names
                 .iter()
                 .position(|c| c.eq_ignore_ascii_case(col_name))
-            {
-                return Ok(old_row.get(idx).cloned().unwrap_or(Value::Null));
-            }
+        {
+            return Ok(old_row.get(idx).cloned().unwrap_or(Value::Null));
         }
         return Ok(Value::Null);
     }

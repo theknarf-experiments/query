@@ -1,8 +1,8 @@
 //! In-memory storage engine implementation
 
+use crate::Value;
 use crate::engine::{ColumnSchema, Row, StorageEngine, StorageError, StorageResult, TableSchema};
 use crate::metadata::{FunctionDef, TriggerDef, TriggerEvent, TriggerTiming};
-use crate::Value;
 use std::collections::HashMap;
 
 /// In-memory storage engine
@@ -660,8 +660,8 @@ fn value_hash(v: &Value) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{ColumnSchema, DataType, TableConstraint};
     use crate::Value;
+    use crate::engine::{ColumnSchema, DataType, TableConstraint};
 
     fn create_users_schema() -> TableSchema {
         TableSchema {

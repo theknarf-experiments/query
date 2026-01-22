@@ -2,7 +2,7 @@
 
 use crate::ir;
 use crate::plan::LogicalPlan;
-use crate::planner::{plan_select_core, PlanError};
+use crate::planner::{PlanError, plan_select_core};
 use sql_parser as ast;
 
 /// Convert parser Expr to IR Expr

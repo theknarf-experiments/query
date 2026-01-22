@@ -1,7 +1,7 @@
 //! Storage Engine trait definition
 
-use crate::metadata::{FunctionDef, TriggerDef, TriggerEvent, TriggerTiming};
 use crate::Value;
+use crate::metadata::{FunctionDef, TriggerDef, TriggerEvent, TriggerTiming};
 
 /// Result type for storage operations
 pub type StorageResult<T> = Result<T, StorageError>;

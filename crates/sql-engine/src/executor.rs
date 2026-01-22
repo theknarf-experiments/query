@@ -3,11 +3,11 @@
 use std::collections::HashMap;
 
 use logical::{
-    delete, insert, update, ColumnSchema, DataType as StorageDataType, ExportData, ForeignKeyRef,
-    FunctionDef, ImportData, JsonValue, MemoryEngine, OperationError,
-    ReferentialAction as StorageRefAction, Row, StorageEngine, StorageError,
-    TableConstraint as StorageTableConstraint, TableSchema, TriggerDef,
-    TriggerEvent as StorageTriggerEvent, TriggerTiming as StorageTriggerTiming, Value,
+    ColumnSchema, DataType as StorageDataType, ExportData, ForeignKeyRef, FunctionDef, ImportData,
+    JsonValue, MemoryEngine, OperationError, ReferentialAction as StorageRefAction, Row,
+    StorageEngine, StorageError, TableConstraint as StorageTableConstraint, TableSchema,
+    TriggerDef, TriggerEvent as StorageTriggerEvent, TriggerTiming as StorageTriggerTiming, Value,
+    delete, insert, update,
 };
 
 use crate::runtime::SqlRuntime;
@@ -791,8 +791,11 @@ impl Engine {
                 (
                     format!(
                         "IF EXISTS (SELECT 1 FROM {} WHERE {} = OLD.{}) THEN RAISE ERROR 'Cannot delete: referenced by {}({})'; RETURN OLD",
-                        fk.child_table, fk.child_column, fk.parent_column,
-                        fk.child_table, fk.child_column
+                        fk.child_table,
+                        fk.child_column,
+                        fk.parent_column,
+                        fk.child_table,
+                        fk.child_column
                     ),
                     StorageTriggerTiming::Before,
                 )
@@ -872,8 +875,11 @@ impl Engine {
                 (
                     format!(
                         "IF EXISTS (SELECT 1 FROM {} WHERE {} = OLD.{}) THEN RAISE ERROR 'Cannot update: referenced by {}({})'; RETURN NEW",
-                        fk.child_table, fk.child_column, fk.parent_column,
-                        fk.child_table, fk.child_column
+                        fk.child_table,
+                        fk.child_column,
+                        fk.parent_column,
+                        fk.child_table,
+                        fk.child_column
                     ),
                     StorageTriggerTiming::Before,
                 )
@@ -1552,12 +1558,11 @@ impl Engine {
                 match result {
                     QueryResult::Select { columns, rows } => {
                         // Handle SELECT *
-                        if exprs.len() == 1 {
-                            if let (Expr::Column(c), _) = &exprs[0] {
-                                if c == "*" {
-                                    return Ok(QueryResult::Select { columns, rows });
-                                }
-                            }
+                        if exprs.len() == 1
+                            && let (Expr::Column(c), _) = &exprs[0]
+                            && c == "*"
+                        {
+                            return Ok(QueryResult::Select { columns, rows });
                         }
 
                         // Check if any expression is an aggregate or window function
@@ -1629,11 +1634,7 @@ impl Engine {
                                 let val_a = eval_expr(&ob.expr, a, &columns);
                                 let val_b = eval_expr(&ob.expr, b, &columns);
                                 let cmp = compare_values(&val_a, &val_b);
-                                if ob.desc {
-                                    cmp.reverse()
-                                } else {
-                                    cmp
-                                }
+                                if ob.desc { cmp.reverse() } else { cmp }
                             });
                         }
                         Ok(QueryResult::Select { columns, rows })
@@ -1835,7 +1836,7 @@ impl Engine {
                     _ => {
                         return Err(ExecError::InvalidExpression(
                             "Recursive base must be a query".to_string(),
-                        ))
+                        ));
                     }
                 };
 
@@ -1865,7 +1866,7 @@ impl Engine {
                         _ => {
                             return Err(ExecError::InvalidExpression(
                                 "Recursive step must be a query".to_string(),
-                            ))
+                            ));
                         }
                     };
 
@@ -1943,7 +1944,7 @@ impl Engine {
                     _ => {
                         return Err(ExecError::InvalidExpression(
                             "Recursive base must be a query".to_string(),
-                        ))
+                        ));
                     }
                 };
 
@@ -1976,7 +1977,7 @@ impl Engine {
                         _ => {
                             return Err(ExecError::InvalidExpression(
                                 "Recursive step must be a query".to_string(),
-                            ))
+                            ));
                         }
                     };
 
@@ -2027,10 +2028,10 @@ impl Engine {
         // If we found an indexable condition, use it
         if let Some((column, value)) = index_cond {
             let lookup_value = eval_literal(&value);
-            if let Some(indices) = self.storage.index_lookup(&table, &column, &lookup_value) {
-                if let Ok(rows) = self.storage.get_rows_by_indices(&table, &indices) {
-                    return Some((table, rows, remaining));
-                }
+            if let Some(indices) = self.storage.index_lookup(&table, &column, &lookup_value)
+                && let Ok(rows) = self.storage.get_rows_by_indices(&table, &indices)
+            {
+                return Some((table, rows, remaining));
             }
         }
 
@@ -2052,16 +2053,18 @@ impl Engine {
                 right,
             } => {
                 // Check if left is column and right is literal, and column has index
-                if let Expr::Column(col) = left.as_ref() {
-                    if is_literal(right) && self.storage.has_index(table, col) {
-                        return (Some((col.clone(), *right.clone())), None);
-                    }
+                if let Expr::Column(col) = left.as_ref()
+                    && is_literal(right)
+                    && self.storage.has_index(table, col)
+                {
+                    return (Some((col.clone(), *right.clone())), None);
                 }
                 // Check if right is column and left is literal
-                if let Expr::Column(col) = right.as_ref() {
-                    if is_literal(left) && self.storage.has_index(table, col) {
-                        return (Some((col.clone(), *left.clone())), None);
-                    }
+                if let Expr::Column(col) = right.as_ref()
+                    && is_literal(left)
+                    && self.storage.has_index(table, col)
+                {
+                    return (Some((col.clone(), *left.clone())), None);
                 }
                 (None, Some(predicate.clone()))
             }
@@ -2144,12 +2147,11 @@ impl Engine {
             Expr::Aggregate { .. } => Value::Null,
             Expr::Subquery(plan) => {
                 // Execute the subquery (already planned) and return the first value
-                if let Ok(QueryResult::Select { rows, .. }) = self.execute_subquery(plan) {
-                    if let Some(first_row) = rows.first() {
-                        if let Some(first_val) = first_row.first() {
-                            return first_val.clone();
-                        }
-                    }
+                if let Ok(QueryResult::Select { rows, .. }) = self.execute_subquery(plan)
+                    && let Some(first_row) = rows.first()
+                    && let Some(first_val) = first_row.first()
+                {
+                    return first_val.clone();
                 }
                 Value::Null
             }

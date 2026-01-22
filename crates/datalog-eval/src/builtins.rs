@@ -18,29 +18,7 @@
 //! During grounding, built-ins are evaluated to filter or compute values.
 
 use crate::Substitution;
-use datalog_planner::{Atom, Term, Value};
-
-/// Comparison operators
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum CompOp {
-    Eq,  // =
-    Neq, // !=
-    Lt,  // <
-    Gt,  // >
-    Lte, // <=
-    Gte, // >=
-}
-
-/// Built-in predicates that can be evaluated directly
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum BuiltIn {
-    /// Arithmetic comparison: X = Y + Z, X < Y, etc.
-    Comparison(CompOp, Term, Term),
-    /// True (always succeeds)
-    True,
-    /// Fail (always fails)
-    Fail,
-}
+use datalog_planner::{BuiltIn, ComparisonOp, Term, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Numeric {
@@ -195,7 +173,7 @@ pub fn eval_arith(term: &Term, subst: &Substitution) -> Option<Value> {
 /// Returns true if the comparison holds, false otherwise
 /// Returns None if terms cannot be evaluated
 pub fn eval_comparison(
-    op: &CompOp,
+    op: &ComparisonOp,
     left: &Term,
     right: &Term,
     subst: &Substitution,
@@ -208,27 +186,27 @@ pub fn eval_comparison(
     let (left_num, right_num) = Numeric::promote(left_num, right_num);
 
     let result = match op {
-        CompOp::Eq => match (left_num, right_num) {
+        ComparisonOp::Equal => match (left_num, right_num) {
             (Numeric::Int(l), Numeric::Int(r)) => l == r,
             (l, r) => l.to_f64() == r.to_f64(),
         },
-        CompOp::Neq => match (left_num, right_num) {
+        ComparisonOp::NotEqual => match (left_num, right_num) {
             (Numeric::Int(l), Numeric::Int(r)) => l != r,
             (l, r) => l.to_f64() != r.to_f64(),
         },
-        CompOp::Lt => match (left_num, right_num) {
+        ComparisonOp::LessThan => match (left_num, right_num) {
             (Numeric::Int(l), Numeric::Int(r)) => l < r,
             (l, r) => l.to_f64() < r.to_f64(),
         },
-        CompOp::Gt => match (left_num, right_num) {
+        ComparisonOp::GreaterThan => match (left_num, right_num) {
             (Numeric::Int(l), Numeric::Int(r)) => l > r,
             (l, r) => l.to_f64() > r.to_f64(),
         },
-        CompOp::Lte => match (left_num, right_num) {
+        ComparisonOp::LessOrEqual => match (left_num, right_num) {
             (Numeric::Int(l), Numeric::Int(r)) => l <= r,
             (l, r) => l.to_f64() <= r.to_f64(),
         },
-        CompOp::Gte => match (left_num, right_num) {
+        ComparisonOp::GreaterOrEqual => match (left_num, right_num) {
             (Numeric::Int(l), Numeric::Int(r)) => l >= r,
             (l, r) => l.to_f64() >= r.to_f64(),
         },
@@ -244,48 +222,6 @@ pub fn eval_builtin(builtin: &BuiltIn, subst: &Substitution) -> Option<bool> {
         BuiltIn::Comparison(op, left, right) => eval_comparison(op, left, right, subst),
         BuiltIn::True => Some(true),
         BuiltIn::Fail => Some(false),
-    }
-}
-
-/// Parse an atom as a potential built-in predicate
-/// Returns Some(BuiltIn) if this is a built-in, None otherwise
-pub fn parse_builtin(atom: &Atom) -> Option<BuiltIn> {
-    let pred = atom.predicate.as_ref().as_str();
-
-    match pred {
-        "=" if atom.terms.len() == 2 => Some(BuiltIn::Comparison(
-            CompOp::Eq,
-            atom.terms[0].clone(),
-            atom.terms[1].clone(),
-        )),
-        "!=" | "\\=" if atom.terms.len() == 2 => Some(BuiltIn::Comparison(
-            CompOp::Neq,
-            atom.terms[0].clone(),
-            atom.terms[1].clone(),
-        )),
-        "<" if atom.terms.len() == 2 => Some(BuiltIn::Comparison(
-            CompOp::Lt,
-            atom.terms[0].clone(),
-            atom.terms[1].clone(),
-        )),
-        ">" if atom.terms.len() == 2 => Some(BuiltIn::Comparison(
-            CompOp::Gt,
-            atom.terms[0].clone(),
-            atom.terms[1].clone(),
-        )),
-        "<=" | "=<" if atom.terms.len() == 2 => Some(BuiltIn::Comparison(
-            CompOp::Lte,
-            atom.terms[0].clone(),
-            atom.terms[1].clone(),
-        )),
-        ">=" if atom.terms.len() == 2 => Some(BuiltIn::Comparison(
-            CompOp::Gte,
-            atom.terms[0].clone(),
-            atom.terms[1].clone(),
-        )),
-        "true" if atom.terms.is_empty() => Some(BuiltIn::True),
-        "fail" | "false" if atom.terms.is_empty() => Some(BuiltIn::Fail),
-        _ => None, // Not a built-in
     }
 }
 
@@ -361,39 +297,26 @@ mod tests {
         let subst = Substitution::new();
 
         assert_eq!(
-            eval_comparison(&CompOp::Lt, &int_term(3), &int_term(5), &subst),
+            eval_comparison(&ComparisonOp::LessThan, &int_term(3), &int_term(5), &subst),
             Some(true)
         );
         assert_eq!(
-            eval_comparison(&CompOp::Gt, &int_term(3), &int_term(5), &subst),
+            eval_comparison(
+                &ComparisonOp::GreaterThan,
+                &int_term(3),
+                &int_term(5),
+                &subst
+            ),
             Some(false)
         );
         assert_eq!(
-            eval_comparison(&CompOp::Eq, &int_term(5), &int_term(5), &subst),
+            eval_comparison(&ComparisonOp::Equal, &int_term(5), &int_term(5), &subst),
             Some(true)
         );
         assert_eq!(
-            eval_comparison(&CompOp::Neq, &int_term(3), &int_term(5), &subst),
+            eval_comparison(&ComparisonOp::NotEqual, &int_term(3), &int_term(5), &subst),
             Some(true)
         );
-    }
-
-    #[test]
-    fn test_parse_builtin() {
-        let lt_atom = Atom {
-            predicate: sym("<"),
-            terms: vec![int_term(3), int_term(5)],
-        };
-
-        let builtin = parse_builtin(&lt_atom);
-        assert!(builtin.is_some());
-
-        let non_builtin_atom = Atom {
-            predicate: sym("parent"),
-            terms: vec![var_term("X"), var_term("Y")],
-        };
-
-        assert!(parse_builtin(&non_builtin_atom).is_none());
     }
 
     // ===== Additional Arithmetic Tests =====
@@ -492,11 +415,11 @@ mod tests {
     fn test_eval_comparison_equal_integers() {
         let subst = Substitution::new();
         assert_eq!(
-            eval_comparison(&CompOp::Eq, &int_term(5), &int_term(5), &subst),
+            eval_comparison(&ComparisonOp::Equal, &int_term(5), &int_term(5), &subst),
             Some(true)
         );
         assert_eq!(
-            eval_comparison(&CompOp::Eq, &int_term(5), &int_term(3), &subst),
+            eval_comparison(&ComparisonOp::Equal, &int_term(5), &int_term(3), &subst),
             Some(false)
         );
     }
@@ -505,15 +428,15 @@ mod tests {
     fn test_eval_comparison_less_than() {
         let subst = Substitution::new();
         assert_eq!(
-            eval_comparison(&CompOp::Lt, &int_term(3), &int_term(5), &subst),
+            eval_comparison(&ComparisonOp::LessThan, &int_term(3), &int_term(5), &subst),
             Some(true)
         );
         assert_eq!(
-            eval_comparison(&CompOp::Lt, &int_term(5), &int_term(3), &subst),
+            eval_comparison(&ComparisonOp::LessThan, &int_term(5), &int_term(3), &subst),
             Some(false)
         );
         assert_eq!(
-            eval_comparison(&CompOp::Lt, &int_term(5), &int_term(5), &subst),
+            eval_comparison(&ComparisonOp::LessThan, &int_term(5), &int_term(5), &subst),
             Some(false)
         );
     }
@@ -522,11 +445,21 @@ mod tests {
     fn test_eval_comparison_greater_than() {
         let subst = Substitution::new();
         assert_eq!(
-            eval_comparison(&CompOp::Gt, &int_term(5), &int_term(3), &subst),
+            eval_comparison(
+                &ComparisonOp::GreaterThan,
+                &int_term(5),
+                &int_term(3),
+                &subst
+            ),
             Some(true)
         );
         assert_eq!(
-            eval_comparison(&CompOp::Gt, &int_term(3), &int_term(5), &subst),
+            eval_comparison(
+                &ComparisonOp::GreaterThan,
+                &int_term(3),
+                &int_term(5),
+                &subst
+            ),
             Some(false)
         );
     }
@@ -535,15 +468,30 @@ mod tests {
     fn test_eval_comparison_less_or_equal() {
         let subst = Substitution::new();
         assert_eq!(
-            eval_comparison(&CompOp::Lte, &int_term(3), &int_term(5), &subst),
+            eval_comparison(
+                &ComparisonOp::LessOrEqual,
+                &int_term(3),
+                &int_term(5),
+                &subst
+            ),
             Some(true)
         );
         assert_eq!(
-            eval_comparison(&CompOp::Lte, &int_term(5), &int_term(5), &subst),
+            eval_comparison(
+                &ComparisonOp::LessOrEqual,
+                &int_term(5),
+                &int_term(5),
+                &subst
+            ),
             Some(true)
         );
         assert_eq!(
-            eval_comparison(&CompOp::Lte, &int_term(6), &int_term(5), &subst),
+            eval_comparison(
+                &ComparisonOp::LessOrEqual,
+                &int_term(6),
+                &int_term(5),
+                &subst
+            ),
             Some(false)
         );
     }
@@ -552,15 +500,30 @@ mod tests {
     fn test_eval_comparison_greater_or_equal() {
         let subst = Substitution::new();
         assert_eq!(
-            eval_comparison(&CompOp::Gte, &int_term(5), &int_term(3), &subst),
+            eval_comparison(
+                &ComparisonOp::GreaterOrEqual,
+                &int_term(5),
+                &int_term(3),
+                &subst
+            ),
             Some(true)
         );
         assert_eq!(
-            eval_comparison(&CompOp::Gte, &int_term(5), &int_term(5), &subst),
+            eval_comparison(
+                &ComparisonOp::GreaterOrEqual,
+                &int_term(5),
+                &int_term(5),
+                &subst
+            ),
             Some(true)
         );
         assert_eq!(
-            eval_comparison(&CompOp::Gte, &int_term(4), &int_term(5), &subst),
+            eval_comparison(
+                &ComparisonOp::GreaterOrEqual,
+                &int_term(4),
+                &int_term(5),
+                &subst
+            ),
             Some(false)
         );
     }
@@ -572,7 +535,7 @@ mod tests {
         let left = Term::Compound(sym("+"), vec![int_term(3), int_term(4)]);
         let right = int_term(7);
         assert_eq!(
-            eval_comparison(&CompOp::Eq, &left, &right, &subst),
+            eval_comparison(&ComparisonOp::Equal, &left, &right, &subst),
             Some(true)
         );
     }
@@ -581,15 +544,30 @@ mod tests {
     fn test_eval_comparison_float_semantics() {
         let subst = Substitution::new();
         assert_eq!(
-            eval_comparison(&CompOp::Eq, &float_term(2.5), &float_term(2.5), &subst),
+            eval_comparison(
+                &ComparisonOp::Equal,
+                &float_term(2.5),
+                &float_term(2.5),
+                &subst
+            ),
             Some(true)
         );
         assert_eq!(
-            eval_comparison(&CompOp::Gt, &float_term(3.1), &float_term(3.0), &subst),
+            eval_comparison(
+                &ComparisonOp::GreaterThan,
+                &float_term(3.1),
+                &float_term(3.0),
+                &subst
+            ),
             Some(true)
         );
         assert_eq!(
-            eval_comparison(&CompOp::Lt, &float_term(3.1), &float_term(3.0), &subst),
+            eval_comparison(
+                &ComparisonOp::LessThan,
+                &float_term(3.1),
+                &float_term(3.0),
+                &subst
+            ),
             Some(false)
         );
     }
@@ -598,143 +576,51 @@ mod tests {
     fn test_eval_comparison_mixed_numeric_types() {
         let subst = Substitution::new();
         assert_eq!(
-            eval_comparison(&CompOp::Eq, &int_term(5), &float_term(5.0), &subst),
+            eval_comparison(&ComparisonOp::Equal, &int_term(5), &float_term(5.0), &subst),
             Some(true)
         );
         assert_eq!(
-            eval_comparison(&CompOp::Lt, &int_term(4), &float_term(4.1), &subst),
+            eval_comparison(
+                &ComparisonOp::LessThan,
+                &int_term(4),
+                &float_term(4.1),
+                &subst
+            ),
             Some(true)
         );
         assert_eq!(
-            eval_comparison(&CompOp::Gt, &float_term(6.2), &int_term(6), &subst),
+            eval_comparison(
+                &ComparisonOp::GreaterThan,
+                &float_term(6.2),
+                &int_term(6),
+                &subst
+            ),
             Some(true)
         );
-    }
-
-    // ===== Parse Builtin Tests =====
-
-    #[test]
-    fn test_parse_builtin_comparison_operators() {
-        // Equal
-        let eq_atom = Atom {
-            predicate: sym("="),
-            terms: vec![int_term(5), int_term(5)],
-        };
-        assert!(parse_builtin(&eq_atom).is_some());
-
-        // Not equal (!=)
-        let neq_atom = Atom {
-            predicate: sym("!="),
-            terms: vec![int_term(3), int_term(5)],
-        };
-        assert!(parse_builtin(&neq_atom).is_some());
-
-        // Not equal (\=)
-        let neq_atom2 = Atom {
-            predicate: sym("\\="),
-            terms: vec![int_term(3), int_term(5)],
-        };
-        assert!(parse_builtin(&neq_atom2).is_some());
-
-        // Less than or equal (<=)
-        let lte_atom = Atom {
-            predicate: sym("<="),
-            terms: vec![int_term(3), int_term(5)],
-        };
-        assert!(parse_builtin(&lte_atom).is_some());
-
-        // Less than or equal (=<)
-        let lte_atom2 = Atom {
-            predicate: sym("=<"),
-            terms: vec![int_term(3), int_term(5)],
-        };
-        assert!(parse_builtin(&lte_atom2).is_some());
-
-        // Greater than or equal
-        let gte_atom = Atom {
-            predicate: sym(">="),
-            terms: vec![int_term(5), int_term(3)],
-        };
-        assert!(parse_builtin(&gte_atom).is_some());
-    }
-
-    #[test]
-    fn test_parse_builtin_not_builtin() {
-        let atom = Atom {
-            predicate: sym("parent"),
-            terms: vec![
-                Term::Constant(Value::Atom(sym("john"))),
-                Term::Constant(Value::Atom(sym("mary"))),
-            ],
-        };
-        assert!(parse_builtin(&atom).is_none());
-    }
-
-    #[test]
-    fn test_parse_and_eval_ground_comparison() {
-        // Test that we can parse and evaluate a ground comparison like "5 > 3"
-        let atom = Atom {
-            predicate: sym(">"),
-            terms: vec![int_term(5), int_term(3)],
-        };
-
-        let builtin = parse_builtin(&atom).expect("Should parse as built-in");
-        let subst = Substitution::new();
-        let result = eval_builtin(&builtin, &subst);
-
-        assert_eq!(result, Some(true));
-    }
-
-    #[test]
-    fn test_parse_and_eval_ground_comparison_false() {
-        let atom = Atom {
-            predicate: sym(">"),
-            terms: vec![int_term(3), int_term(5)],
-        };
-
-        let builtin = parse_builtin(&atom).expect("Should parse as built-in");
-        let subst = Substitution::new();
-        let result = eval_builtin(&builtin, &subst);
-
-        assert_eq!(result, Some(false));
     }
 
     // ===== Built-in Special Values Tests =====
 
     #[test]
-    fn test_parse_builtin_true() {
-        let atom = Atom {
-            predicate: sym("true"),
-            terms: vec![],
-        };
-        let builtin = parse_builtin(&atom);
-        assert!(matches!(builtin, Some(BuiltIn::True)));
-
+    fn test_eval_builtin_true() {
         let subst = Substitution::new();
         assert_eq!(eval_builtin(&BuiltIn::True, &subst), Some(true));
     }
 
     #[test]
-    fn test_parse_builtin_fail() {
-        let atom = Atom {
-            predicate: sym("fail"),
-            terms: vec![],
-        };
-        let builtin = parse_builtin(&atom);
-        assert!(matches!(builtin, Some(BuiltIn::Fail)));
-
+    fn test_eval_builtin_fail() {
         let subst = Substitution::new();
         assert_eq!(eval_builtin(&BuiltIn::Fail, &subst), Some(false));
     }
 
     #[test]
-    fn test_parse_builtin_false() {
-        let atom = Atom {
-            predicate: sym("false"),
-            terms: vec![],
-        };
-        let builtin = parse_builtin(&atom);
-        assert!(matches!(builtin, Some(BuiltIn::Fail)));
+    fn test_eval_builtin_comparison() {
+        let subst = Substitution::new();
+        let builtin = BuiltIn::Comparison(ComparisonOp::GreaterThan, int_term(5), int_term(3));
+        assert_eq!(eval_builtin(&builtin, &subst), Some(true));
+
+        let builtin = BuiltIn::Comparison(ComparisonOp::GreaterThan, int_term(3), int_term(5));
+        assert_eq!(eval_builtin(&builtin, &subst), Some(false));
     }
 
     // ===== Comparison with Variables Tests =====
@@ -746,11 +632,21 @@ mod tests {
         subst.bind(sym("Y"), int_term(5));
 
         assert_eq!(
-            eval_comparison(&CompOp::Gt, &var_term("X"), &var_term("Y"), &subst),
+            eval_comparison(
+                &ComparisonOp::GreaterThan,
+                &var_term("X"),
+                &var_term("Y"),
+                &subst
+            ),
             Some(true)
         );
         assert_eq!(
-            eval_comparison(&CompOp::Lt, &var_term("X"), &var_term("Y"), &subst),
+            eval_comparison(
+                &ComparisonOp::LessThan,
+                &var_term("X"),
+                &var_term("Y"),
+                &subst
+            ),
             Some(false)
         );
     }
@@ -760,7 +656,12 @@ mod tests {
         let subst = Substitution::new();
         // X is unbound
         assert_eq!(
-            eval_comparison(&CompOp::Lt, &var_term("X"), &int_term(5), &subst),
+            eval_comparison(
+                &ComparisonOp::LessThan,
+                &var_term("X"),
+                &int_term(5),
+                &subst
+            ),
             None
         );
     }

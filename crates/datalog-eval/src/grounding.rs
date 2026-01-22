@@ -170,54 +170,31 @@ where
 
     match literal {
         Literal::Positive(atom) => {
-            if let Some(builtin) = builtins::parse_builtin(atom) {
-                // Built-ins act as filters - evaluate them after satisfying the rest.
-                let rest_substs = satisfy_body_with_selector_recursive(
-                    body,
-                    full_db,
-                    storage,
-                    delta,
-                    selector,
-                    index + 1,
-                    current_subst,
-                );
-                let mut result = Vec::new();
+            // Apply the current substitution to the atom before querying.
+            let grounded_atom = current_subst.apply_atom(atom);
+            let db = match selector(index, literal) {
+                DatabaseSelection::Full => full_db,
+                DatabaseSelection::Delta => delta.unwrap_or(full_db),
+            };
+            let mut result = Vec::new();
 
-                for subst in rest_substs {
-                    let applied_builtin = apply_subst_to_builtin(&subst, &builtin);
-                    if let Some(true) = builtins::eval_builtin(&applied_builtin, &subst) {
-                        result.push(subst);
-                    }
+            let rows = db.query(&grounded_atom, storage);
+            for atom_subst in unify_rows_with_pattern(&grounded_atom, &rows) {
+                if let Some(combined) = combine_substs(current_subst, &atom_subst) {
+                    let mut rest_results = satisfy_body_with_selector_recursive(
+                        body,
+                        full_db,
+                        storage,
+                        delta,
+                        selector,
+                        index + 1,
+                        &combined,
+                    );
+                    result.append(&mut rest_results);
                 }
-
-                result
-            } else {
-                // Apply the current substitution to the atom before querying.
-                let grounded_atom = current_subst.apply_atom(atom);
-                let db = match selector(index, literal) {
-                    DatabaseSelection::Full => full_db,
-                    DatabaseSelection::Delta => delta.unwrap_or(full_db),
-                };
-                let mut result = Vec::new();
-
-                let rows = db.query(&grounded_atom, storage);
-                for atom_subst in unify_rows_with_pattern(&grounded_atom, &rows) {
-                    if let Some(combined) = combine_substs(current_subst, &atom_subst) {
-                        let mut rest_results = satisfy_body_with_selector_recursive(
-                            body,
-                            full_db,
-                            storage,
-                            delta,
-                            selector,
-                            index + 1,
-                            &combined,
-                        );
-                        result.append(&mut rest_results);
-                    }
-                }
-
-                result
             }
+
+            result
         }
         Literal::Negative(atom) => {
             // Negation filters substitutions produced by the rest of the body.
@@ -258,8 +235,7 @@ where
                 // Evaluate the comparison with the substitution
                 let left = subst.apply(&comp.left);
                 let right = subst.apply(&comp.right);
-                let builtin =
-                    builtins::BuiltIn::Comparison(comp_op_to_builtin(&comp.op), left, right);
+                let builtin = BuiltIn::Comparison(comp.op, left, right);
                 if let Some(true) = builtins::eval_builtin(&builtin, &subst) {
                     result.push(subst);
                 }
@@ -281,40 +257,14 @@ where
             let mut result = Vec::new();
 
             for subst in rest_substs {
-                let eval_builtin = ir_builtin_to_eval_builtin(builtin, &subst);
-                if let Some(true) = builtins::eval_builtin(&eval_builtin, &subst) {
+                let applied = apply_subst_to_builtin(builtin, &subst);
+                if let Some(true) = builtins::eval_builtin(&applied, &subst) {
                     result.push(subst);
                 }
             }
 
             result
         }
-    }
-}
-
-/// Convert AST comparison op to builtins comparison op
-fn comp_op_to_builtin(op: &datalog_planner::ComparisonOp) -> builtins::CompOp {
-    use datalog_planner::ComparisonOp;
-    match op {
-        ComparisonOp::Equal => builtins::CompOp::Eq,
-        ComparisonOp::NotEqual => builtins::CompOp::Neq,
-        ComparisonOp::LessThan => builtins::CompOp::Lt,
-        ComparisonOp::LessOrEqual => builtins::CompOp::Lte,
-        ComparisonOp::GreaterThan => builtins::CompOp::Gt,
-        ComparisonOp::GreaterOrEqual => builtins::CompOp::Gte,
-    }
-}
-
-/// Convert IR BuiltIn to eval builtins::BuiltIn, applying substitution
-fn ir_builtin_to_eval_builtin(builtin: &BuiltIn, subst: &Substitution) -> builtins::BuiltIn {
-    match builtin {
-        BuiltIn::Comparison(op, left, right) => builtins::BuiltIn::Comparison(
-            comp_op_to_builtin(op),
-            subst.apply(left),
-            subst.apply(right),
-        ),
-        BuiltIn::True => builtins::BuiltIn::True,
-        BuiltIn::Fail => builtins::BuiltIn::Fail,
     }
 }
 
@@ -364,13 +314,13 @@ fn term_is_ground(term: &Term) -> bool {
 }
 
 /// Apply substitution to a built-in predicate
-fn apply_subst_to_builtin(subst: &Substitution, builtin: &builtins::BuiltIn) -> builtins::BuiltIn {
+fn apply_subst_to_builtin(builtin: &BuiltIn, subst: &Substitution) -> BuiltIn {
     match builtin {
-        builtins::BuiltIn::Comparison(op, left, right) => {
-            builtins::BuiltIn::Comparison(op.clone(), subst.apply(left), subst.apply(right))
+        BuiltIn::Comparison(op, left, right) => {
+            BuiltIn::Comparison(*op, subst.apply(left), subst.apply(right))
         }
-        builtins::BuiltIn::True => builtins::BuiltIn::True,
-        builtins::BuiltIn::Fail => builtins::BuiltIn::Fail,
+        BuiltIn::True => BuiltIn::True,
+        BuiltIn::Fail => BuiltIn::Fail,
     }
 }
 
@@ -413,10 +363,7 @@ fn satisfy_body_mixed<S: StorageEngine>(
     satisfy_body_with_selector(body, full_db, storage, Some(delta), &|index, literal| {
         if index == delta_pos {
             match literal {
-                // Builtins (either pre-classified or detected at runtime) don't use delta
-                Literal::Positive(atom) if builtins::parse_builtin(atom).is_some() => {
-                    DatabaseSelection::Full
-                }
+                // Builtins don't use delta - they're filters, not database lookups
                 Literal::BuiltIn(_) => DatabaseSelection::Full,
                 Literal::Positive(_) => DatabaseSelection::Delta,
                 Literal::Negative(_) => DatabaseSelection::Full,
@@ -500,54 +447,33 @@ fn satisfy_body_with_delta_recursive<S: StorageEngine>(
 
     match literal {
         Literal::Positive(atom) => {
-            if let Some(builtin) = builtins::parse_builtin(atom) {
-                // Built-ins act as filters - evaluate after satisfying the rest
-                let rest_substs = satisfy_body_with_delta_recursive(
-                    body,
-                    delta,
-                    full_db,
-                    storage,
-                    delta_pos,
-                    index + 1,
-                    current_subst,
-                );
-                let mut result = Vec::new();
-                for subst in rest_substs {
-                    let applied_builtin = apply_subst_to_builtin(&subst, &builtin);
-                    if let Some(true) = builtins::eval_builtin(&applied_builtin, &subst) {
-                        result.push(subst);
-                    }
-                }
-                result
+            // Apply the current substitution to the atom before querying
+            let grounded_atom = current_subst.apply_atom(atom);
+
+            // Choose data source: delta for this position, full_db for others
+            let matches: Vec<Substitution> = if index == delta_pos {
+                delta.query(&grounded_atom) // In-memory query (already returns Substitutions)
             } else {
-                // Apply the current substitution to the atom before querying
-                let grounded_atom = current_subst.apply_atom(atom);
+                let rows = full_db.query(&grounded_atom, storage);
+                unify_rows_with_pattern(&grounded_atom, &rows)
+            };
 
-                // Choose data source: delta for this position, full_db for others
-                let matches: Vec<Substitution> = if index == delta_pos {
-                    delta.query(&grounded_atom) // In-memory query (already returns Substitutions)
-                } else {
-                    let rows = full_db.query(&grounded_atom, storage);
-                    unify_rows_with_pattern(&grounded_atom, &rows)
-                };
-
-                let mut result = Vec::new();
-                for atom_subst in matches {
-                    if let Some(combined) = combine_substs(current_subst, &atom_subst) {
-                        let mut rest_results = satisfy_body_with_delta_recursive(
-                            body,
-                            delta,
-                            full_db,
-                            storage,
-                            delta_pos,
-                            index + 1,
-                            &combined,
-                        );
-                        result.append(&mut rest_results);
-                    }
+            let mut result = Vec::new();
+            for atom_subst in matches {
+                if let Some(combined) = combine_substs(current_subst, &atom_subst) {
+                    let mut rest_results = satisfy_body_with_delta_recursive(
+                        body,
+                        delta,
+                        full_db,
+                        storage,
+                        delta_pos,
+                        index + 1,
+                        &combined,
+                    );
+                    result.append(&mut rest_results);
                 }
-                result
             }
+            result
         }
         Literal::Negative(atom) => {
             // Negation always checks against full database (stratification ensures safety)
@@ -584,8 +510,7 @@ fn satisfy_body_with_delta_recursive<S: StorageEngine>(
             for subst in rest_substs {
                 let left = subst.apply(&comp.left);
                 let right = subst.apply(&comp.right);
-                let builtin =
-                    builtins::BuiltIn::Comparison(comp_op_to_builtin(&comp.op), left, right);
+                let builtin = BuiltIn::Comparison(comp.op, left, right);
                 if let Some(true) = builtins::eval_builtin(&builtin, &subst) {
                     result.push(subst);
                 }
@@ -605,8 +530,8 @@ fn satisfy_body_with_delta_recursive<S: StorageEngine>(
             );
             let mut result = Vec::new();
             for subst in rest_substs {
-                let eval_builtin = ir_builtin_to_eval_builtin(builtin, &subst);
-                if let Some(true) = builtins::eval_builtin(&eval_builtin, &subst) {
+                let applied = apply_subst_to_builtin(builtin, &subst);
+                if let Some(true) = builtins::eval_builtin(&applied, &subst) {
                     result.push(subst);
                 }
             }
@@ -618,7 +543,7 @@ fn satisfy_body_with_delta_recursive<S: StorageEngine>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datalog_planner::{Atom, Rule, Symbol, Value};
+    use datalog_planner::{Atom, ComparisonOp, Rule, Symbol, Value};
     use logical::NoOpRuntime;
     use storage::MemoryEngine;
 
@@ -1998,10 +1923,11 @@ mod tests {
             make_atom("large", vec![var_term("X")]),
             vec![
                 Literal::Positive(make_atom("number", vec![var_term("X")])),
-                Literal::Positive(Atom {
-                    predicate: sym(">"),
-                    terms: vec![var_term("X"), int_term(5)],
-                }),
+                Literal::BuiltIn(BuiltIn::Comparison(
+                    ComparisonOp::GreaterThan,
+                    var_term("X"),
+                    int_term(5),
+                )),
             ],
         );
 
@@ -2063,10 +1989,11 @@ mod tests {
             make_atom("small", vec![var_term("X")]),
             vec![
                 Literal::Positive(make_atom("val", vec![var_term("X")])),
-                Literal::Positive(Atom {
-                    predicate: sym("<"),
-                    terms: vec![var_term("X"), int_term(6)],
-                }),
+                Literal::BuiltIn(BuiltIn::Comparison(
+                    ComparisonOp::LessThan,
+                    var_term("X"),
+                    int_term(6),
+                )),
             ],
         );
 
@@ -2091,10 +2018,11 @@ mod tests {
             make_atom("five", vec![var_term("X")]),
             vec![
                 Literal::Positive(make_atom("num", vec![var_term("X")])),
-                Literal::Positive(Atom {
-                    predicate: sym("="),
-                    terms: vec![var_term("X"), int_term(5)],
-                }),
+                Literal::BuiltIn(BuiltIn::Comparison(
+                    ComparisonOp::Equal,
+                    var_term("X"),
+                    int_term(5),
+                )),
             ],
         );
 
@@ -2229,10 +2157,11 @@ mod tests {
             make_atom("not_five", vec![var_term("X")]),
             vec![
                 Literal::Positive(make_atom("val", vec![var_term("X")])),
-                Literal::Positive(Atom {
-                    predicate: sym("!="),
-                    terms: vec![var_term("X"), int_term(5)],
-                }),
+                Literal::BuiltIn(BuiltIn::Comparison(
+                    ComparisonOp::NotEqual,
+                    var_term("X"),
+                    int_term(5),
+                )),
             ],
         );
 

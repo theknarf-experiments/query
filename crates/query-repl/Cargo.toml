@@ -1,0 +1,19 @@
+[package]
+name = "query-repl"
+version = "0.1.0"
+edition = "2024"
+description = "Interactive REPL for the Query engine"
+
+[[bin]]
+name = "query-repl"
+path = "src/main.rs"
+
+[dependencies]
+query = { path = "../query" }
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Error handling
+anyhow = "1.0"

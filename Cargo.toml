@@ -16,6 +16,7 @@ members = [
     "crates/datalog-eval",
     # Top-level query engine crate
     "crates/query",
+    "crates/query-repl",
     "crates/sql-tests",
 ]
 
